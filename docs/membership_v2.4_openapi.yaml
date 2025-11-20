@@ -1,0 +1,3329 @@
+openapi: 3.0.3
+info:
+  title: 成员管理系统 API
+  version: 2.4.0
+  description: |
+    多组织/多层级成员管理系统v2.4的接口定义。
+
+    **v2.4重点说明**：
+    - 审计链路升级至 Outbox + Kafka + MongoDB + CDC，实现统一通用审计
+    - 接口契约与 v2.3 保持一致，客户端无需调整调用参数
+    - `/audit/logs` 查询现由 MongoDB 提供数据，仍遵循原返回结构
+
+    **v2.3核心改进回顾**：
+    - 访问控制简化：统一三主体模型，删除Position系列表
+    - rwx位图权限：支持高效JWT权限传递
+    - 多语言简化：主表单语言+可选翻译表
+    - AI Agent同构：虚拟成员与真实成员统一治理
+servers:
+- url: https://api.example.com
+  description: 生产环境
+- url: https://staging-api.example.com
+  description: 预发布环境
+- url: http://localhost:8080
+  description: 开发环境
+tags:
+- name: Auth
+  description: 认证与令牌
+- name: Members
+  description: 成员（含虚拟成员）
+- name: Roles
+  description: 角色与授权
+- name: Permissions
+  description: 权限点
+- name: Orgs
+  description: 组织单元与层级
+- name: Authz
+  description: 鉴权检查
+- name: Resources
+  description: 资源管理
+- name: Agents
+  description: AI Agent专属功能
+- name: I18n
+  description: 多语言翻译管理
+- name: Settings
+  description: 系统配置管理
+- name: Audit
+  description: 审计日志
+security:
+- bearerAuth: []
+- apiKeyAuth: []
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+  parameters:
+    TenantId:
+      name: X-Tenant-ID
+      in: header
+      required: false
+      description: 租户ID
+      schema:
+        type: integer
+        format: int64
+    OrgIdQuery:
+      name: org_id
+      in: query
+      schema:
+        type: integer
+        format: int64
+      description: 组织ID（用于范围限定）
+    Page:
+      name: page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    PageSize:
+      name: page_size
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 20
+    Language:
+      name: lang
+      in: query
+      schema:
+        type: string
+        default: zh
+      description: 语言代码（zh, en, ja, ko, fr, de, es, ru等）
+    AcceptLanguage:
+      name: Accept-Language
+      in: header
+      schema:
+        type: string
+        default: zh
+      description: 语言偏好（zh/en/ja等），用于翻译覆盖
+  schemas:
+    Error:
+      type: object
+      required:
+      - error_code
+      - error_message
+      properties:
+        error_code:
+          type: string
+        error_message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+    LoginResponse:
+      type: object
+      properties:
+        username:
+          type: string
+          nullable: true
+        access_token:
+          type: string
+          nullable: true
+        refresh_token:
+          type: string
+          nullable: true
+        token_type:
+          type: string
+        expires_in:
+          type: integer
+        member_id:
+          type: integer
+          nullable: true
+        full_name:
+          type: string
+          nullable: true
+        device_id:
+          type: string
+          nullable: true
+        auto_login_token:
+          type: string
+          nullable: true
+        error_code:
+          type: string
+          nullable: true
+        error_message:
+          type: string
+          nullable: true
+    PageMeta:
+      type: object
+      properties:
+        page:
+          type: integer
+        page_size:
+          type: integer
+        total:
+          type: integer
+        total_pages:
+          type: integer
+    Member:
+      type: object
+      required:
+      - id
+      - status
+      - isVirtual
+      - createdAt
+      - updatedAt
+      - email
+      properties:
+        id:
+          type: integer
+          format: int64
+        username:
+          type: string
+          nullable: true
+        nickname:
+          type: string
+          nullable: true
+        alias:
+          type: string
+          nullable: true
+        fullName:
+          type: string
+          nullable: true
+        gender:
+          type: string
+          enum:
+          - male
+          - female
+          - other
+          - unknown
+          nullable: true
+        age:
+          type: integer
+          minimum: 0
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        isVirtual:
+          type: boolean
+        agentType:
+          type: string
+          nullable: true
+        ownerMemberId:
+          type: integer
+          format: int64
+          nullable: true
+        email:
+          type: string
+          format: email
+        phone:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum:
+          - active
+          - inactive
+          - suspended
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    MemberCreate:
+      type: object
+      required:
+      - username
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+          format: password
+        fullName:
+          type: string
+          nullable: true
+        nickname:
+          type: string
+          nullable: true
+        alias:
+          type: string
+          nullable: true
+        gender:
+          type: string
+          enum:
+          - male
+          - female
+          - other
+          - unknown
+          nullable: true
+        age:
+          type: integer
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        isVirtual:
+          type: boolean
+          default: false
+        agentType:
+          type: string
+          nullable: true
+        ownerMemberId:
+          type: integer
+          format: int64
+          nullable: true
+        email:
+          type: string
+          format: email
+        phone:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum:
+          - active
+          - inactive
+          - suspended
+          default: active
+    MemberUpdate:
+      type: object
+      properties:
+        fullName:
+          type: string
+          nullable: true
+        nickname:
+          type: string
+          nullable: true
+        email:
+          type: string
+          format: email
+          nullable: true
+        phone:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum:
+          - active
+          - inactive
+          - suspended
+    Role:
+      type: object
+      required:
+      - org_id
+      - code
+      - name
+      properties:
+        id:
+          type: integer
+          format: int64
+        org_id:
+          type: integer
+          format: int64
+          description: 角色所属组织ID
+        code:
+          type: string
+          description: 角色唯一标识码，用于程序化访问
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        is_position:
+          type: boolean
+          default: false
+          description: 是否为岗位角色
+        headcount:
+          type: integer
+          nullable: true
+          description: 岗位编制数（仅岗位角色有效）
+        is_unique:
+          type: boolean
+          nullable: true
+          description: 是否唯一岗位（仅岗位角色有效）
+        active:
+          type: boolean
+          default: true
+          description: 角色是否激活
+        originalName:
+          type: string
+          nullable: true
+        originalDescription:
+          type: string
+          nullable: true
+        supportedLanguages:
+          type: array
+          items:
+            type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    Permission:
+      type: object
+      required:
+      - code
+      - resource
+      - action
+      properties:
+        id:
+          type: integer
+          format: int64
+        tenant_id:
+          type: integer
+          format: int64
+          description: 权限所属租户ID
+        code:
+          type: string
+        name:
+          type: string
+          nullable: true
+        resource:
+          type: string
+        action:
+          type: string
+        description:
+          type: string
+          nullable: true
+        category:
+          type: string
+          nullable: true
+          description: 权限分类（如：system, business, data等）
+        org_scope:
+          type: string
+          enum:
+          - global
+          - org
+          - self
+          default: org
+          description: 组织适用范围
+        active:
+          type: boolean
+          default: true
+          description: 权限是否激活
+        system_permission:
+          type: boolean
+          default: false
+          description: 是否为系统内置权限
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    OrgUnit:
+      type: object
+      required:
+      - id
+      - tenantId
+      - name
+      - type
+      properties:
+        id:
+          type: integer
+          format: int64
+        tenantId:
+          type: integer
+          format: int64
+        name:
+          type: string
+        type:
+          type: string
+          enum:
+          - company
+          - dept
+          - team
+          - committee
+          - project
+          - taskforce
+        description:
+          type: string
+          nullable: true
+        originalName:
+          type: string
+          nullable: true
+        originalType:
+          type: string
+          nullable: true
+        supportedLanguages:
+          type: array
+          items:
+            type: string
+          nullable: true
+        isTemporary:
+          type: boolean
+        validUntil:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    AuthzCheckRequest:
+      type: object
+      required:
+      - resource
+      - action
+      properties:
+        resource:
+          type: string
+          example: orders
+        action:
+          type: string
+          example: read
+        org_id:
+          type: integer
+          format: int64
+          nullable: true
+        on_behalf_of:
+          type: integer
+          format: int64
+          nullable: true
+    AuthzCheckResponse:
+      type: object
+      required:
+      - allowed
+      properties:
+        allowed:
+          type: boolean
+        reason:
+          type: string
+    PageMembers:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Member'
+        meta:
+          $ref: '#/components/schemas/PageMeta'
+    PageRoles:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Role'
+        meta:
+          $ref: '#/components/schemas/PageMeta'
+    PageOrgs:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrgUnit'
+        meta:
+          $ref: '#/components/schemas/PageMeta'
+    PagePermissions:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Permission'
+        meta:
+          $ref: '#/components/schemas/PageMeta'
+    RoleCreate:
+      type: object
+      required:
+      - org_id
+      - code
+      - name
+      properties:
+        org_id:
+          type: integer
+          format: int64
+        code:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        is_position:
+          type: boolean
+          default: false
+        headcount:
+          type: integer
+          nullable: true
+        is_unique:
+          type: boolean
+          nullable: true
+        active:
+          type: boolean
+          default: true
+    RoleUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        headcount:
+          type: integer
+          nullable: true
+        is_unique:
+          type: boolean
+          nullable: true
+        active:
+          type: boolean
+    PermissionCreate:
+      type: object
+      required:
+      - code
+      - resource
+      - action
+      properties:
+        code:
+          type: string
+        name:
+          type: string
+        resource:
+          type: string
+        action:
+          type: string
+        description:
+          type: string
+        category:
+          type: string
+        org_scope:
+          type: string
+          enum:
+          - global
+          - org
+          - self
+          default: org
+        active:
+          type: boolean
+          default: true
+        system_permission:
+          type: boolean
+          default: false
+    PermissionUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        category:
+          type: string
+        org_scope:
+          type: string
+          enum:
+          - global
+          - org
+          - self
+        active:
+          type: boolean
+    PermissionGrant:
+      type: object
+      required:
+      - member_id
+      - permission_id
+      properties:
+        member_id:
+          type: integer
+          format: int64
+        permission_id:
+          type: integer
+          format: int64
+        org_id:
+          type: integer
+          format: int64
+          nullable: true
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+    PermissionRevoke:
+      type: object
+      required:
+      - member_id
+      - permission_id
+      properties:
+        member_id:
+          type: integer
+          format: int64
+        permission_id:
+          type: integer
+          format: int64
+        org_id:
+          type: integer
+          format: int64
+          nullable: true
+    PermissionCheck:
+      type: object
+      required:
+      - member_id
+      - resource
+      - action
+      properties:
+        member_id:
+          type: integer
+          format: int64
+        resource:
+          type: string
+        action:
+          type: string
+        org_id:
+          type: integer
+          format: int64
+          nullable: true
+    PermissionCheckResult:
+      type: object
+      required:
+      - allowed
+      properties:
+        allowed:
+          type: boolean
+        reason:
+          type: string
+        source:
+          type: string
+          enum:
+          - direct
+          - role
+          nullable: true
+        role_id:
+          type: integer
+          format: int64
+          nullable: true
+    MemberPermissions:
+      type: object
+      properties:
+        member_id:
+          type: integer
+          format: int64
+        direct_permissions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Permission'
+          description: 直接分配给成员的权限
+        role_permissions:
+          type: array
+          items:
+            type: object
+            properties:
+              role:
+                $ref: '#/components/schemas/Role'
+              permissions:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Permission'
+    MemberRole:
+      type: object
+      properties:
+        role:
+          $ref: '#/components/schemas/Role'
+        org_id:
+          type: integer
+          format: int64
+          nullable: true
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        granted_at:
+          type: string
+          format: date-time
+        granted_by:
+          type: integer
+          format: int64
+    MemberRoleAssignment:
+      type: object
+      required:
+      - role_id
+      properties:
+        role_id:
+          type: integer
+          format: int64
+        org_id:
+          type: integer
+          format: int64
+          nullable: true
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+    Resource:
+      type: object
+      required:
+      - id
+      - system_code
+      - name
+      - type
+      - access_mode
+      properties:
+        id:
+          type: integer
+          format: int64
+        tenant_id:
+          type: integer
+          format: int64
+        system_code:
+          type: string
+          pattern: ^[A-Z][A-Z0-9_]*$
+          description: 系统代码（ASCII）
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        description:
+          type: string
+          maxLength: 500
+        type:
+          type: string
+          enum:
+          - function
+          - data
+          description: 资源类型
+        access_mode:
+          type: string
+          enum:
+          - whitelist
+          - blacklist
+          description: 访问模式
+        active:
+          type: boolean
+          default: true
+        created_at:
+          type: string
+          format: date-time
+        created_by:
+          type: integer
+          format: int64
+    OrgHierarchy:
+      type: object
+      required:
+      - tenant_id
+      - parent_id
+      - child_id
+      properties:
+        tenant_id:
+          type: integer
+          format: int64
+        parent_id:
+          type: integer
+          format: int64
+        child_id:
+          type: integer
+          format: int64
+        description:
+          type: string
+          maxLength: 200
+        created_at:
+          type: string
+          format: date-time
+    AgentCredential:
+      type: object
+      required:
+      - member_id
+      - kid
+      - type
+      - secret_hash
+      properties:
+        member_id:
+          type: integer
+          format: int64
+        kid:
+          type: string
+          minLength: 1
+          maxLength: 50
+        type:
+          type: string
+          enum:
+          - api_key
+          - oauth2
+          - jwt
+        secret_hash:
+          type: string
+        scope_json:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        revoked_at:
+          type: string
+          format: date-time
+          nullable: true
+    AgentPolicy:
+      type: object
+      required:
+      - member_id
+      properties:
+        member_id:
+          type: integer
+          format: int64
+        tools_allowed:
+          type: array
+          items:
+            type: string
+          description: 允许使用的工具列表
+        data_scopes:
+          type: array
+          items:
+            type: string
+          description: 数据访问范围
+        max_actions_per_min:
+          type: integer
+          default: 100
+          description: 每分钟最大操作数
+        redaction_rules:
+          type: object
+          additionalProperties: true
+          description: 脱敏规则
+        pii_access_level:
+          type: string
+          enum:
+          - none
+          - mask
+          - full
+          default: none
+          description: PII访问级别
+        updated_at:
+          type: string
+          format: date-time
+    AgentRunLog:
+      type: object
+      required:
+      - run_id
+      - member_id
+      - status
+      - started_at
+      properties:
+        run_id:
+          type: string
+        member_id:
+          type: integer
+          format: int64
+        caller_member_id:
+          type: integer
+          format: int64
+          nullable: true
+        org_context:
+          type: string
+        input_hash:
+          type: string
+        output_hash:
+          type: string
+        tool_calls_json:
+          type: object
+          additionalProperties: true
+        status:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        signature:
+          type: string
+          description: 防篡改签名
+    PermissionCheckRequest:
+      type: object
+      required:
+      - member_id
+      - resource_id
+      - required_mask
+      properties:
+        member_id:
+          type: integer
+          format: int64
+        resource_id:
+          type: integer
+          format: int64
+        required_mask:
+          type: integer
+          minimum: 1
+          maximum: 7
+          description: 所需权限掩码
+        org_context:
+          type: integer
+          format: int64
+          description: 组织上下文
+    PermissionCheckResponse:
+      type: object
+      required:
+      - allowed
+      properties:
+        allowed:
+          type: boolean
+        reason:
+          type: string
+          description: 拒绝原因（如果适用）
+        effective_mask:
+          type: integer
+          description: 用户实际拥有的权限掩码
+    PermissionBitmapResponse:
+      type: object
+      required:
+      - member_id
+      - system_code
+      - bitmap
+      properties:
+        member_id:
+          type: integer
+          format: int64
+        system_code:
+          type: string
+        bitmap:
+          type: string
+          description: Base64编码的权限位图
+        version:
+          type: string
+          description: 位图版本
+        generated_at:
+          type: string
+          format: date-time
+    BatchPermissionRequest:
+      type: object
+      required:
+      - operations
+      properties:
+        operations:
+          type: array
+          items:
+            type: object
+            required:
+            - action
+            - permission
+            properties:
+              action:
+                type: string
+                enum:
+                - grant
+                - revoke
+              permission:
+                $ref: '#/components/schemas/Permission'
+    BatchOperationResult:
+      type: object
+      properties:
+        success_count:
+          type: integer
+        failure_count:
+          type: integer
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              operation_id:
+                type: string
+              success:
+                type: boolean
+              error:
+                type: string
+                nullable: true
+    I18nTranslation:
+      type: object
+      required:
+      - tenant_id
+      - entity_type
+      - entity_id
+      - locale
+      properties:
+        tenant_id:
+          type: integer
+          format: int64
+        entity_type:
+          type: string
+          enum:
+          - org_unit
+          - role
+          - resource
+          - permission
+        entity_id:
+          type: integer
+          format: int64
+        locale:
+          type: string
+          pattern: ^[a-z]{2}(-[A-Z]{2})?$
+        name:
+          type: string
+          maxLength: 100
+        description:
+          type: string
+          maxLength: 500
+        updated_at:
+          type: string
+          format: date-time
+        updated_by:
+          type: integer
+          format: int64
+    Settings:
+      type: object
+      required:
+      - org_id
+      - key
+      properties:
+        org_id:
+          type: integer
+          format: int64
+          description: 组织ID，0表示全局配置
+        key:
+          type: string
+          minLength: 1
+          maxLength: 100
+        value:
+          type: string
+          maxLength: 1000
+        description:
+          type: string
+          maxLength: 200
+        updated_at:
+          type: string
+          format: date-time
+    OtpRequestResponse:
+      type: object
+      properties:
+        otp_token:
+          type: string
+          description: 用于后续验证OTP的临时令牌
+        expires_at:
+          type: string
+          format: date-time
+          description: OTP令牌的过期时间
+        retry_after_seconds:
+          type: integer
+          description: 可以再次请求OTP的秒数
+    UpdatePasswordRequest:
+      type: object
+      properties:
+        currentPassword:
+          type: string
+          description: 当前密码（对于管理员模式可选）
+        newPassword:
+          type: string
+          description: 新密码
+          minLength: 8
+      required:
+        - newPassword
+    OtpLoginRequest:
+      type: object
+      required:
+      - contact
+      - otp_code
+      - otp_token
+      properties:
+        contact:
+          type: string
+          description: 接收OTP的联系方式（手机或邮箱）
+        otp_code:
+          type: string
+          description: 收到的6位数字验证码
+        otp_token:
+          type: string
+          description: 请求OTP时获取的临时令牌
+    AutoLoginRequest:
+      type: object
+      required:
+      - device_id
+      - auto_login_token
+      properties:
+        device_id:
+          type: string
+          description: 设备唯一标识
+        auto_login_token:
+          type: string
+          description: 用于自动登录的长期令牌
+    MemberOrg:
+      type: object
+      required:
+      - tenant_id
+      - member_id
+      - org_id
+      - relation_type
+      properties:
+        tenant_id:
+          type: integer
+          format: int64
+        member_id:
+          type: integer
+          format: int64
+        org_id:
+          type: integer
+          format: int64
+        relation_type:
+          type: string
+          enum:
+          - primary
+          - secondary
+          - guest
+          - external
+          default: primary
+          description: 归属类型
+        valid_from:
+          type: string
+          format: date-time
+          nullable: true
+        valid_until:
+          type: string
+          format: date-time
+          nullable: true
+        active:
+          type: boolean
+          default: true
+        source:
+          type: string
+          nullable: true
+        description:
+          type: string
+          maxLength: 200
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        created_by:
+          type: integer
+          format: int64
+    PagedMembers:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Member'
+        meta:
+          $ref: '#/components/schemas/PageMeta'
+    PagedRoles:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Role'
+        meta:
+          $ref: '#/components/schemas/PageMeta'
+    MemberCreateRequest:
+      type: object
+      required:
+      - username
+      - full_name
+      properties:
+        username:
+          type: string
+          minLength: 2
+          maxLength: 50
+        full_name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        nickname:
+          type: string
+          maxLength: 50
+        email:
+          type: string
+          format: email
+        phone:
+          type: string
+          maxLength: 20
+        is_virtual:
+          type: boolean
+          default: false
+        agent_type:
+          type: string
+          enum:
+          - llm
+          - workflow
+          - service
+          - bot
+        owner_member_id:
+          type: integer
+          format: int64
+        password:
+          type: string
+          minLength: 8
+          description: 密码（仅人类成员）
+    RoleCreateRequest:
+      type: object
+      required:
+      - org_id
+      - name
+      properties:
+        org_id:
+          type: integer
+          format: int64
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        description:
+          type: string
+          maxLength: 500
+        is_position:
+          type: boolean
+          default: false
+paths:
+  /v2/auth/token:
+    post:
+      tags:
+      - Auth
+      summary: 获取访问令牌（用户或Agent）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                grant_type:
+                  type: string
+                  enum:
+                  - password
+                  - client_credentials
+                  - refresh_token
+                username:
+                  type: string
+                password:
+                  type: string
+                client_id:
+                  type: string
+                client_secret:
+                  type: string
+                refresh_token:
+                  type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token:
+                    type: string
+                  token_type:
+                    type: string
+                    example: Bearer
+                  expires_in:
+                    type: integer
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v2/auth/login:
+    post:
+      tags:
+      - Auth
+      summary: 用户登录
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+                device_id:
+                  type: string
+                  description: 设备ID，用于设备认证
+              required:
+              - username
+              - password
+      responses:
+        '200':
+          description: 登录成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '401':
+          description: 认证失败
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+  /v2/members:
+    get:
+      tags:
+      - Members
+      summary: 查询成员列表
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      - name: keyword
+        in: query
+        schema:
+          type: string
+        description: 按用户名/昵称/别名/全名搜索
+      - name: is_virtual
+        in: query
+        schema:
+          type: boolean
+        description: 是否仅返回虚拟成员
+      - name: status
+        in: query
+        schema:
+          type: string
+          enum:
+          - active
+          - inactive
+          - suspended
+        description: 按成员状态过滤
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PageMembers'
+    post:
+      tags:
+      - Members
+      summary: 新增成员（可标记为虚拟成员）
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemberCreate'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Member'
+  /v2/members/{id}:
+    get:
+      tags:
+      - Members
+      summary: 获取成员详情
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Member'
+    patch:
+      tags:
+      - Members
+      summary: 修改成员资料
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemberUpdate'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Member'
+    delete:
+      operationId: deleteMember
+      tags:
+      - Members
+      summary: 停用成员
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '204':
+          description: No Content
+    /v2/members/{id}/password:
+      post:
+        tags:
+        - Members
+        - Auth
+        summary: 更新成员密码（管理员或用户修改密码）
+        description: |
+          管理员可以不提供 currentPassword 直接设置成员的新密码；普通用户应传入 currentPassword 以验证身份。
+        parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+        requestBody:
+          required: true
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpdatePasswordRequest'
+        responses:
+          '204':
+            description: No Content
+          '400':
+            description: 请求参数不正确或验证失败
+            content:
+              application/json:
+                schema:
+                  $ref: '#/components/schemas/Error'
+          '404':
+            description: 成员不存在
+            content:
+              application/json:
+                schema:
+                  $ref: '#/components/schemas/Error'
+  /v2/members/{id}/permissions:
+    get:
+      tags:
+      - Members
+      - Permissions
+      summary: 获取成员的所有权限
+      description: 返回成员的直接权限和通过角色继承的权限
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: org_id
+        in: query
+        schema:
+          type: integer
+          format: int64
+        description: 限定组织范围的权限
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemberPermissions'
+        '404':
+          description: 成员不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v2/members/{id}/roles:
+    get:
+      tags:
+      - Members
+      - Roles
+      summary: 获取成员的角色列表
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: org_id
+        in: query
+        schema:
+          type: integer
+          format: int64
+        description: 限定组织范围的角色
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/MemberRole'
+        '404':
+          description: 成员不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      tags:
+      - Members
+      - Roles
+      summary: 给成员分配角色
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemberRoleAssignment'
+      responses:
+        '204':
+          description: No Content
+        '404':
+          description: 成员或角色不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v2/permissions/grant:
+    post:
+      tags:
+      - Permissions
+      summary: 直接授予权限给成员
+      description: 绕过角色，直接给成员分配权限
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PermissionGrant'
+      responses:
+        '204':
+          description: No Content
+        '404':
+          description: 成员或权限不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v2/permissions/revoke:
+    post:
+      operationId: revokePermission
+      tags:
+      - Permissions
+      summary: 撤销成员的直接权限
+      description: 撤销直接分配给成员的权限，不影响通过角色继承的权限
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PermissionRevoke'
+      responses:
+        '204':
+          description: No Content
+        '404':
+          description: 成员或权限不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v2/permissions/check:
+    post:
+      tags:
+      - Permissions
+      summary: 检查成员权限
+      description: 检查成员是否拥有特定权限（包括直接权限和角色继承权限）
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PermissionCheck'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PermissionCheckResult'
+  /v2/roles:
+    get:
+      tags:
+      - Roles
+      summary: 角色列表
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/Language'
+      - $ref: '#/components/parameters/OrgIdQuery'
+      - name: is_position
+        in: query
+        schema:
+          type: boolean
+        description: 是否仅返回岗位角色
+      - name: active
+        in: query
+        schema:
+          type: boolean
+        description: 按角色状态过滤
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PageRoles'
+    post:
+      tags:
+      - Roles
+      summary: 新增角色
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoleCreate'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Role'
+  /v2/roles/{id}:
+    get:
+      tags:
+      - Roles
+      summary: 获取角色详情
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Role'
+        '404':
+          description: 角色不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    patch:
+      operationId: updateRole
+      tags:
+      - Roles
+      summary: 更新角色信息
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoleUpdate'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Role'
+        '404':
+          description: 角色不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      operationId: deleteRole
+      tags:
+      - Roles
+      summary: 删除角色
+      description: 删除角色。如果角色已分配给成员，将返回错误。
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '204':
+          description: No Content
+        '400':
+          description: 角色已分配给成员，无法删除
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: 角色不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v2/roles/{id}/permissions:
+    get:
+      tags:
+      - Roles
+      - Permissions
+      summary: 获取角色的权限列表
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Permission'
+        '404':
+          description: 角色不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    put:
+      tags:
+      - Roles
+      - Permissions
+      summary: 设置角色权限（覆盖式）
+      description: 替换角色的所有权限，之前的权限分配将被清除
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - permission_ids
+              properties:
+                permission_ids:
+                  type: array
+                  items:
+                    type: integer
+                    format: int64
+                  description: 权限ID列表
+      responses:
+        '204':
+          description: No Content
+        '404':
+          description: 角色或权限不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      tags:
+      - Roles
+      - Permissions
+      summary: 给角色添加权限
+      description: 为角色添加新的权限，不影响现有权限
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - permission_ids
+              properties:
+                permission_ids:
+                  type: array
+                  items:
+                    type: integer
+                    format: int64
+                  description: 要添加的权限ID列表
+      responses:
+        '204':
+          description: No Content
+        '404':
+          description: 角色或权限不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v2/roles/{id}/permissions/{permission_id}:
+    delete:
+      tags:
+      - Roles
+      - Permissions
+      summary: 移除角色的特定权限
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: permission_id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '204':
+          description: No Content
+        '404':
+          description: 角色或权限不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v2/roles/{id}/members:
+    get:
+      tags:
+      - Roles
+      - Members
+      summary: 获取拥有此角色的成员列表
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PageMembers'
+        '404':
+          description: 角色不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v2/permissions:
+    get:
+      tags:
+      - Permissions
+      summary: 权限点列表
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/Language'
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      - name: category
+        in: query
+        schema:
+          type: string
+        description: 按权限分类过滤
+      - name: resource
+        in: query
+        schema:
+          type: string
+        description: 按资源类型过滤
+      - name: active
+        in: query
+        schema:
+          type: boolean
+        description: 按权限状态过滤
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PagePermissions'
+    post:
+      tags:
+      - Permissions
+      summary: 创建权限点
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PermissionCreate'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Permission'
+        '400':
+          description: 权限代码已存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v2/permissions/{id}:
+    get:
+      tags:
+      - Permissions
+      summary: 获取权限详情
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Permission'
+        '404':
+          description: 权限不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    patch:
+      tags:
+      - Permissions
+      summary: 更新权限信息
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PermissionUpdate'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Permission'
+        '404':
+          description: 权限不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags:
+      - Permissions
+      summary: 删除权限
+      description: 删除权限。如果权限已分配给角色或成员，将返回错误。
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '204':
+          description: No Content
+        '400':
+          description: 权限已被使用，无法删除
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: 权限不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v2/orgs:
+    get:
+      tags:
+      - Orgs
+      summary: 查询组织单元（按租户）
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/Language'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PageOrgs'
+    post:
+      tags:
+      - Orgs
+      summary: 新增组织单元
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrgUnit'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  tenantId:
+                    type: integer
+                    format: int64
+                  request:
+                    type: object
+                    additionalProperties: true
+  /v2/orgs/{id}:
+    patch:
+      operationId: updateOrg
+      tags:
+      - Orgs
+      summary: 修改组织单元
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrgUnit'
+      responses:
+        '200':
+          description: OK
+    delete:
+      operationId: deleteOrg
+      tags:
+      - Orgs
+      summary: 删除/归档组织单元
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '204':
+          description: No Content
+  /v2/roles/grant:
+    post:
+      operationId: grantRole
+      tags:
+      - Roles
+      summary: 给成员授予角色（可带组织范围与到期时间）
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - member_id
+              - role_id
+              properties:
+                member_id:
+                  type: integer
+                  format: int64
+                role_id:
+                  type: integer
+                  format: int64
+                org_id:
+                  type: integer
+                  format: int64
+                  nullable: true
+                expires_at:
+                  type: string
+                  format: date-time
+                  nullable: true
+      responses:
+        '204':
+          description: No Content
+  /v2/authz/check:
+    post:
+      operationId: checkPermission
+      tags:
+      - Authz
+      summary: 鉴权检查（resource+action+org上下文）
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthzCheckRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthzCheckResponse'
+  /v2/auth/otp-request:
+    post:
+      tags:
+      - Auth
+      summary: 请求OTP验证码
+      description: 向用户的手机或邮箱发送一次性密码（OTP），用于登录或其它验证场景。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - contact
+              - channel
+              properties:
+                contact:
+                  type: string
+                  description: 接收验证码的联系方式（手机号或邮箱）
+                channel:
+                  type: string
+                  enum:
+                  - SMS
+                  - EMAIL
+                  description: 发送渠道
+                purpose:
+                  type: string
+                  enum:
+                  - login
+                  - register
+                  - reset_password
+                  default: login
+      responses:
+        '200':
+          description: 验证码发送请求成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OtpRequestResponse'
+        '429':
+          description: 发送频率限制
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/Error'
+                - type: object
+                  properties:
+                    retry_after:
+                      type: integer
+                      description: 需要等待的秒数
+        '400':
+          description: 联系方式格式错误或用户不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v2/auth/otp-login:
+    post:
+      tags:
+      - Auth
+      summary: 使用OTP验证码登录
+      description: 使用从 /auth/otp-request 获取的令牌和用户收到的验证码完成登录。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OtpLoginRequest'
+      responses:
+        '200':
+          description: 登录成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '401':
+          description: 验证码或令牌无效
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v2/auth/auto-login:
+    post:
+      tags:
+      - Auth
+      summary: 自动登录
+      description: 使用设备ID和自动登录令牌换取新的访问令牌和刷新令牌。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AutoLoginRequest'
+      responses:
+        '200':
+          description: 自动登录成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '401':
+          description: 自动登录失败（如令牌无效或设备已不被信任）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v2/auth/token/refresh:
+    post:
+      tags:
+      - Auth
+      summary: 刷新令牌
+      security:
+      - bearerAuth: []
+      responses:
+        '200':
+          description: 刷新成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token:
+                    type: string
+                  expires_in:
+                    type: integer
+  /v2/permissions/batch:
+    post:
+      tags:
+      - Permissions
+      summary: 批量权限操作
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchPermissionRequest'
+      responses:
+        '200':
+          description: 批量操作完成
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchOperationResult'
+  /v2/permissions/bitmap/{member_id}:
+    get:
+      tags:
+      - Authz
+      summary: 获取成员权限位图
+      description: 获取用户在指定系统的权限位图，用于JWT嵌入和高速权限检查
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: member_id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: system_code
+        in: query
+        required: true
+        schema:
+          type: string
+        description: 系统代码
+      responses:
+        '200':
+          description: 获取成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PermissionBitmapResponse'
+  /v2/permissions/bitmap/refresh:
+    post:
+      tags:
+      - Authz
+      summary: 刷新权限位图
+      description: 强制刷新指定用户的权限位图缓存
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - member_id
+              properties:
+                member_id:
+                  type: integer
+                  format: int64
+                system_code:
+                  type: string
+                  description: 指定系统，为空则刷新所有系统
+      responses:
+        '204':
+          description: 刷新成功
+  /v2/orgs/{id}/hierarchy:
+    get:
+      tags:
+      - Orgs
+      summary: 获取组织层级关系
+      description: 获取指定组织的上下级关系
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/AcceptLanguage'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: direction
+        in: query
+        schema:
+          type: string
+          enum:
+          - ancestors
+          - descendants
+          - both
+          default: both
+        description: 查询方向
+      - name: max_depth
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 10
+          default: 5
+        description: 最大层级深度
+      responses:
+        '200':
+          description: 获取成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  org_id:
+                    type: integer
+                    format: int64
+                  ancestors:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/OrgUnit'
+                  descendants:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/OrgUnit'
+    post:
+      tags:
+      - Orgs
+      summary: 建立组织层级关系
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+        description: 子组织ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - parent_id
+              properties:
+                parent_id:
+                  type: integer
+                  format: int64
+                description:
+                  type: string
+                  maxLength: 200
+      responses:
+        '201':
+          description: 关系建立成功
+  /v2/resources:
+    get:
+      tags:
+      - Resources
+      summary: 查询资源列表
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/AcceptLanguage'
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      - name: system_code
+        in: query
+        schema:
+          type: string
+        description: 系统代码过滤
+      - name: type
+        in: query
+        schema:
+          type: string
+          enum:
+          - function
+          - data
+        description: 资源类型过滤
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Resource'
+                  meta:
+                    $ref: '#/components/schemas/PageMeta'
+    post:
+      tags:
+      - Resources
+      summary: 创建资源
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - system_code
+              - name
+              - type
+              properties:
+                system_code:
+                  type: string
+                  pattern: ^[A-Z][A-Z0-9_]*$
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 100
+                description:
+                  type: string
+                  maxLength: 500
+                type:
+                  type: string
+                  enum:
+                  - function
+                  - data
+                access_mode:
+                  type: string
+                  enum:
+                  - whitelist
+                  - blacklist
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Resource'
+  /v2/agents:
+    get:
+      tags:
+      - Agents
+      summary: 查询AI Agent列表
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      - name: agent_type
+        in: query
+        schema:
+          type: string
+          enum:
+          - llm
+          - workflow
+          - service
+          - bot
+      - name: owner_id
+        in: query
+        schema:
+          type: integer
+          format: int64
+        description: 所有者ID过滤
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Member'
+                  meta:
+                    $ref: '#/components/schemas/PageMeta'
+  /v2/agents/{id}/credentials:
+    get:
+      tags:
+      - Agents
+      summary: 获取Agent凭证列表
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: 获取成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AgentCredential'
+    post:
+      tags:
+      - Agents
+      summary: 为Agent创建凭证
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - type
+              properties:
+                type:
+                  type: string
+                  enum:
+                  - api_key
+                  - oauth2
+                  - jwt
+                expires_at:
+                  type: string
+                  format: date-time
+                scope_json:
+                  type: object
+                  additionalProperties: true
+      responses:
+        '201':
+          description: 凭证创建成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  kid:
+                    type: string
+                  secret:
+                    type: string
+                    description: 明文密钥（仅此次返回）
+                  credential:
+                    $ref: '#/components/schemas/AgentCredential'
+  /v2/agents/{id}/policy:
+    get:
+      tags:
+      - Agents
+      summary: 获取Agent策略
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: 获取成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentPolicy'
+    put:
+      tags:
+      - Agents
+      summary: 更新Agent策略
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentPolicy'
+      responses:
+        '200':
+          description: 更新成功
+  /v2/agents/{id}/logs:
+    get:
+      tags:
+      - Agents
+      summary: 获取Agent执行日志
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: start_time
+        in: query
+        schema:
+          type: string
+          format: date-time
+      - name: end_time
+        in: query
+        schema:
+          type: string
+          format: date-time
+      - name: status
+        in: query
+        schema:
+          type: string
+      responses:
+        '200':
+          description: 获取成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AgentRunLog'
+                  meta:
+                    $ref: '#/components/schemas/PageMeta'
+  /v2/i18n/translations:
+    get:
+      tags:
+      - I18n
+      summary: 查询翻译列表
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      - name: entity_type
+        in: query
+        schema:
+          type: string
+          enum:
+          - org_unit
+          - role
+          - resource
+          - permission
+      - name: entity_id
+        in: query
+        schema:
+          type: integer
+          format: int64
+      - name: locale
+        in: query
+        schema:
+          type: string
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/I18nTranslation'
+                  meta:
+                    $ref: '#/components/schemas/PageMeta'
+    post:
+      tags:
+      - I18n
+      summary: 添加翻译
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/I18nTranslation'
+      responses:
+        '201':
+          description: 添加成功
+  /v2/i18n/missing:
+    get:
+      tags:
+      - I18n
+      summary: 获取缺失翻译列表
+      description: 查找指定语言的缺失翻译项
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: locale
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: entity_type
+        in: query
+        schema:
+          type: string
+          enum:
+          - org_unit
+          - role
+          - resource
+          - permission
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  missing_translations:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        entity_type:
+                          type: string
+                        entity_id:
+                          type: integer
+                          format: int64
+                        entity_name:
+                          type: string
+                        missing_fields:
+                          type: array
+                          items:
+                            type: string
+                            enum:
+                            - name
+                            - description
+  /v2/settings:
+    get:
+      tags:
+      - Settings
+      summary: 查询系统配置
+      parameters:
+      - name: org_id
+        in: query
+        schema:
+          type: integer
+          format: int64
+          default: 0
+        description: 组织ID，0表示全局配置
+      - name: key
+        in: query
+        schema:
+          type: string
+        description: 配置键名过滤
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Settings'
+    post:
+      tags:
+      - Settings
+      summary: 添加或更新配置
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Settings'
+      responses:
+        '201':
+          description: 配置成功（无返回内容）
+  /v2/settings/{org_id}/{key}:
+    get:
+      tags:
+      - Settings
+      summary: 获取指定配置
+      description: 获取配置值，支持继承查找（先查指定org_id，再查全局）
+      parameters:
+      - name: org_id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: key
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: 获取成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Settings'
+        '404':
+          description: 配置不存在
+    delete:
+      tags:
+      - Settings
+      summary: 删除配置
+      parameters:
+      - name: org_id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: key
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '204':
+          description: 删除成功
+  /v2/audit/logs:
+    get:
+      tags:
+      - Audit
+      summary: 查询审计日志
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      - name: start_time
+        in: query
+        schema:
+          type: string
+          format: date-time
+      - name: end_time
+        in: query
+        schema:
+          type: string
+          format: date-time
+      - name: operator_id
+        in: query
+        schema:
+          type: integer
+          format: int64
+        description: 操作者ID
+      - name: action_type
+        in: query
+        schema:
+          type: string
+        description: 操作类型
+      - name: target_type
+        in: query
+        schema:
+          type: string
+        description: 目标类型
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                          format: int64
+                        tenant_id:
+                          type: integer
+                          format: int64
+                        operator_id:
+                          type: integer
+                          format: int64
+                        action_type:
+                          type: string
+                        target_type:
+                          type: string
+                        target_id:
+                          type: integer
+                          format: int64
+                        before_data:
+                          type: object
+                          additionalProperties: true
+                        after_data:
+                          type: object
+                          additionalProperties: true
+                        client_ip:
+                          type: string
+                        user_agent:
+                          type: string
+                        created_at:
+                          type: string
+                          format: date-time
+                  meta:
+                    $ref: '#/components/schemas/PageMeta'
+  /v2/health:
+    get:
+      tags:
+      - System
+      summary: 健康检查
+      description: 系统健康状态检查
+      security: []
+      responses:
+        '200':
+          description: 系统正常
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                    - UP
+                    - DOWN
+                  timestamp:
+                    type: string
+                    format: date-time
+                  details:
+                    type: object
+                    properties:
+                      database:
+                        type: string
+                        enum:
+                        - UP
+                        - DOWN
+                      redis:
+                        type: string
+                        enum:
+                        - UP
+                        - DOWN
+                      version:
+                        type: string
+  /v2/metrics:
+    get:
+      tags:
+      - System
+      summary: 系统指标
+      description: 系统性能指标（需要管理员权限）
+      responses:
+        '200':
+          description: 指标数据
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  permission_check:
+                    type: object
+                    properties:
+                      total_requests:
+                        type: integer
+                      avg_response_time_ms:
+                        type: number
+                      cache_hit_rate:
+                        type: number
+                  active_members:
+                    type: integer
+                  active_agents:
+                    type: integer
+                  permission_bitmap_size_avg:
+                    type: number
+  /v2/members/{id}/orgs:
+    get:
+      tags:
+      - Members
+      summary: 查询成员的归属组织
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: active
+        in: query
+        schema:
+          type: boolean
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/MemberOrg'
+    put:
+      tags:
+      - Members
+      summary: 批量覆盖成员归属组织
+      description: 用请求体中的归属集合覆盖成员当前的全部归属（幂等）。未出现在列表中的原有归属将被移除。
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - orgs
+              properties:
+                orgs:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                    - org_id
+                    properties:
+                      org_id:
+                        type: integer
+                        format: int64
+                      relation_type:
+                        type: string
+                        enum:
+                        - primary
+                        - secondary
+                        - guest
+                        - external
+                      valid_until:
+                        type: string
+                        format: date-time
+                      active:
+                        type: boolean
+      responses:
+        '200':
+          description: 覆盖完成
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/MemberOrg'
+    post:
+      tags:
+      - Members
+      summary: 为成员新增归属组织
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - org_id
+              properties:
+                org_id:
+                  type: integer
+                  format: int64
+                relation_type:
+                  type: string
+                  enum:
+                  - primary
+                  - secondary
+                  - guest
+                  - external
+                  default: secondary
+                valid_until:
+                  type: string
+                  format: date-time
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemberOrg'
+  /v2/members/{id}/orgs/{org_id}:
+    delete:
+      tags:
+      - Members
+      summary: 取消成员在某组织的归属
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: org_id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '204':
+          description: 删除成功
+  /v2/orgs/{id}/members:
+    get:
+      tags:
+      - Orgs
+      summary: 查询组织下的成员归属
+      parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: relation_type
+        in: query
+        schema:
+          type: string
+          enum:
+          - primary
+          - secondary
+          - guest
+          - external
+      - name: active
+        in: query
+        schema:
+          type: boolean
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/MemberOrg'
+                  meta:
+                    $ref: '#/components/schemas/PageMeta'
