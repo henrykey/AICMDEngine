@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+motor
+pydantic
+openai
+python-dotenv
+pyyaml

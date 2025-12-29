@@ -1,0 +1,72 @@
+[
+    {
+        "command": "POST /v2/members",
+        "summary": "Create Member",
+        "description": "Create a new member in the organization.",
+        "parameters": [
+            {
+                "name": "body",
+                "in": "body",
+                "required": true,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "fullName": {
+                            "type": "string"
+                        },
+                        "email": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "description": "Member details"
+            }
+        ]
+    },
+    {
+        "command": "GET /v2/orgs",
+        "summary": "List Organizations",
+        "description": "Search for organizations/departments.",
+        "parameters": [
+            {
+                "name": "keyword",
+                "in": "query",
+                "required": false,
+                "schema": {
+                    "type": "string"
+                },
+                "description": "Search keyword"
+            }
+        ]
+    },
+    {
+        "command": "POST /v2/members/{id}/orgs",
+        "summary": "Assign Member to Org",
+        "description": "Add a member to an organization/department.",
+        "parameters": [
+            {
+                "name": "id",
+                "in": "path",
+                "required": true,
+                "schema": {
+                    "type": "string"
+                },
+                "description": "Member ID"
+            },
+            {
+                "name": "body",
+                "in": "body",
+                "required": true,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "org_id": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "description": "Org association details"
+            }
+        ]
+    }
+]

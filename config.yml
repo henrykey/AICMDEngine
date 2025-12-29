@@ -1,0 +1,13 @@
+backend:
+  mongodb_uri: "mongodb://jnuc2"
+  database_name: "nl_tps"
+  openai_model_name: "deepseek-chat"
+  openai_api_key: "sk-503b9d7cd900429c9215027fad9071cc"
+  openai_base_url: "https://api.deepseek.com/v1"
+  fixed_tenant_id: 1
+
+frontend:
+  nlTpsApiUrl: "http://localhost:8000/v1"
+  membershipApiUrl: ""
+  membershipLoginPath: "/v2/auth/login"
+  membershipUserPath: "/v2/users/me"

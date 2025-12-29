@@ -23,62 +23,51 @@
 
 ## 2. 系统架构
 
-```
-                               +----------------------------------+
-                               |      调用方 (Client Application)     |
-                               | (e.g., CLI, Web UI, Sync Script) |
-                               |                                  |
-                               |   +--------------------------+   |
-                               |   |     计划执行器 (Plan      |   |
-                               |   |       Executor)          |   |
-                               |   +--------------------------+   |
-                               +-----------------+----------------+
-                                                 |
-                                     (1) POST /v1/tasks
-                                     { "goal": "..." }
-                                                 |
-                                                 v
-+------------------------------------------------------------------------------------+
-|                                                                                    |
-|                           自然语言任务规划服务 (NL-TPS)                                |
-|                                                                                    |
-|    +----------------+      +---------------------+      +-----------------------+    |
-|    |                |----->|                     |----->|                       |    |
-|    |   API 层      |<-----|    任务规划引擎      |<-----|    命令知识库加载器     |    |
-|    | (RESTful API)  |      |  (Task Planning Engine) |      | (Command Knowledge Loader)|    |
-|    |                |      |                     |      |           ^           |    |
-|    +----------------+      +----------+----------+      +-----------|-----------+    |
-|                                       |                               |              |
-|              (3) 生成并发送 Prompt      |                               | (2) 加载命令集   |
-|                                       v                               |              |
-|                               +-----------------+            +--------------------+ |
-|                               |   AI 模型客户端  |            |   数据库 (MongoDB)   | |
-|                               +-----------------+            +--------------------+ |
-|                                       |                                            |
-|                                       v                                            |
-|                              +-----------------+                                   |
-|                              |   大型语言模型   |                                   |
-|                              |      (LLM)      |                                   |
-|                              +-----------------+                                   |
-|                                       ^                                            |
-|                                       | (4) 返回结构化计划 (JSON)                      |
-|                                       |                                            |
-|    +----------------------------------+----------------------------------+          |
-|    |                                                                    |          |
-|    | <-------------------- (5) 返回 Plan_Ready 响应 -------------------- |          |
-|    |                                                                    |          |
-|    +--------------------------------------------------------------------+          |
-|                                                                                    |
-+------------------------------------------------------------------------------------+
+```mermaid
+flowchart TD
+  subgraph ClientApp[Client Application / 调用方]
+    Client[终端 / 脚本 / UI]
+    PlanExec[计划执行器<br/>Plan Executor]
+    Client --> PlanExec
+  end
+
+  ClientApp -->|POST /v1/tasks : goal, context| API
+
+  subgraph NL[NL-TPS<br/>自然语言任务规划服务]
+    API[API 层<br/>RESTful API]
+    Engine[任务规划引擎<br/>Task Planning Engine]
+    Loader[命令知识库加载器<br/>Command Knowledge Loader]
+    ModelClient[AI 模型客户端]
+    Mongo[(MongoDB<br/>命令集/审计元数据)]
+    LLM[大型语言模型<br/>LLM]
+
+    API <--> Engine
+    Engine <-->|加载命令集| Loader
+    Loader --> Mongo
+    Engine -->|生成 Prompt| ModelClient
+    ModelClient --> LLM
+    LLM -->|返回结构化计划| ModelClient
+    Engine -->|安全策略校验| Engine
+    ModelClient --> Engine
+  end
+
+  Engine -->|plan_ready / clarification_needed| ClientApp
 ```
 
 **工作流程:**
 
 1.  **接收任务**: 调用方将用户的自然语言目标（如 "在研发部加入一个叫张三的新员工"）通过 `POST /v1/tasks` 发送给 NL-TPS。
-2.  **加载知识**: 任务规划引擎根据请求上下文（如租户ID），从 MongoDB 加载相关的命令集（如 `membership` API 的所有命令定义）。
+2.  **加载知识**: 任务规划引擎根据**解析后的租户身份**（见第6节安全策略），从 MongoDB 加载该租户专属的命令集。
+    *   *优化策略*：对于大型命令集，使用 **向量检索 (Vector Search)** 根据用户目标语义检索 Top-N 个最相关的命令，而非加载全部。
 3.  **生成 Prompt**: 引擎将用户目标和加载的命令集组合成一个精心设计的 Prompt，发送给 LLM。
 4.  **AI 规划**: LLM 根据 Prompt 指示，将任务分解成一个包含步骤、参数和依赖关系的 JSON 计划。
-5.  **返回计划**: NL-TPS 将 AI 返回的计划封装成 `plan_ready` 响应，返回给调用方。调用方的“计划执行器”负责解析并执行这个计划。
+5.  **安全校验与返回**: 引擎对生成的计划进行**风险评估**（检查是否包含高危命令）。最后将计划封装成 `plan_ready` 响应（含风险等级）返回给调用方。
+
+**容错与性能要点:**
+
+*   命令集加载优先走内存/本地缓存并设置过期时间，Mongo 不可用时可读只读副本。
+*   LLM 调用设置超时、重试与指数退避，必要时切换备用模型/供应商或返回明确错误码。
+*   Prompt 构建与解析均做输入校验和 JSON Schema 校验，失败路径要可观测（日志/指标/Audit）。
 
 ## 3. 数据模型 (MongoDB)
 
@@ -120,6 +109,7 @@
   "description": "String",      // 详细描述
   "tags": ["String"],           // 分类标签，如 ["Members", "Roles"]
   "parameters": [               // 参数定义
+  "riskLevel": "String",        // [新增] 风险等级: "normal" (默认), "high" (需确认), "critical" (高危)
     {
       "name": "String",         // 参数名, 如 "id", "status"
       "in": "String",           // 参数位置, "path", "query", "header", "body"
@@ -137,6 +127,13 @@
   "updatedAt": "Date"
 }
 ```
+
+### 3.3. 命令集来源与治理原则
+
+*   **来源可插拔**：NL-TPS 只要求“结构化命令集”，不依赖 OpenAPI。支持自定义 YAML/JSON、GraphQL SDL、gRPC proto、内部 DSL 或手工维护清单。OpenAPI 只是常见导入器示例，不是强依赖。
+*   **治理字段**：推荐在命令集元信息中补充 `version`、`owner`、`tenantScope`/`visibility`、`preconditions`（权限、前置调用）、`rateLimitHint` 等，便于审计、灰度与容量规划。
+*   **演进与回滚**：当上游契约（无论来源格式）新增/删除字段或路径调整时，需生成新的命令集版本，支持按租户/调用方灰度并保留快速回滚路径。
+*   **权限对齐**：将来源契约中的安全声明或标签映射到命令集的可见性/前置校验字段，规划时只加载调用方已授权的命令。
 
 ## 4. AI Prompt 核心设计
 
@@ -185,6 +182,15 @@ User's objective: "${user_goal}"
 # RESPONSE
 ```
 
+### 4.1. Prompt 生成与校验流程
+
+1.  **命令集过滤**：根据 `tenantId`、`commandSetNames`、调用方权限过滤可用命令集，按 `version`/优先级选择最新有效集合。
+2.  **上下文检索 (RAG)**：使用 Embedding 模型计算用户目标的向量，从命令集中检索语义最相关的 Top-N 个命令（及对应的 Few-shot 示例），解决上下文窗口限制并提升准确率。
+3.  **模型与超参**：按场景选择模型（如 gpt-4 规划 vs. gpt-3.5 兜底），统一温度、max_tokens、超时配置，设置重试与指数退避。
+4.  **安全防护**：对 `goal` 做输入校验和 Prompt 注入检测（黑名单/长度/正则），上下文和示例做 HTML/JSON escaping。
+5.  **结果校验**：对 LLM 输出做 JSON Schema 校验，缺失字段或格式错误时尝试一次自我修复；仍失败则返回 `clarification_needed` 或错误码。
+6.  **降级与记录**：LLM 超时/多次失败时返回明确错误码并记录审计，包含模型、耗时、重试次数和成本。
+
 ## 5. REST API 规范
 
 **Base Path:** `/v1`
@@ -209,7 +215,7 @@ User's objective: "${user_goal}"
 {
   "goal": "String", // 必需，用户的自然语言任务目标
   "context": {      // 可选，提供执行上下文
-    "tenantId": "String",
+    "tenantId": "String", // 可选。在专属服务模式下由后端配置决定；公共模式下需与 Header 保持一致
     "commandSetNames": ["String"], // 限定在此命令集范围内规划
     "userId": "String"
   }
@@ -222,6 +228,10 @@ User's objective: "${user_goal}"
 {
   "type": "plan_ready",
   "confidence": 0.95,
+  "risk_assessment": {  // [新增] 风险评估结果
+    "level": "high",    // "normal" | "high" | "critical"
+    "message": "此计划包含不可逆的删除操作，请仔细核对。"
+  },
   "plan": [
     {
       "step": 1,
@@ -279,9 +289,26 @@ User's objective: "${user_goal}"
 }
 ```
 
+### 5.3. 任务生命周期与回调
+
+*   **任务标识**：推荐在 `plan_ready` / `clarification_needed` 响应中返回 `taskId`、`planVersion`，便于调用方记录与重试。`planVersion` 对应命令集版本或 prompt 模式。
+*   **状态流转**：`created` → `planned`（含 plan）或 `clarification_needed`，失败进入 `failed`，可按 `taskId` 重新触发规划或撤销。
+*   **获取计划**：除同步返回外，可提供 `GET /tasks/{taskId}` 查询最新计划或澄清问题，便于异步执行器轮询或回调。
+*   **回调可选**：如需推送模式，可约定 `callbackUrl`，规划完成后回调携带 `taskId`、`planVersion`、`plan` 或 `question`。
+*   **错误码覆盖**：除示例错误外，应补充如 `LLM_TIMEOUT`、`PLAN_VALIDATION_FAILED`、`NO_AVAILABLE_COMMANDS`、`PERMISSION_DENIED` 等，以便调用方做幂等/重试策略。
+
 ## 6. 安全与运维
 
-*   **认证/授权**: 服务本身应受 API Gateway 保护，通过 JWT 或 API Key 进行认证。服务内部通过请求上下文中的 `tenantId` 实现多租户数据隔离。
-*   **输入验证**: 对所有输入进行严格验证，特别是 `goal` 字段，防止 Prompt 注入攻击。
-*   **速率限制**: 对每个租户或用户进行速率限制，防止滥用昂贵的 AI 调用。
-*   **日志与监控**: 记录每个规划请求的元数据（耗时、AI成本、置信度、是否成功），但不记录敏感的业务数据。监控 AI 接口的延迟和错误率。
+NL-TPS 不再单独实现安全与运维能力，而是**直接复用成员管理系统（Membership）**现有的认证、审计和观测堆栈。调用方需按照《docs/MEMBERSHIP_USAGE_MANUAL.md》及 `docs/membership_v2.4_openapi.yaml` 的约定进行接入。整体责任划分如下：
+
+1. **认证 / 授权链路**：所有进入 NL-TPS 的请求必须先通过 Membership 的 Auth 组件获取 `Bearer Token`。**租户上下文解析**由服务启动配置 `SERVICE_TENANT_ID` 决定：
+    *   **公共服务模式** (`SERVICE_TENANT_ID=0`)：服务作为系统级公共设施运行。请求**必须**携带 `X-Tenant-ID` 头以动态指明当前业务租户。
+    *   **专属服务模式** (`SERVICE_TENANT_ID!=0`)：服务作为特定租户（如私有化部署）的专属资源运行。请求头 `X-Tenant-ID` 若存在则**必须与配置一致**，否则拒绝访问；若省略则默认使用配置的 ID。
+    NL-TPS 仅校验令牌有效性与租户一致性，其余用户生命周期、客户端凭证、OTP、自动登录等均由 Membership 负责。
+2. **多租户隔离与 RBAC**：租户、组织、角色、权限完全沿用 Membership 模型（手册 4.3、6.x 节）。NL-TPS 接口根据 `tenantId` 与 token claim 推断调用方上下文，并在规划时仅加载相应租户被授权的命令集。命令执行权限交由调用方结合 Membership 的 `/v2/permissions/check` 等接口裁决。
+3. **审计合规**：所有规划请求及 AI 调用元数据写入 Membership 的 `audit_outbox` 流（水位、令牌、planId、置信度、LLM 成本等）。合规团队可复用现有 Kafka/Mongo 订阅与运维面板，无需在 NL-TPS 中重复实现审计链路。
+4. **运维与可观测性**：指标体系（Prometheus）、结构化日志、告警、灰度与速率限制均复用 Membership 平台的 SRE 规范。NL-TPS 仅需暴露基础运行指标（如 LLM 延迟、Prompt 错误），并将其作为 Membership 的子系统注册到 `settings/observability` 配置中。
+5. **安全基线**：输入校验、Prompt 注入检测、敏感字段脱敏等按 Membership 安全部门发布的基线执行；密钥与 LLM Provider 凭证纳入 Membership 统一的 Secret 管理（Vault/KMS）。
+6. **运维指标与 SLO**：NL-TPS 应上报核心指标（如 `tasks_received_total`、`llm_latency_ms`、`plan_validation_fail_total`、`llm_retry_total`），并按 Membership SLO 模板配置告警；审计日志与留存周期沿用 Membership 统一策略，无需单独定义。
+
+通过上述方式，NL-TPS 可以聚焦在“任务规划”核心能力，同时享受 Membership 在认证、合规、运维方面的成熟保障。未来如 Membership 安全策略升级，只需更新共用文档和配置即可联动生效。
