@@ -1,56 +1,73 @@
-import os
-import yaml
 from typing import Optional
+import logging
+import sys
+from pydantic_settings import BaseSettings
+from pydantic import Field
 from dotenv import load_dotenv
 
-# Still load dotenv for potential secrets not in YAML (or overrides)
+# Load .env file
 load_dotenv()
 
-class Settings:
-    def __init__(self):
-        # Default values
-        self.MONGODB_URI = "mongodb://localhost:27017"
-        self.DATABASE_NAME = "nl_tps"
-        self.OPENAI_API_KEY = ""
-        self.OPENAI_BASE_URL: Optional[str] = None
-        self.OPENAI_MODEL_NAME = "gpt-4-turbo-preview"
-        self.FIXED_TENANT_ID: Optional[str] = None
 
-        self.load_from_yaml()
-        
-        # Env vars override YAML
-        self.override_from_env()
+class Settings(BaseSettings):
+    """Application settings loaded from environment variables."""
 
-    def load_from_yaml(self):
-        config_path = os.path.join(os.getcwd(), "config.yml")
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, "r") as f:
-                    data = yaml.safe_load(f)
-                    backend_config = data.get("backend", {})
-                    
-                    if "mongodb_uri" in backend_config:
-                        self.MONGODB_URI = backend_config["mongodb_uri"]
-                    if "database_name" in backend_config:
-                        self.DATABASE_NAME = backend_config["database_name"]
-                    if "openai_api_key" in backend_config:
-                         self.OPENAI_API_KEY = backend_config["openai_api_key"]
-                    if "openai_base_url" in backend_config:
-                         self.OPENAI_BASE_URL = backend_config["openai_base_url"] or None
-                    if "openai_model_name" in backend_config:
-                         self.OPENAI_MODEL_NAME = backend_config["openai_model_name"]
-                    if "fixed_tenant_id" in backend_config:
-                         self.FIXED_TENANT_ID = backend_config["fixed_tenant_id"] or None
-                         
-            except Exception as e:
-                print(f"Warning: Failed to load config.yml: {e}")
+    # API Configuration
+    openai_api_key: str = Field(default="", env="OPENAI_API_KEY")
+    openai_base_url: str = Field(default="https://api.openai.com/v1", env="OPENAI_BASE_URL")
+    openai_model_name: str = Field(default="gpt-4", env="OPENAI_MODEL_NAME")
 
-    def override_from_env(self):
-        if os.getenv("MONGODB_URI"): self.MONGODB_URI = os.getenv("MONGODB_URI")
-        if os.getenv("DATABASE_NAME"): self.DATABASE_NAME = os.getenv("DATABASE_NAME")
-        if os.getenv("OPENAI_API_KEY"): self.OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-        if os.getenv("OPENAI_BASE_URL"): self.OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
-        if os.getenv("OPENAI_MODEL_NAME"): self.OPENAI_MODEL_NAME = os.getenv("OPENAI_MODEL_NAME")
-        if os.getenv("FIXED_TENANT_ID"): self.FIXED_TENANT_ID = os.getenv("FIXED_TENANT_ID")
+    # Database Configuration
+    mongodb_uri: str = Field(default="mongodb://localhost:27017", env="MONGODB_URI")
+    database_name: str = Field(default="nl_tps", env="DATABASE_NAME")
 
+    # Tenant Configuration
+    fixed_tenant_id: Optional[int] = Field(default=None, env="FIXED_TENANT_ID")
+
+    # Logging Configuration
+    log_level: str = Field(default="INFO", env="LOG_LEVEL")
+
+    class Config:
+        env_file = ".env"
+        env_file_encoding = "utf-8"
+        case_sensitive = False
+        extra = "ignore"  # Ignore extra environment variables
+
+
+def setup_logging(settings: Settings):
+    """Configure application logging."""
+    level = getattr(logging, settings.log_level.upper(), logging.INFO)
+
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+
+
+# Global settings instance
 settings = Settings()
+
+
+# Backward compatibility: provide uppercase aliases
+def __getattr__(name: str):
+    """Provide backward compatibility for old uppercase attribute names."""
+    settings_instance = settings
+    lower_name = name.lower()
+
+    # Map old names to new names
+    name_mapping = {
+        "MONGODB_URI": "mongodb_uri",
+        "DATABASE_NAME": "database_name",
+        "OPENAI_API_KEY": "openai_api_key",
+        "OPENAI_BASE_URL": "openai_base_url",
+        "OPENAI_MODEL_NAME": "openai_model_name",
+        "FIXED_TENANT_ID": "fixed_tenant_id",
+    }
+
+    if name in name_mapping:
+        return getattr(settings_instance, name_mapping[name])
+
+    raise AttributeError(f"'{type(settings_instance).__name__}' object has no attribute '{name}'")

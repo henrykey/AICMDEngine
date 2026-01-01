@@ -16,23 +16,23 @@ def get_db(request: Request) -> AsyncIOMotorDatabase:
 @router.post("/", response_model=CommandSet)
 async def create_command_set(
     command_set: CommandSet,
-    tenant_id: str = Depends(get_tenant_id),
+    tenant_id: int = Depends(get_tenant_id),
     db: AsyncIOMotorDatabase = Depends(get_db)
 ):
     # Enforce tenant_id from context
     command_set.tenant_id = tenant_id
-    
-    # Store
+
+    # Store in database
     command_set_dict = command_set.model_dump(by_alias=True, exclude={"id"})
     result = await db["command_sets"].insert_one(command_set_dict)
-    
+
     # Return with ID
     stored_set = await db["command_sets"].find_one({"_id": result.inserted_id})
     return CommandSet(**stored_set)
 
 @router.get("/", response_model=List[CommandSet])
 async def list_command_sets(
-    tenant_id: str = Depends(get_tenant_id),
+    tenant_id: int = Depends(get_tenant_id),
     db: AsyncIOMotorDatabase = Depends(get_db)
 ):
     cursor = db["command_sets"].find({"tenant_id": tenant_id})
@@ -44,17 +44,17 @@ async def list_command_sets(
 @router.delete("/{set_id}")
 async def delete_command_set(
     set_id: str,
-    tenant_id: str = Depends(get_tenant_id),
+    tenant_id: int = Depends(get_tenant_id),
     db: AsyncIOMotorDatabase = Depends(get_db)
 ):
     # Check ownership
     result = await db["command_sets"].delete_one({"_id": ObjectId(set_id), "tenant_id": tenant_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Command set not found")
-        
+
     # Also delete commands belonging to this set
     await db["commands"].delete_many({"command_set_id": set_id})
-    
+
     return {"status": "deleted"}
 
 # --- Commands Sub-resource ---
@@ -63,7 +63,7 @@ async def delete_command_set(
 async def create_command(
     set_id: str,
     command: Command,
-    tenant_id: str = Depends(get_tenant_id),
+    tenant_id: int = Depends(get_tenant_id),
     db: AsyncIOMotorDatabase = Depends(get_db)
 ):
     # Verify parent set existence and ownership
@@ -73,24 +73,24 @@ async def create_command(
 
     command.command_set_id = set_id
     command.tenant_id = tenant_id
-    
+
     command_dict = command.model_dump(by_alias=True, exclude={"id"})
     result = await db["commands"].insert_one(command_dict)
-    
+
     stored_cmd = await db["commands"].find_one({"_id": result.inserted_id})
     return Command(**stored_cmd)
 
 @router.get("/{set_id}/commands", response_model=List[Command])
 async def list_commands(
     set_id: str,
-    tenant_id: str = Depends(get_tenant_id),
+    tenant_id: int = Depends(get_tenant_id),
     db: AsyncIOMotorDatabase = Depends(get_db)
 ):
     # Verify parent set
     parent_set = await db["command_sets"].find_one({"_id": ObjectId(set_id), "tenant_id": tenant_id})
     if not parent_set:
         raise HTTPException(status_code=404, detail="Command Set not found")
-        
+
     cursor = db["commands"].find({"command_set_id": set_id})
     results = []
     async for doc in cursor:
@@ -103,7 +103,7 @@ async def list_commands(
 async def smart_import_commands(
     set_id: str,
     document: str = Body(..., embed=True),
-    tenant_id: str = Depends(get_tenant_id),
+    tenant_id: int = Depends(get_tenant_id),
     db: AsyncIOMotorDatabase = Depends(get_db)
 ):
     """
@@ -114,7 +114,7 @@ async def smart_import_commands(
     from src.services.llm_client import llm_client
     import json
     import yaml
-    
+
     # Verify parent set existence
     parent_set = await db["command_sets"].find_one({"_id": ObjectId(set_id), "tenant_id": tenant_id})
     if not parent_set:

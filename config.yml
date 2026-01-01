@@ -1,10 +1,13 @@
+# Configuration File
+# Sensitive information (API keys, etc.) should be stored in .env file
+
 backend:
-  mongodb_uri: "mongodb://jnuc2"
-  database_name: "nl_tps"
-  openai_model_name: "deepseek-chat"
-  openai_api_key: "sk-503b9d7cd900429c9215027fad9071cc"
-  openai_base_url: "https://api.deepseek.com/v1"
-  fixed_tenant_id: 1
+  # mongodb_uri: "mongodb://localhost:27017"  # Use MONGODB_URI in .env
+  # database_name: "nl_tps"  # Use DATABASE_NAME in .env
+  # openai_api_key: "sk-xxx"  # Use OPENAI_API_KEY in .env
+  # openai_base_url: "https://api.openai.com/v1"  # Use OPENAI_BASE_URL in .env
+  # openai_model_name: "gpt-4"  # Use OPENAI_MODEL_NAME in .env
+  # fixed_tenant_id: 1  # Use FIXED_TENANT_ID in .env (development only)
 
 frontend:
   nlTpsApiUrl: "http://localhost:8000/v1"

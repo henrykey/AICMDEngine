@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import { api } from '../lib/api';
 
 interface PlanStep {
@@ -25,19 +25,33 @@ interface ConversationMessage {
     content: string;
 }
 
+interface CommandSet {
+    _id?: string;
+    name: string;
+    description?: string;
+}
+
 export default function TaskPlayground() {
     const [goal, setGoal] = useState('');
     const [conversationHistory, setConversationHistory] = useState<ConversationMessage[]>([]);
     const [lastQuestion, setLastQuestion] = useState<string | null>(null);
+    const [selectedCommandSets, setSelectedCommandSets] = useState<string[]>([]);
+
+    const { data: commandSets } = useQuery({
+        queryKey: ['command-sets'],
+        queryFn: async () => {
+            const res = await api.get<CommandSet[]>('/command-sets/');
+            return res.data;
+        }
+    });
 
     const mutation = useMutation({
-        mutationFn: async (payload: { goal: string; conversationHistory?: ConversationMessage[] }) => {
+        mutationFn: async (payload: any) => {
             const res = await api.post<PlanResponse>('/tasks/', payload);
             return res.data;
         },
         onSuccess: (data) => {
             if (data.question) {
-                // AI asked a question, save it
                 setLastQuestion(data.question);
                 const newHistory: ConversationMessage[] = [
                     ...conversationHistory,
@@ -46,7 +60,6 @@ export default function TaskPlayground() {
                 ];
                 setConversationHistory(newHistory);
             } else {
-                // Plan is ready, clear conversation
                 setLastQuestion(null);
                 setConversationHistory([]);
             }
@@ -54,10 +67,16 @@ export default function TaskPlayground() {
     });
 
     const handlePlanTask = () => {
-        mutation.mutate({
+        const payload: any = {
             goal,
             conversationHistory: conversationHistory.length > 0 ? conversationHistory : undefined
-        });
+        };
+
+        if (selectedCommandSets.length > 0) {
+            payload.context = { commandSetNames: selectedCommandSets };
+        }
+
+        mutation.mutate(payload);
     };
 
     const handleClearConversation = () => {
@@ -66,12 +85,51 @@ export default function TaskPlayground() {
         setGoal('');
     };
 
+    const toggleCommandSet = (name: string) => {
+        setSelectedCommandSets(prev =>
+            prev.includes(name) ? prev.filter(n => n !== name) : [...prev, name]
+        );
+    };
+
     return (
         <div className="max-w-4xl mx-auto space-y-6">
             <div className="bg-gray-800 p-6 rounded-lg border border-gray-700">
                 <h2 className="text-lg font-semibold mb-4">Task Planning Playground</h2>
 
-                {/* Show conversation history if exists */}
+                {/* Command Set Selection */}
+                <div className="mb-4 p-4 bg-gray-900 rounded border border-gray-700">
+                    <label className="block text-sm font-medium mb-2 text-gray-300">
+                        📚 Command Sets (optional - leave empty to use all)
+                    </label>
+                    <div className="flex flex-wrap gap-2">
+                        {commandSets?.map((cs) => (
+                            <button
+                                key={cs._id}
+                                onClick={() => toggleCommandSet(cs.name)}
+                                className={`px-3 py-1 rounded text-sm transition ${selectedCommandSets.includes(cs.name)
+                                        ? 'bg-blue-600 text-white'
+                                        : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                                    }`}
+                            >
+                                {cs.name}
+                            </button>
+                        ))}
+                        {commandSets?.length === 0 && (
+                            <span className="text-gray-500 text-sm">No command sets available</span>
+                        )}
+                    </div>
+                    {selectedCommandSets.length > 0 && (
+                        <div className="mt-2 text-xs text-blue-400">
+                            Using: {selectedCommandSets.join(', ')}
+                        </div>
+                    )}
+                    {selectedCommandSets.length === 0 && commandSets && commandSets.length > 0 && (
+                        <div className="mt-2 text-xs text-gray-500">
+                            Using all available command sets
+                        </div>
+                    )}
+                </div>
+
                 {conversationHistory.length > 0 && (
                     <div className="mb-4 p-4 bg-gray-900 rounded border border-gray-700 space-y-2">
                         <div className="flex justify-between items-center mb-2">
@@ -112,16 +170,14 @@ export default function TaskPlayground() {
 
             {mutation.error && (
                 <div className="bg-red-900/50 border border-red-700 text-red-200 p-4 rounded">
-                    Error: {mutation.error.message}
+                    Error: {String(mutation.error)}
                 </div>
             )}
 
             {mutation.data && (
                 <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4">
-                    {/* Status Header */}
                     <div className="flex items-center gap-4">
-                        <div className={`px-3 py-1 rounded-full text-sm font-bold ${mutation.data.type === 'plan_ready' ? 'bg-green-900 text-green-200' : 'bg-yellow-900 text-yellow-200'
-                            }`}>
+                        <div className={`px-3 py-1 rounded-full text-sm font-bold ${mutation.data.type === 'plan_ready' ? 'bg-green-900 text-green-200' : 'bg-yellow-900 text-yellow-200'}`}>
                             {mutation.data.type === 'plan_ready' ? 'PLAN READY' : 'CLARIFICATION NEEDED'}
                         </div>
                         <div className="text-gray-400 text-sm">
@@ -129,8 +185,8 @@ export default function TaskPlayground() {
                         </div>
                         {mutation.data.risk_assessment && (
                             <div className={`px-3 py-1 rounded-full text-sm font-bold border ${mutation.data.risk_assessment.level === 'critical' ? 'bg-red-900 text-red-100 border-red-500' :
-                                mutation.data.risk_assessment.level === 'high' ? 'bg-orange-900 text-orange-100 border-orange-500' :
-                                    'bg-blue-900 text-blue-100 border-blue-500'
+                                    mutation.data.risk_assessment.level === 'high' ? 'bg-orange-900 text-orange-100 border-orange-500' :
+                                        'bg-blue-900 text-blue-100 border-blue-500'
                                 }`}>
                                 risk: {mutation.data.risk_assessment.level}
                             </div>
@@ -143,7 +199,6 @@ export default function TaskPlayground() {
                         </div>
                     )}
 
-                    {/* Question / Plan */}
                     {mutation.data.question && (
                         <div className="bg-gray-800 p-6 rounded-lg border border-yellow-700">
                             <h3 className="text-yellow-500 font-medium mb-2">AI Question:</h3>

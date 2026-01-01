@@ -19,7 +19,7 @@ class ParameterDefinition(BaseModel):
 class Command(BaseModel):
     id: Optional[str] = Field(None, alias="_id")
     command_set_id: str
-    tenant_id: str
+    tenant_id: int
     command: str
     summary: str
     description: Optional[str] = None
@@ -27,7 +27,7 @@ class Command(BaseModel):
     parameters: Any = None  # Changed to Any to accept dict or list
     examples: List[str] = []
     risk_level: RiskLevel = Field(default=RiskLevel.NORMAL, alias="riskLevel")
-    
+
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -35,8 +35,8 @@ class Command(BaseModel):
     @classmethod
     def convert_objectid(cls, data: Any) -> Any:
         """Convert MongoDB ObjectId to string before validation"""
-        if isinstance(data, dict) and '_id' in data:
-            if isinstance(data['_id'], ObjectId):
+        if isinstance(data, dict):
+            if '_id' in data and isinstance(data['_id'], ObjectId):
                 data['_id'] = str(data['_id'])
         return data
 

@@ -7,11 +7,11 @@ class CommandSet(BaseModel):
     id: Optional[str] = Field(None, alias="_id")
     name: str
     description: Optional[str] = None
-    tenant_id: str
+    tenant_id: int
     source_type: str = "manual"
     source_uri: Optional[str] = None
     version: str = "1.0.0"
-    
+
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -19,8 +19,8 @@ class CommandSet(BaseModel):
     @classmethod
     def convert_objectid(cls, data: Any) -> Any:
         """Convert MongoDB ObjectId to string before validation"""
-        if isinstance(data, dict) and '_id' in data:
-            if isinstance(data['_id'], ObjectId):
+        if isinstance(data, dict):
+            if '_id' in data and isinstance(data['_id'], ObjectId):
                 data['_id'] = str(data['_id'])
         return data
 

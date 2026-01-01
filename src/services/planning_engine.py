@@ -1,16 +1,19 @@
 from typing import List, Dict, Any
 from motor.motor_asyncio import AsyncIOMotorDatabase
 import json
+import logging
 from src.models.models import TaskRequest, TaskPlanResponse, PlanStep, RiskAssessment
 from src.models.command_set import CommandSet
 from src.models.command import Command
 from src.services.llm_client import llm_client
 
+logger = logging.getLogger(__name__)
+
 class PlanningEngine:
     def __init__(self, db: AsyncIOMotorDatabase):
         self.db = db
 
-    async def get_available_commands(self, tenant_id: str, command_set_names: List[str] = None) -> List[Dict[str, Any]]:
+    async def get_available_commands(self, tenant_id: int, command_set_names: List[str] = None) -> List[Dict[str, Any]]:
         """
         Fetch commands available for the given tenant and optional command set names.
         """
@@ -24,8 +27,8 @@ class PlanningEngine:
             cs_ids = [str(doc["_id"]) async for doc in cs_cursor]
             query["command_set_id"] = {"$in": cs_ids}
 
-        # Fetch commands
-        cursor = self.db["commands"].find(query)
+        # Fetch commands (limit to prevent memory issues)
+        cursor = self.db["commands"].find(query).limit(1000)
         commands = []
         async for doc in cursor:
             # Convert ObjectId to string for JSON serialization if needed, or keep as is
@@ -38,9 +41,11 @@ class PlanningEngine:
                 "riskLevel": doc.get("riskLevel", "normal")
             }
             commands.append(cmd_dict)
+
+        logger.info(f"Loaded {len(commands)} commands for tenant {tenant_id}")
         return commands
 
-    async def plan_task(self, request: TaskRequest, tenant_id: str, user_id: str = None) -> TaskPlanResponse:
+    async def plan_task(self, request: TaskRequest, tenant_id: int, user_id: str = None) -> TaskPlanResponse:
         # 1. Load Knowledge (Commands)
         command_set_names = request.context.command_set_names if request.context else None
         commands = await self.get_available_commands(tenant_id, command_set_names)
@@ -105,37 +110,30 @@ class PlanningEngine:
 
             return response
 
-        except json.JSONDecodeError:
-             return TaskPlanResponse(
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse LLM response as JSON: {e}")
+            return TaskPlanResponse(
                 type="clarification_needed",
                 confidence=0.0,
                 question="The system failed to generate a valid plan (JSON Error). Please try rephrasing."
             )
         except Exception as e:
-            print(f"Planning Error: {e}")
+            logger.error(f"Planning failed unexpectedly: {e}", exc_info=True)
             return TaskPlanResponse(
                 type="clarification_needed",
                 confidence=0.0,
                 question=f"An internal error occurred: {str(e)}"
             )
 
-    def _build_prompt(self, user_goal: str, commands: List[Dict[str, Any]], tenant_id, conversation_history: List = None) -> list[Dict[str, str]]:
+    def _build_prompt(self, user_goal: str, commands: List[Dict[str, Any]], tenant_id: int, conversation_history: List = None) -> list[Dict[str, str]]:
         commands_json = json.dumps(commands, indent=2, ensure_ascii=False)
-        
-        # Convert tenant_id to integer if it's a numeric string, or keep as int if already int
-        if isinstance(tenant_id, int):
-            tenant_id_value = tenant_id
-        elif isinstance(tenant_id, str) and tenant_id.isdigit():
-            tenant_id_value = int(tenant_id)
-        else:
-            tenant_id_value = tenant_id
-        
+
         system_prompt = f"""
 # ROLE
 You are an expert AI Task Planner (NL-TPS). Your goal is to convert a user's high-level objective into a precise, step-by-step execution plan based on a given set of available commands.
 
 # USER CONTEXT
-Current User's Tenant ID: {tenant_id_value}
+Current User's Tenant ID: {tenant_id}
 
 # COMMANDS
 Here are the available commands you can use. Each command is an API endpoint.
@@ -156,11 +154,11 @@ Here are the available commands you can use. Each command is an API endpoint.
    - Example:
      ```json
      "params": {{
-       "headers": {{ "X-Tenant-ID": {tenant_id_value} }},
+       "headers": {{ "X-Tenant-ID": {tenant_id} }},
        "body": {{ "username": "alice", "email": "alice@example.com" }}
      }}
      ```
-5. **Default Tenant ID**: Unless the user explicitly mentions a different tenant, ALWAYS use {tenant_id_value} (as an INTEGER) as the X-Tenant-ID header value.
+5. **Default Tenant ID**: Unless the user explicitly mentions a different tenant, ALWAYS use {tenant_id} (as an INTEGER) as the X-Tenant-ID header value.
 6. Dependency Identification: If a step requires information from a previous step's result, use JSONPath syntax (e.g., "$.steps[0].response.body.id").
 7. Risk Assessment: Evaluate the plan. If it involves high-risk actions (like DELETE, or commands marked as 'critical'), allow it but flag it in the 'risk_assessment' field.
 8. **Clarification Protocol**:
@@ -177,7 +175,7 @@ Here are the available commands you can use. Each command is an API endpoint.
       "step": <integer>,
       "description": "<string>",
       "command": "<command_string>",
-      "params": {{ <key>: <value> }} 
+      "params": {{ <key>: <value> }}
     }}
   ],
   "question": "<string or null>",
@@ -187,7 +185,7 @@ Here are the available commands you can use. Each command is an API endpoint.
   }}
 }}
 
-**IMPORTANT**: 
+**IMPORTANT**:
 - If you set "question", then "plan" MUST be null or empty array.
 - If you set "plan", then "question" MUST be null.
 - Never generate both a plan AND a question in the same response.

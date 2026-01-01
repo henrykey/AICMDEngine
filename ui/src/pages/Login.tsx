@@ -44,9 +44,9 @@ export default function Login() {
             localStorage.setItem('token', token);
             localStorage.setItem('username', username);
 
-            // Default tenant check
+            // Default tenant check - must match database tenant_id (integer 1)
             if (!localStorage.getItem('tenantId')) {
-                localStorage.setItem('tenantId', 'tenant-dev-001');
+                localStorage.setItem('tenantId', '1');
             }
 
             navigate('/');
