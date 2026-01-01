@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { api } from '../lib/api';
 
@@ -162,19 +162,6 @@ export default function TaskPlayground() {
         setCurrentPlan(null);
         setExecutionId(null);
         setExecutionDetail(null);
-    };
-
-    const handleClearConversation = () => {
-        const payload: any = {
-            goal,
-            conversationHistory: conversationHistory.length > 0 ? conversationHistory : undefined
-        };
-
-        if (selectedCommandSets.length > 0) {
-            payload.context = { commandSetNames: selectedCommandSets };
-        }
-
-        mutation.mutate(payload);
     };
 
     const handleClearConversation = () => {
