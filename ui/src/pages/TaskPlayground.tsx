@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { api } from '../lib/api';
 
@@ -20,6 +20,32 @@ interface PlanResponse {
     }
 }
 
+interface ExecutionRequest {
+    plan: PlanStep[];
+    global_timeout?: number;
+    tenant_id?: number;
+    auth_token?: string;
+}
+
+interface ExecutionResponse {
+    execution_id: string;
+    status: string;
+    total_steps: number;
+    started_at: string;
+}
+
+interface ExecutionDetail {
+    execution_id: string;
+    status: string;
+    total_steps: number;
+    completed_steps: number;
+    failed_steps: number;
+    started_at: string;
+    completed_at?: string;
+    error_message?: string;
+    steps: any[];
+}
+
 interface ConversationMessage {
     role: 'user' | 'assistant';
     content: string;
@@ -36,12 +62,37 @@ export default function TaskPlayground() {
     const [conversationHistory, setConversationHistory] = useState<ConversationMessage[]>([]);
     const [lastQuestion, setLastQuestion] = useState<string | null>(null);
     const [selectedCommandSets, setSelectedCommandSets] = useState<string[]>([]);
+    const [currentPlan, setCurrentPlan] = useState<PlanStep[] | null>(null);
+    const [executionId, setExecutionId] = useState<string | null>(null);
+    const [executionDetail, setExecutionDetail] = useState<ExecutionDetail | null>(null);
 
     const { data: commandSets } = useQuery({
         queryKey: ['command-sets'],
         queryFn: async () => {
             const res = await api.get<CommandSet[]>('/command-sets/');
             return res.data;
+        }
+    });
+
+    const executeMutation = useMutation({
+        mutationFn: async (request: ExecutionRequest) => {
+            const tenantId = localStorage.getItem('tenantId');
+            const token = localStorage.getItem('token');
+
+            const payload: any = {
+                plan: request.plan,
+                global_timeout: request.global_timeout || 60,
+                tenant_id: tenantId ? parseInt(tenantId) : undefined,
+                auth_token: token || undefined
+            };
+
+            const res = await api.post<ExecutionResponse>('/executions/', payload);
+            return res.data;
+        },
+        onSuccess: (data) => {
+            setExecutionId(data.execution_id);
+            // Start polling for execution details
+            pollExecutionDetails(data.execution_id);
         }
     });
 
@@ -67,6 +118,53 @@ export default function TaskPlayground() {
     });
 
     const handlePlanTask = () => {
+        const payload: any = {
+            goal,
+            conversationHistory: conversationHistory.length > 0 ? conversationHistory : undefined
+        };
+
+        if (selectedCommandSets.length > 0) {
+            payload.context = { commandSetNames: selectedCommandSets };
+        }
+
+        mutation.mutate(payload);
+    };
+
+    const handleExecutePlan = (plan: PlanStep[]) => {
+        setCurrentPlan(plan);
+        executeMutation.mutate({
+            plan,
+            global_timeout: 60
+        });
+    };
+
+    const pollExecutionDetails = async (execId: string) => {
+        const interval = setInterval(async () => {
+            try {
+                const res = await api.get<ExecutionDetail>(`/executions/${execId}`);
+                setExecutionDetail(res.data);
+
+                // Stop polling if execution is complete
+                if (['completed', 'failed', 'partial_failed', 'timeout', 'rollback'].includes(res.data.status)) {
+                    clearInterval(interval);
+                }
+            } catch (error) {
+                console.error('Failed to fetch execution details:', error);
+                clearInterval(interval);
+            }
+        }, 2000); // Poll every 2 seconds
+
+        // Cleanup on unmount
+        return () => clearInterval(interval);
+    };
+
+    const resetPlan = () => {
+        setCurrentPlan(null);
+        setExecutionId(null);
+        setExecutionDetail(null);
+    };
+
+    const handleClearConversation = () => {
         const payload: any = {
             goal,
             conversationHistory: conversationHistory.length > 0 ? conversationHistory : undefined
@@ -207,8 +305,18 @@ export default function TaskPlayground() {
                         </div>
                     )}
 
-                    {mutation.data.plan && (
+                    {mutation.data.plan && !currentPlan && (
                         <div className="space-y-4">
+                            <div className="flex gap-4 items-center">
+                                <h3 className="text-lg font-semibold">Generated Plan</h3>
+                                <button
+                                    onClick={() => handleExecutePlan(mutation.data.plan!)}
+                                    className="bg-green-600 hover:bg-green-700 px-6 py-2 rounded font-medium transition"
+                                >
+                                    ▶ Execute This Plan
+                                </button>
+                            </div>
+
                             {mutation.data.plan.map((step) => (
                                 <div key={step.step} className="bg-gray-800 p-4 rounded-lg border border-gray-700 flex gap-4">
                                     <div className="flex-none bg-gray-700 w-8 h-8 rounded-full flex items-center justify-center font-bold text-gray-300">
@@ -227,6 +335,82 @@ export default function TaskPlayground() {
                                     </div>
                                 </div>
                             ))}
+                        </div>
+                    )}
+
+                    {/* Execution Status Display */}
+                    {executionId && executionDetail && (
+                        <div className="bg-gray-800 p-6 rounded-lg border border-blue-700 space-y-4">
+                            <div className="flex justify-between items-center">
+                                <h3 className="text-lg font-semibold text-blue-400">Execution Status</h3>
+                                <button
+                                    onClick={resetPlan}
+                                    className="text-sm text-gray-400 hover:text-white"
+                                >
+                                    New Plan
+                                </button>
+                            </div>
+
+                            <div className="grid grid-cols-3 gap-4">
+                                <div className="bg-gray-900 p-3 rounded">
+                                    <div className="text-xs text-gray-400">Execution ID</div>
+                                    <div className="font-mono text-sm">{executionId.substring(0, 8)}...</div>
+                                </div>
+                                <div className="bg-gray-900 p-3 rounded">
+                                    <div className="text-xs text-gray-400">Status</div>
+                                    <div className={`font-bold ${
+                                        executionDetail.status === 'completed' ? 'text-green-400' :
+                                        executionDetail.status === 'failed' ? 'text-red-400' :
+                                        executionDetail.status === 'running' ? 'text-blue-400' :
+                                        'text-yellow-400'
+                                    }`}>
+                                        {executionDetail.status.toUpperCase()}
+                                    </div>
+                                </div>
+                                <div className="bg-gray-900 p-3 rounded">
+                                    <div className="text-xs text-gray-400">Progress</div>
+                                    <div className="font-mono text-sm">
+                                        {executionDetail.completed_steps}/{executionDetail.total_steps}
+                                    </div>
+                                </div>
+                            </div>
+
+                            {executionDetail.error_message && (
+                                <div className="bg-red-900/50 border border-red-700 p-3 rounded">
+                                    <div className="text-xs text-red-400">Error</div>
+                                    <div className="text-red-300">{executionDetail.error_message}</div>
+                                </div>
+                            )}
+
+                            {/* Steps Status */}
+                            {executionDetail.steps && executionDetail.steps.length > 0 && (
+                                <div className="space-y-2">
+                                    <h4 className="text-sm font-medium text-gray-300">Step Details</h4>
+                                    {executionDetail.steps.map((step, index) => (
+                                        <div key={index} className="flex items-center gap-3 bg-gray-900 p-2 rounded">
+                                            <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${
+                                                step.status === 'success' ? 'bg-green-700 text-green-200' :
+                                                step.status === 'failed' ? 'bg-red-700 text-red-200' :
+                                                step.status === 'running' ? 'bg-blue-700 text-blue-200' :
+                                                'bg-gray-600 text-gray-300'
+                                            }`}>
+                                                {step.step_number}
+                                            </div>
+                                            <div className="flex-1 min-w-0">
+                                                <div className="text-sm truncate">{step.description}</div>
+                                                <div className="text-xs text-gray-400">{step.command}</div>
+                                            </div>
+                                            <div className={`text-xs font-medium ${
+                                                step.status === 'success' ? 'text-green-400' :
+                                                step.status === 'failed' ? 'text-red-400' :
+                                                'text-gray-400'
+                                            }`}>
+                                                {step.status}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
                         </div>
                     )}
 
