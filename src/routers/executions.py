@@ -28,6 +28,7 @@ def get_engine(db: AsyncIOMotorDatabase = Depends(get_db)) -> ExecutionEngine:
 @router.post("/", response_model=ExecutionResponse)
 async def execute_plan(
     request: ExecutionRequest,
+    http_request: Request,
     tenant_id: int = Depends(get_tenant_id),
     engine: ExecutionEngine = Depends(get_engine)
 ):
@@ -36,6 +37,7 @@ async def execute_plan(
 
     Args:
         request: 执行请求，包含计划步骤列表
+        http_request: HTTP 请求对象（用于提取认证令牌）
         tenant_id: 租户 ID（从认证上下文获取）
         engine: 执行引擎
 
@@ -45,19 +47,6 @@ async def execute_plan(
     Raises:
         HTTPException: 计划无效或执行失败
     """
-    # 创建执行请求，tenant_id 通过依赖注入获取
-    execution_request = ExecutionRequest(
-        plan=request.plan,
-        global_timeout=request.global_timeout,
-        auth_token=request.auth_token
-    )
-
-    # 如果未提供 auth_token，尝试从请求头获取
-    if not execution_request.auth_token:
-        # TODO: 从 Membership 认证头中提取 token
-        # 暂时使用空字符串，实际应该从 Request 对象中提取
-        pass
-
     # Validate plan is not empty
     if not request.plan or len(request.plan) == 0:
         raise HTTPException(
@@ -66,6 +55,19 @@ async def execute_plan(
         )
 
     try:
+        # 创建执行请求，tenant_id 通过依赖注入获取
+        execution_request = ExecutionRequest(
+            plan=request.plan,
+            global_timeout=request.global_timeout,
+            auth_token=request.auth_token
+        )
+
+        # 如果未提供 auth_token，从 HTTP 请求头中提取
+        if not execution_request.auth_token:
+            auth_header = http_request.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                execution_request.auth_token = auth_header[7:]  # 移除 "Bearer " 前缀
+
         # 获取 user_id（从认证上下文）
         # TODO: 从 Membership 认证中获取 user_id
         user_id = "system"  # 临时使用 system，实际应该从 JWT 中提取
