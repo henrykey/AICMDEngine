@@ -1,9 +1,9 @@
 import logging
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from src.core.config import settings, setup_logging
-from src.routers import tasks, command_sets
+from src.routers import tasks, command_sets, executions
 
 # Setup logging
 setup_logging(settings)
@@ -33,6 +33,11 @@ async def startup_db_client():
     logger.info(f"Starting NL-TPS with model: {settings.openai_model_name}")
     app.mongodb_client = AsyncIOMotorClient(settings.mongodb_uri)
     app.mongodb = app.mongodb_client[settings.database_name]
+
+    # 创建数据库索引
+    from src.db_indexes import create_indexes
+    await create_indexes()
+
     logger.info(f"Connected to MongoDB at {settings.database_name}")
 
 @app.on_event("shutdown")
@@ -42,6 +47,7 @@ async def shutdown_db_client():
 
 app.include_router(tasks.router, prefix="/v1/tasks", tags=["Tasks"])
 app.include_router(command_sets.router, prefix="/v1/command-sets", tags=["Command Sets"])
+app.include_router(executions.router, prefix="/v1/executions", tags=["Executions"])
 
 if __name__ == "__main__":
     import uvicorn

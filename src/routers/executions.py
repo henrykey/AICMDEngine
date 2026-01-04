@@ -58,6 +58,13 @@ async def execute_plan(
         # 暂时使用空字符串，实际应该从 Request 对象中提取
         pass
 
+    # Validate plan is not empty
+    if not request.plan or len(request.plan) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Plan cannot be empty. Please ensure a valid plan is provided before execution."
+        )
+
     try:
         # 获取 user_id（从认证上下文）
         # TODO: 从 Membership 认证中获取 user_id
@@ -68,6 +75,8 @@ async def execute_plan(
 
         return response
 
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Execution failed: {str(e)}")
 

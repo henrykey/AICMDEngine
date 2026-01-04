@@ -1,16 +1,68 @@
-# Configuration File
-# Sensitive information (API keys, etc.) should be stored in .env file
+# Application Configuration File
+# Sensitive information (API keys, secrets, tokens) should be stored in .env file
 
+# Application Settings
+app:
+  name: "AICMDEngine"
+  version: "1.0.0"
+  description: "AI Code Management Development Engine"
+
+# Backend API Configuration
 backend:
-  # mongodb_uri: "mongodb://localhost:27017"  # Use MONGODB_URI in .env
-  # database_name: "nl_tps"  # Use DATABASE_NAME in .env
-  # openai_api_key: "sk-xxx"  # Use OPENAI_API_KEY in .env
-  # openai_base_url: "https://api.openai.com/v1"  # Use OPENAI_BASE_URL in .env
-  # openai_model_name: "gpt-4"  # Use OPENAI_MODEL_NAME in .env
-  # fixed_tenant_id: 1  # Use FIXED_TENANT_ID in .env (development only)
+  host: "localhost"
+  port: 8000
+  base_path: "/v1"
 
+# External Services Configuration
+services:
+  membership:
+    host: "localhost"
+    port: 8080
+    base_path: "/api/v1"
+
+  ai_providers:
+    - name: "deepseek"
+      priority: 1
+      base_url: "https://api.deepseek.com/v1"
+      model_name: "deepseek-chat"
+      temperature: 0.7
+      api_key_env: "DEEPSEEK_API_KEY"
+
+    - name: "openai"
+      priority: 2
+      base_url: "https://api.openai.com/v1"
+      model_name: "gpt-5"
+      temperature: 0.5
+      api_key_env: "OPENAI_API_KEY"
+
+# Database Configuration
+database:
+  host: "jnuc2"
+  port: 27017
+  name: "nl_tps"
+  connection_options: ""
+
+# Frontend Configuration (for UI build-time reference)
 frontend:
-  nlTpsApiUrl: "http://localhost:8000/v1"
-  membershipApiUrl: ""
-  membershipLoginPath: "/v2/auth/login"
-  membershipUserPath: "/v2/users/me"
+  # These are used by UI during development and build
+  backend_api_url: "http://localhost:8000/v1"
+  membership_api_url: "http://localhost:8080"
+
+  # Membership API paths (for API client configuration)
+  membership:
+    login_path: "/v2/auth/login"
+    user_path: "/v2/users/me"
+    members_path: "/v2/members"
+
+# Logging Configuration
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: ""
+
+# Development Configuration (optional)
+development:
+  # Fixed tenant ID for development (comment out for multi-tenant mode)
+  # fixed_tenant_id: 1
+  auto_reload: true
+  debug: true

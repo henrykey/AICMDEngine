@@ -131,6 +131,10 @@ export default function TaskPlayground() {
     };
 
     const handleExecutePlan = (plan: PlanStep[]) => {
+        if (!plan || plan.length === 0) {
+            alert("Cannot execute empty plan. Please generate a valid plan first.");
+            return;
+        }
         setCurrentPlan(plan);
         executeMutation.mutate({
             plan,
@@ -285,14 +289,16 @@ export default function TaskPlayground() {
                     )}
 
                     {mutation.data.question && (
-                        <div className="bg-gray-800 p-6 rounded-lg border border-yellow-700">
-                            <h3 className="text-yellow-500 font-medium mb-2">AI Question:</h3>
-                            <p className="text-xl mb-4">{mutation.data.question}</p>
-                            <p className="text-sm text-gray-400">💡 Type your answer above and click "Answer"</p>
+                        <div className="bg-yellow-900/30 border border-yellow-700 p-6 rounded-lg">
+                            <h3 className="text-yellow-400 font-medium mb-3">❓ AI Needs Clarification</h3>
+                            <p className="text-lg mb-4 text-yellow-200">{mutation.data.question}</p>
+                            <div className="bg-yellow-900/50 p-3 rounded text-sm text-yellow-300 mb-3">
+                                💡 Please provide your answer in the input field above and click "Answer" to continue planning.
+                            </div>
                         </div>
                     )}
 
-                    {mutation.data.plan && !currentPlan && (
+                    {mutation.data.plan && mutation.data.type === 'plan_ready' && !currentPlan && (
                         <div className="space-y-4">
                             <div className="flex gap-4 items-center">
                                 <h3 className="text-lg font-semibold">Generated Plan</h3>

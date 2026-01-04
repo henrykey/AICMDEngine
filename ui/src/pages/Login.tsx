@@ -16,14 +16,13 @@ export default function Login() {
         setError('');
 
         try {
-            const config = getConfig(); // Get latest config
-
-            // 1. Login to get Token
-            // According to docs/MEMBERSHIP_USAGE_MANUAL.md, X-Tenant-ID is required
+            const config = getConfig();
+            // According to backend docs, X-Tenant-ID is required
             // We use '1' or 'default' as initial tenant for login if not known
             const tenantId = localStorage.getItem('tenantId') || '1';
 
-            const res = await membershipApi.post(config.membershipLoginPath, {
+            const loginPath = config.membershipLoginPath || '/v2/auth/login';
+            const res = await membershipApi.post(loginPath, {
                 username,
                 password,
                 device_id: 'nl-tps-admin-01' // Optional but recommended
@@ -105,7 +104,7 @@ export default function Login() {
                     </button>
 
                     <div className="text-xs text-center text-gray-500 mt-4">
-                        Connecting to: {getConfig().membershipApiUrl}
+                        Connecting to: {getConfig().membershipApiUrl || 'Membership Service'}
                     </div>
                 </form>
             </div>

@@ -94,6 +94,17 @@ class ExecutionRequest(BaseModel):
     # 可选：直接传递认证信息
     auth_token: Optional[str] = None  # JWT token
 
+    @model_validator(mode='after')
+    def validate_plan(self):
+        """Validate that plan is not empty and contains valid steps"""
+        if not self.plan:
+            raise ValueError("Plan cannot be empty")
+        if not isinstance(self.plan, list):
+            raise ValueError("Plan must be a list")
+        if len(self.plan) == 0:
+            raise ValueError("Plan must contain at least one step")
+        return self
+
 
 class ExecutionResponse(BaseModel):
     """执行响应"""

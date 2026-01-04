@@ -1,6 +1,6 @@
 import pytest
 from src.services.planning_engine import PlanningEngine
-from src.models.models import TaskRequest, TaskContext
+from src.models.models import TaskRequest, TaskRequestContext
 
 
 class TestPlanningEngine:
@@ -97,7 +97,7 @@ class TestPlanningEngine:
 
         request = TaskRequest(
             goal="Create a user",
-            context=TaskContext(
+            context=TaskRequestContext(
                 tenant_id=1,
                 command_set_names=["non_existent"]
             )
@@ -117,7 +117,7 @@ class TestPlanningEngine:
 
         request = TaskRequest(
             goal="Create a new user account",
-            context=TaskContext(
+            context=TaskRequestContext(
                 tenant_id=1,
                 command_set_names=["test_user_management"]
             )

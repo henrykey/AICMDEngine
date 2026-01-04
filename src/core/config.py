@@ -12,7 +12,12 @@ load_dotenv()
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
-    # API Configuration
+    # AI Provider Configuration
+    deepseek_api_key: str = Field(default="", env="DEEPSEEK_API_KEY")
+    deepseek_base_url: str = Field(default="https://api.deepseek.com/v1", env="DEEPSEEK_BASE_URL")
+    deepseek_model_name: str = Field(default="deepseek-chat", env="DEEPSEEK_MODEL_NAME")
+
+    # Legacy OpenAI Configuration (for fallback)
     openai_api_key: str = Field(default="", env="OPENAI_API_KEY")
     openai_base_url: str = Field(default="https://api.openai.com/v1", env="OPENAI_BASE_URL")
     openai_model_name: str = Field(default="gpt-4", env="OPENAI_MODEL_NAME")
@@ -23,6 +28,9 @@ class Settings(BaseSettings):
 
     # Tenant Configuration
     fixed_tenant_id: Optional[int] = Field(default=None, env="FIXED_TENANT_ID")
+
+    # Membership Service Configuration
+    membership_service_url: str = Field(default="http://localhost:8080", env="MEMBERSHIP_SERVICE_URL")
 
     # Logging Configuration
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
