@@ -244,6 +244,86 @@ development:
 
 ## 📚 常见任务
 
+### 使用自然语言创建和管理用户
+
+AICMDEngine 最强大的功能是使用自然语言命令来创建、修改和删除用户。以下是完整的工作流程：
+
+#### 步骤 1: 从 Membership Service 获取认证令牌
+
+```bash
+curl -X POST http://localhost:8080/v2/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "admin",
+    "password": "admin123"
+  }'
+```
+
+响应将包含 `access_token`。
+
+#### 步骤 2: 使用自然语言规划任务
+
+```bash
+curl -X POST http://localhost:8000/v1/tasks/ \
+  -H "Content-Type: application/json" \
+  -H "X-Tenant-ID: 1" \
+  -d '{
+    "goal": "Create a new user testuser333 with email testuser333@example.com",
+    "conversationHistory": []
+  }'
+```
+
+系统将返回一个执行计划或澄清问题。
+
+#### 步骤 3: 执行计划创建用户
+
+```bash
+curl -X POST http://localhost:8000/v1/executions/ \
+  -H "Content-Type: application/json" \
+  -H "X-Tenant-ID: 1" \
+  -H "Authorization: Bearer <your-access-token>" \
+  -d '{
+    "plan": [
+      {
+        "step": 1,
+        "description": "Create a new user",
+        "command": "POST /v2/members",
+        "params": {
+          "headers": {"X-Tenant-ID": 1},
+          "body": {
+            "username": "testuser333",
+            "email": "testuser333@example.com"
+          }
+        }
+      }
+    ],
+    "global_timeout": 60
+  }'
+```
+
+系统将返回执行 ID。
+
+#### 步骤 4: 查询执行状态
+
+```bash
+curl -X GET http://localhost:8000/v1/executions/<execution-id> \
+  -H "X-Tenant-ID: 1"
+```
+
+#### 步骤 5: 删除用户
+
+使用相同的流程，但改为删除命令：
+
+```bash
+curl -X POST http://localhost:8000/v1/tasks/ \
+  -H "Content-Type: application/json" \
+  -H "X-Tenant-ID: 1" \
+  -d '{
+    "goal": "Delete the user testuser333",
+    "conversationHistory": []
+  }'
+```
+
 ### 数据库初始化
 
 清空并重新初始化数据库（谨慎使用）：
