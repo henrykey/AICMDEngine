@@ -356,11 +356,6 @@ export default function TaskPlayground() {
                                     </div>
                                 </div>
 
-                                {mutation.error && (
-                                    <div className="bg-red-900/30 border border-red-700 p-2 rounded text-xs text-red-200">
-                                        Error: {String(mutation.error)}
-                                    </div>
-                                )}
 
                                 {/* Plan Steps */}
                                 {mutation.data.plan && mutation.data.type === 'plan_ready' && !currentPlan && (
