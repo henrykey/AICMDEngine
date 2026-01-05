@@ -219,9 +219,9 @@ export default function TaskPlayground() {
             </div>
 
             {/* MAIN CONTENT - Two Column Layout */}
-            <div className="flex-1 flex gap-4 overflow-hidden p-4">
+            <div className="flex-1 flex gap-4 overflow-hidden p-4 min-h-0">
                 {/* LEFT COLUMN - Chat Conversation */}
-                <div className="flex-1 flex flex-col bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
+                <div className="flex-1 flex flex-col bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden min-w-0">
                     <div className="px-4 py-3 border-b border-gray-200 bg-gray-50">
                         <h2 className="text-sm font-semibold text-gray-900">Conversation</h2>
                     </div>
@@ -290,7 +290,7 @@ export default function TaskPlayground() {
                 </div>
 
                 {/* RIGHT COLUMN - Plan & Results */}
-                <div className="flex-1 flex flex-col bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
+                <div className="flex-1 flex flex-col bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden min-w-0">
                     <div className="px-4 py-3 border-b border-gray-200 bg-gray-50">
                         <h2 className="text-sm font-semibold text-gray-900">Plan & Results</h2>
                     </div>
