@@ -250,11 +250,11 @@ export default function TaskPlayground() {
             </div>
 
             {/* Main Content - Two Column Layout with Draggable Divider */}
-            <div className="flex-1 flex overflow-hidden gap-0 p-4" ref={containerRef}>
+            <div className="flex-1 flex overflow-hidden gap-0 p-4 min-h-0" ref={containerRef}>
 
                 {/* LEFT COLUMN - Chat Conversation */}
                 <div
-                    className="flex flex-col bg-gray-800 rounded-lg border border-gray-700 overflow-hidden"
+                    className="flex flex-col bg-gray-800 rounded-lg border border-gray-700 overflow-hidden min-h-0 min-w-0"
                     style={{ width: `${leftWidth}%` }}
                 >
                     <div className="px-4 py-3 border-b border-gray-700 bg-gray-900">
@@ -331,7 +331,7 @@ export default function TaskPlayground() {
 
                 {/* RIGHT COLUMN - Plan & Results */}
                 <div
-                    className="flex flex-col bg-gray-800 rounded-lg border border-gray-700 overflow-hidden"
+                    className="flex flex-col bg-gray-800 rounded-lg border border-gray-700 overflow-hidden min-h-0 min-w-0"
                     style={{ width: `${100 - leftWidth}%` }}
                 >
                     <div className="px-4 py-2 border-b border-gray-700 bg-gray-900 flex-shrink-0">
