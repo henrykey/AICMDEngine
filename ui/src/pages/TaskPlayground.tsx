@@ -1,5 +1,6 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
+import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
 
 interface PlanStep {
@@ -18,13 +19,6 @@ interface PlanResponse {
         level: 'normal' | 'high' | 'critical';
         message: string;
     }
-}
-
-interface ExecutionRequest {
-    plan: PlanStep[];
-    global_timeout?: number;
-    tenant_id?: number;
-    auth_token?: string;
 }
 
 interface ExecutionResponse {
@@ -58,6 +52,7 @@ interface CommandSet {
 }
 
 export default function TaskPlayground() {
+    const navigate = useNavigate();
     const [goal, setGoal] = useState('');
     const [conversationHistory, setConversationHistory] = useState<ConversationMessage[]>([]);
     const [lastQuestion, setLastQuestion] = useState<string | null>(null);
@@ -65,10 +60,16 @@ export default function TaskPlayground() {
     const [currentPlan, setCurrentPlan] = useState<PlanStep[] | null>(null);
     const [executionId, setExecutionId] = useState<string | null>(null);
     const [executionDetail, setExecutionDetail] = useState<ExecutionDetail | null>(null);
-    const [leftWidth, setLeftWidth] = useState(60); // Percentage width of left panel
-    const containerRef = useRef<HTMLDivElement>(null);
-    const isDraggingRef = useRef(false);
 
+    // Check if user is logged in
+    useEffect(() => {
+        const token = localStorage.getItem('token');
+        if (!token) {
+            navigate('/login');
+        }
+    }, [navigate]);
+
+    // Query command sets
     const { data: commandSets } = useQuery({
         queryKey: ['command-sets'],
         queryFn: async () => {
@@ -77,29 +78,8 @@ export default function TaskPlayground() {
         }
     });
 
-    const executeMutation = useMutation({
-        mutationFn: async (request: ExecutionRequest) => {
-            const tenantId = localStorage.getItem('tenantId');
-            const token = localStorage.getItem('token');
-
-            const payload: any = {
-                plan: request.plan,
-                global_timeout: request.global_timeout || 60,
-                tenant_id: tenantId ? parseInt(tenantId) : undefined,
-                auth_token: token || undefined
-            };
-
-            const res = await api.post<ExecutionResponse>('/executions/', payload);
-            return res.data;
-        },
-        onSuccess: (data) => {
-            setExecutionId(data.execution_id);
-            // Start polling for execution details
-            pollExecutionDetails(data.execution_id);
-        }
-    });
-
-    const mutation = useMutation({
+    // Mutation for planning tasks
+    const planMutation = useMutation({
         mutationFn: async (payload: any) => {
             const res = await api.post<PlanResponse>('/tasks/', payload);
             return res.data;
@@ -107,20 +87,65 @@ export default function TaskPlayground() {
         onSuccess: (data) => {
             if (data.question) {
                 setLastQuestion(data.question);
-                const newHistory: ConversationMessage[] = [
-                    ...conversationHistory,
-                    { role: 'user', content: goal },
-                    { role: 'assistant', content: data.question }
-                ];
-                setConversationHistory(newHistory);
+                setConversationHistory(prev => [
+                    ...prev,
+                    { role: 'user' as const, content: goal },
+                    { role: 'assistant' as const, content: data.question || '' }
+                ]);
             } else {
                 setLastQuestion(null);
-                setConversationHistory([]);
+                setCurrentPlan(data.plan || null);
+                setConversationHistory(prev => [
+                    ...prev,
+                    { role: 'user' as const, content: goal }
+                ]);
             }
         }
     });
 
+    // Mutation for executing plans
+    const executeMutation = useMutation({
+        mutationFn: async (request: any) => {
+            const tenantId = localStorage.getItem('tenantId');
+            const token = localStorage.getItem('token');
+
+            const res = await api.post<ExecutionResponse>('/executions/', {
+                plan: request.plan,
+                global_timeout: request.global_timeout || 60,
+                tenant_id: tenantId ? parseInt(tenantId) : undefined,
+                auth_token: token || undefined
+            });
+            return res.data;
+        },
+        onSuccess: (data) => {
+            setExecutionId(data.execution_id);
+            pollExecutionDetails(data.execution_id);
+        }
+    });
+
+    // Poll execution details
+    const pollExecutionDetails = async (execId: string) => {
+        const interval = setInterval(async () => {
+            try {
+                const res = await api.get<ExecutionDetail>(`/executions/${execId}`);
+                setExecutionDetail(res.data);
+
+                if (['completed', 'failed', 'partial_failed', 'timeout', 'rollback'].includes(res.data.status)) {
+                    clearInterval(interval);
+                }
+            } catch (error) {
+                console.error('Failed to fetch execution details:', error);
+                clearInterval(interval);
+            }
+        }, 2000);
+
+        return () => clearInterval(interval);
+    };
+
+    // Handlers
     const handlePlanTask = () => {
+        if (!goal.trim()) return;
+
         const payload: any = {
             goal,
             conversationHistory: conversationHistory.length > 0 ? conversationHistory : undefined
@@ -130,7 +155,7 @@ export default function TaskPlayground() {
             payload.context = { commandSetNames: selectedCommandSets };
         }
 
-        mutation.mutate(payload);
+        planMutation.mutate(payload);
     };
 
     const handleExecutePlan = (plan: PlanStep[]) => {
@@ -139,33 +164,10 @@ export default function TaskPlayground() {
             return;
         }
         setCurrentPlan(plan);
-        executeMutation.mutate({
-            plan,
-            global_timeout: 60
-        });
+        executeMutation.mutate({ plan, global_timeout: 60 });
     };
 
-    const pollExecutionDetails = async (execId: string) => {
-        const interval = setInterval(async () => {
-            try {
-                const res = await api.get<ExecutionDetail>(`/executions/${execId}`);
-                setExecutionDetail(res.data);
-
-                // Stop polling if execution is complete
-                if (['completed', 'failed', 'partial_failed', 'timeout', 'rollback'].includes(res.data.status)) {
-                    clearInterval(interval);
-                }
-            } catch (error) {
-                console.error('Failed to fetch execution details:', error);
-                clearInterval(interval);
-            }
-        }, 2000); // Poll every 2 seconds
-
-        // Cleanup on unmount
-        return () => clearInterval(interval);
-    };
-
-    const resetPlan = () => {
+    const handleResetPlan = () => {
         setCurrentPlan(null);
         setExecutionId(null);
         setExecutionDetail(null);
@@ -175,6 +177,9 @@ export default function TaskPlayground() {
         setConversationHistory([]);
         setLastQuestion(null);
         setGoal('');
+        setCurrentPlan(null);
+        setExecutionId(null);
+        setExecutionDetail(null);
     };
 
     const toggleCommandSet = (name: string) => {
@@ -183,121 +188,83 @@ export default function TaskPlayground() {
         );
     };
 
-    const handleMouseDown = () => {
-        isDraggingRef.current = true;
-    };
-
-    useEffect(() => {
-        const handleMouseMove = (e: MouseEvent) => {
-            if (!isDraggingRef.current || !containerRef.current) return;
-
-            const container = containerRef.current;
-            const containerRect = container.getBoundingClientRect();
-            const newLeftWidth = ((e.clientX - containerRect.left) / containerRect.width) * 100;
-
-            // Constrain between 30% and 70% to prevent either side getting too small
-            if (newLeftWidth >= 30 && newLeftWidth <= 70) {
-                setLeftWidth(newLeftWidth);
-            }
-        };
-
-        const handleMouseUp = () => {
-            isDraggingRef.current = false;
-        };
-
-        if (isDraggingRef.current) {
-            document.addEventListener('mousemove', handleMouseMove);
-            document.addEventListener('mouseup', handleMouseUp);
-            return () => {
-                document.removeEventListener('mousemove', handleMouseMove);
-                document.removeEventListener('mouseup', handleMouseUp);
-            };
-        }
-    }, []);
-
     return (
-        <div className="h-screen flex flex-col bg-gray-900">
-            {/* Header */}
-            <div className="bg-gray-800 border-b border-gray-700 px-6 py-4">
-                <h1 className="text-2xl font-bold">Task Planning Playground</h1>
-                <p className="text-sm text-gray-400 mt-1">Chat with AI, generate and execute plans</p>
+        <div className="flex flex-col h-screen bg-gray-50">
+            {/* HEADER */}
+            <div className="bg-white border-b border-gray-200 px-6 py-4">
+                <h1 className="text-2xl font-bold text-gray-900">Task Planning Playground</h1>
+                <p className="text-sm text-gray-600 mt-1">Chat with AI, generate and execute plans</p>
             </div>
 
-            {/* Command Sets Toolbar */}
-            <div className="bg-gray-900 border-b border-gray-700 px-6 py-3">
+            {/* TOOLBAR - Command Sets */}
+            <div className="bg-white border-b border-gray-200 px-6 py-3">
                 <div className="flex items-center gap-3">
-                    <span className="text-sm font-semibold text-gray-400">📚 Command Sets:</span>
+                    <span className="text-sm font-semibold text-gray-700">Command Sets:</span>
                     <div className="flex flex-wrap gap-2">
                         {commandSets?.map((cs) => (
                             <button
                                 key={cs._id}
                                 onClick={() => toggleCommandSet(cs.name)}
-                                className={`px-3 py-1 rounded transition text-sm ${selectedCommandSets.includes(cs.name)
-                                        ? 'bg-blue-600 text-white'
-                                        : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                                    }`}
+                                className={`px-3 py-1 rounded text-sm font-medium transition ${
+                                    selectedCommandSets.includes(cs.name)
+                                        ? 'bg-blue-500 text-white'
+                                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                                }`}
                             >
                                 {cs.name}
                             </button>
                         ))}
                     </div>
-                    {selectedCommandSets.length > 0 && (
-                        <span className="text-xs text-blue-400 ml-auto">
-                            Selected: {selectedCommandSets.length}
-                        </span>
-                    )}
                 </div>
             </div>
 
-            {/* Main Content - Two Column Layout with Draggable Divider */}
-            <div className="flex-1 flex overflow-hidden gap-0 min-h-0" ref={containerRef} style={{ padding: '1rem' }}>
-
+            {/* MAIN CONTENT - Two Column Layout */}
+            <div className="flex-1 flex gap-4 overflow-hidden p-4">
                 {/* LEFT COLUMN - Chat Conversation */}
-                <div
-                    className="flex flex-col bg-gray-800 rounded-lg border border-gray-700 overflow-hidden min-h-0 min-w-0"
-                    style={{ width: `${leftWidth}%` }}
-                >
-                    <div className="px-4 py-3 border-b border-gray-700 bg-gray-900">
-                        <h2 className="text-sm font-semibold text-gray-300">💬 Conversation</h2>
+                <div className="flex-1 flex flex-col bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
+                    <div className="px-4 py-3 border-b border-gray-200 bg-gray-50">
+                        <h2 className="text-sm font-semibold text-gray-900">Conversation</h2>
                     </div>
 
-                    {/* Conversation History */}
+                    {/* Conversation Messages */}
                     <div className="flex-1 overflow-y-auto p-4 space-y-3">
-                        {conversationHistory.length === 0 ? (
-                            <div className="text-gray-500 text-sm text-center py-8">
-                                <p>Start a conversation...</p>
+                        {conversationHistory.length === 0 && !lastQuestion ? (
+                            <div className="text-center text-gray-500 py-8">
+                                <p className="text-sm">Start a conversation...</p>
                                 <p className="text-xs mt-2">Describe what you want to do</p>
                             </div>
                         ) : (
-                            conversationHistory.map((msg, idx) => (
-                                <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                                    <div className={`max-w-xs px-3 py-2 rounded-lg text-sm ${msg.role === 'user'
-                                            ? 'bg-blue-600 text-white rounded-br-none'
-                                            : 'bg-gray-700 text-gray-100 rounded-bl-none'
+                            <>
+                                {conversationHistory.map((msg, idx) => (
+                                    <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                        <div className={`max-w-xs px-3 py-2 rounded-lg text-sm ${
+                                            msg.role === 'user'
+                                                ? 'bg-blue-500 text-white rounded-br-none'
+                                                : 'bg-gray-100 text-gray-900 rounded-bl-none'
                                         }`}>
-                                        {msg.content}
+                                            {msg.content}
+                                        </div>
                                     </div>
-                                </div>
-                            ))
-                        )}
+                                ))}
 
-                        {/* AI Clarification Question */}
-                        {lastQuestion && (
-                            <div className="flex justify-start">
-                                <div className="max-w-xs px-3 py-2 rounded-lg text-sm bg-yellow-900/30 text-yellow-200 border border-yellow-700 rounded-bl-none">
-                                    <div className="font-semibold text-xs mb-1">❓ Question:</div>
-                                    {lastQuestion}
-                                </div>
-                            </div>
+                                {lastQuestion && (
+                                    <div className="flex justify-start">
+                                        <div className="max-w-xs px-3 py-2 rounded-lg text-sm bg-yellow-50 text-yellow-900 border border-yellow-200 rounded-bl-none">
+                                            <div className="font-semibold text-xs mb-1">Question:</div>
+                                            {lastQuestion}
+                                        </div>
+                                    </div>
+                                )}
+                            </>
                         )}
                     </div>
 
                     {/* Input Area */}
-                    <div className="px-4 py-3 border-t border-gray-700 bg-gray-900 space-y-2">
+                    <div className="px-4 py-3 border-t border-gray-200 bg-gray-50 space-y-2">
                         <div className="flex gap-2">
                             <input
                                 type="text"
-                                className="flex-1 bg-gray-800 border border-gray-600 rounded p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none text-gray-100"
+                                className="flex-1 bg-white border border-gray-300 rounded px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none text-gray-900"
                                 placeholder={lastQuestion ? "Answer the question..." : "Type your goal here..."}
                                 value={goal}
                                 onChange={(e) => setGoal(e.target.value)}
@@ -305,16 +272,16 @@ export default function TaskPlayground() {
                             />
                             <button
                                 onClick={handlePlanTask}
-                                disabled={mutation.isPending || !goal.trim()}
-                                className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 px-4 py-2 rounded font-medium transition text-sm"
+                                disabled={planMutation.isPending || !goal.trim()}
+                                className="bg-blue-500 hover:bg-blue-600 disabled:bg-gray-300 text-white px-4 py-2 rounded font-medium transition text-sm"
                             >
-                                {mutation.isPending ? '...' : '→'}
+                                {planMutation.isPending ? 'Planning...' : 'Send'}
                             </button>
                         </div>
                         {conversationHistory.length > 0 && (
                             <button
                                 onClick={handleClearConversation}
-                                className="text-xs text-gray-400 hover:text-gray-300"
+                                className="text-xs text-gray-500 hover:text-gray-700"
                             >
                                 Clear conversation
                             </button>
@@ -322,60 +289,52 @@ export default function TaskPlayground() {
                     </div>
                 </div>
 
-                {/* DRAGGABLE DIVIDER */}
-                <div
-                    className="w-1 bg-gray-700 hover:bg-blue-500 cursor-col-resize transition-colors"
-                    onMouseDown={handleMouseDown}
-                    style={{ userSelect: 'none' }}
-                />
-
                 {/* RIGHT COLUMN - Plan & Results */}
-                <div
-                    className="flex flex-col bg-gray-800 rounded-lg border border-gray-700 overflow-hidden min-h-0 min-w-0"
-                    style={{ width: `${100 - leftWidth}%` }}
-                >
-                    <div className="px-4 py-2 border-b border-gray-700 bg-gray-900 flex-shrink-0">
-                        <h2 className="text-sm font-semibold text-gray-300">📋 Plan & Results</h2>
+                <div className="flex-1 flex flex-col bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
+                    <div className="px-4 py-3 border-b border-gray-200 bg-gray-50">
+                        <h2 className="text-sm font-semibold text-gray-900">Plan & Results</h2>
                     </div>
 
-                    <div className="flex-1 overflow-hidden flex flex-col min-h-0">
-                        <div className="flex-1 overflow-y-auto p-2 space-y-1">
-                            {!mutation.data ? (
-                                <div className="text-gray-500 text-xs text-center py-2">
-                                    <p>No plan yet</p>
-                                    <p className="text-xs mt-1">Plans will appear here</p>
-                                </div>
-                            ) : (
-                                <>
+                    <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                        {!planMutation.data ? (
+                            <div className="text-center text-gray-500 py-8">
+                                <p className="text-sm">No plan yet</p>
+                                <p className="text-xs mt-2">Plans will appear here</p>
+                            </div>
+                        ) : (
+                            <>
                                 {/* Status Badges */}
                                 <div className="flex gap-2 flex-wrap">
-                                    <div className={`px-2 py-1 rounded text-xs font-bold ${mutation.data.type === 'plan_ready' ? 'bg-green-900 text-green-200' : 'bg-yellow-900 text-yellow-200'}`}>
-                                        {mutation.data.type === 'plan_ready' ? '✓ READY' : '? NEEDS INFO'}
+                                    <div className={`px-2 py-1 rounded text-xs font-bold ${
+                                        planMutation.data.type === 'plan_ready'
+                                            ? 'bg-green-100 text-green-800'
+                                            : 'bg-yellow-100 text-yellow-800'
+                                    }`}>
+                                        {planMutation.data.type === 'plan_ready' ? '✓ READY' : '? NEEDS INFO'}
                                     </div>
-                                    <div className="px-2 py-1 rounded text-xs bg-gray-700 text-gray-300">
-                                        {(mutation.data.confidence * 100).toFixed(0)}% confident
+                                    <div className="px-2 py-1 rounded text-xs bg-gray-100 text-gray-700">
+                                        {(planMutation.data.confidence * 100).toFixed(0)}% confident
                                     </div>
                                 </div>
 
-
                                 {/* Plan Steps */}
-                                {mutation.data.plan && mutation.data.type === 'plan_ready' && !currentPlan && (
-                                    <div className="space-y-1">
+                                {planMutation.data.plan && planMutation.data.type === 'plan_ready' && !currentPlan && (
+                                    <div className="space-y-2">
                                         <button
-                                            onClick={() => handleExecutePlan(mutation.data.plan!)}
-                                            className="w-full bg-green-600 hover:bg-green-700 px-2 py-1 rounded font-medium transition text-xs"
+                                            onClick={() => handleExecutePlan(planMutation.data.plan!)}
+                                            className="w-full bg-green-500 hover:bg-green-600 text-white px-3 py-2 rounded font-medium transition text-sm"
                                         >
                                             ▶ Execute Plan
                                         </button>
-                                        {mutation.data.plan.map((step) => (
-                                            <div key={step.step} className="bg-gray-900 p-1 rounded border border-gray-700 text-xs space-y-0">
-                                                <div className="flex gap-1">
-                                                    <span className="bg-gray-700 w-4 h-4 rounded-full flex items-center justify-center font-bold text-xs flex-none">
+                                        {planMutation.data.plan.map((step) => (
+                                            <div key={step.step} className="bg-gray-50 p-3 rounded border border-gray-200 space-y-1">
+                                                <div className="flex gap-2">
+                                                    <span className="bg-blue-500 text-white w-6 h-6 rounded-full flex items-center justify-center font-bold text-xs flex-none">
                                                         {step.step}
                                                     </span>
-                                                    <span className="text-gray-300 flex-1 text-xs">{step.description}</span>
+                                                    <span className="text-gray-900 flex-1 text-sm">{step.description}</span>
                                                 </div>
-                                                <div className="font-mono text-green-400 ml-5 text-xs bg-black/30 p-0.5 rounded">
+                                                <div className="font-mono text-green-700 ml-8 text-xs bg-green-50 p-2 rounded border border-green-200">
                                                     {step.command}
                                                 </div>
                                             </div>
@@ -385,80 +344,80 @@ export default function TaskPlayground() {
 
                                 {/* Execution Status */}
                                 {executionId && executionDetail && (
-                                    <div className="space-y-1">
+                                    <div className="space-y-2">
                                         <div className="flex justify-between items-center">
-                                            <span className="text-xs font-semibold text-blue-400">Execution</span>
+                                            <span className="text-sm font-semibold text-blue-600">Execution In Progress</span>
                                             <button
-                                                onClick={resetPlan}
-                                                className="text-xs text-gray-400 hover:text-gray-300"
+                                                onClick={handleResetPlan}
+                                                className="text-xs text-gray-500 hover:text-gray-700"
                                             >
-                                                New
+                                                New Plan
                                             </button>
                                         </div>
-                                        <div className="grid grid-cols-3 gap-1">
-                                            <div className="bg-gray-900 p-1 rounded text-xs">
-                                                <div className="text-gray-400 text-xs">ID</div>
-                                                <div className="font-mono text-gray-300 text-xs">{executionId.substring(0, 6)}...</div>
+
+                                        <div className="grid grid-cols-3 gap-2">
+                                            <div className="bg-gray-50 p-2 rounded border border-gray-200">
+                                                <div className="text-gray-600 text-xs">ID</div>
+                                                <div className="font-mono text-gray-900 text-xs">{executionId.substring(0, 8)}...</div>
                                             </div>
-                                            <div className="bg-gray-900 p-1 rounded text-xs">
-                                                <div className="text-gray-400 text-xs">Status</div>
+                                            <div className="bg-gray-50 p-2 rounded border border-gray-200">
+                                                <div className="text-gray-600 text-xs">Status</div>
                                                 <div className={`font-bold text-xs ${
-                                                    executionDetail.status === 'completed' ? 'text-green-400' :
-                                                    executionDetail.status === 'failed' ? 'text-red-400' :
-                                                    executionDetail.status === 'running' ? 'text-blue-400' :
-                                                    'text-yellow-400'
+                                                    executionDetail.status === 'completed' ? 'text-green-600' :
+                                                    executionDetail.status === 'failed' ? 'text-red-600' :
+                                                    executionDetail.status === 'running' ? 'text-blue-600' :
+                                                    'text-yellow-600'
                                                 }`}>
                                                     {executionDetail.status}
                                                 </div>
                                             </div>
-                                            <div className="bg-gray-900 p-1 rounded text-xs">
-                                                <div className="text-gray-400 text-xs">Progress</div>
-                                                <div className="font-mono text-gray-300 text-xs">{executionDetail.completed_steps}/{executionDetail.total_steps}</div>
+                                            <div className="bg-gray-50 p-2 rounded border border-gray-200">
+                                                <div className="text-gray-600 text-xs">Progress</div>
+                                                <div className="font-mono text-gray-900 text-xs">{executionDetail.completed_steps}/{executionDetail.total_steps}</div>
                                             </div>
                                         </div>
 
                                         {executionDetail.error_message && (
-                                            <div className="bg-red-900/30 border border-red-700 p-1 rounded text-xs text-red-200">
+                                            <div className="bg-red-50 border border-red-200 p-2 rounded text-xs text-red-700">
                                                 {executionDetail.error_message}
                                             </div>
                                         )}
 
                                         {executionDetail.steps && executionDetail.steps.length > 0 && (
-                                            <div className="space-y-0">
+                                            <div className="space-y-1">
                                                 {executionDetail.steps.map((step, idx) => (
-                                                    <div key={idx} className={`flex gap-1 items-center text-xs p-0.5 rounded ${
-                                                        step.status === 'success' ? 'bg-green-900/30 text-green-300' :
-                                                        step.status === 'failed' ? 'bg-red-900/30 text-red-300' :
-                                                        'bg-gray-900 text-gray-300'
+                                                    <div key={idx} className={`flex gap-2 items-center text-xs p-2 rounded ${
+                                                        step.status === 'success' ? 'bg-green-50 text-green-700 border border-green-200' :
+                                                        step.status === 'failed' ? 'bg-red-50 text-red-700 border border-red-200' :
+                                                        'bg-gray-50 text-gray-700 border border-gray-200'
                                                     }`}>
-                                                        <span className={`w-3 h-3 rounded-full flex items-center justify-center text-xs font-bold flex-none ${
-                                                            step.status === 'success' ? 'bg-green-700' :
-                                                            step.status === 'failed' ? 'bg-red-700' :
-                                                            'bg-gray-600'
+                                                        <span className={`w-4 h-4 rounded-full flex items-center justify-center text-xs font-bold flex-none ${
+                                                            step.status === 'success' ? 'bg-green-600 text-white' :
+                                                            step.status === 'failed' ? 'bg-red-600 text-white' :
+                                                            'bg-gray-400 text-white'
                                                         }`}>
                                                             {idx + 1}
                                                         </span>
-                                                        <span className="flex-1 truncate text-xs">{step.description}</span>
+                                                        <span className="flex-1 truncate">{step.description}</span>
                                                     </div>
                                                 ))}
                                             </div>
                                         )}
                                     </div>
                                 )}
-                                </>
-                            )}
-                        </div>
-
-                        {/* Raw Response Preview */}
-                        {mutation.data && (
-                            <div className="border-t border-gray-700 bg-gray-900 p-2 text-xs flex-1 overflow-hidden flex flex-col min-h-0">
-                                <div className="text-gray-400 font-mono mb-1 text-xs flex-shrink-0">Response:</div>
-                                <pre className="text-gray-500 whitespace-pre-wrap break-words text-xs flex-1 overflow-auto">
-                                    {JSON.stringify(mutation.data, null, 2)}
-                                </pre>
-                            </div>
+                            </>
                         )}
                     </div>
+
+                    {/* Raw Response Preview */}
+                    {planMutation.data && (
+                        <div className="border-t border-gray-200 bg-gray-50 p-3 text-xs max-h-32 overflow-y-auto">
+                            <div className="text-gray-600 font-mono mb-1">Response:</div>
+                            <pre className="text-gray-700 whitespace-pre-wrap break-words text-xs">
+                                {JSON.stringify(planMutation.data, null, 2)}
+                            </pre>
+                        </div>
+                    )}
                 </div>
             </div>
         </div>
