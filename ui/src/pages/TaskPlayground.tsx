@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { api } from '../lib/api';
 
@@ -65,6 +65,9 @@ export default function TaskPlayground() {
     const [currentPlan, setCurrentPlan] = useState<PlanStep[] | null>(null);
     const [executionId, setExecutionId] = useState<string | null>(null);
     const [executionDetail, setExecutionDetail] = useState<ExecutionDetail | null>(null);
+    const [leftWidth, setLeftWidth] = useState(60); // Percentage width of left panel
+    const containerRef = useRef<HTMLDivElement>(null);
+    const isDraggingRef = useRef(false);
 
     const { data: commandSets } = useQuery({
         queryKey: ['command-sets'],
@@ -180,6 +183,38 @@ export default function TaskPlayground() {
         );
     };
 
+    const handleMouseDown = () => {
+        isDraggingRef.current = true;
+    };
+
+    useEffect(() => {
+        const handleMouseMove = (e: MouseEvent) => {
+            if (!isDraggingRef.current || !containerRef.current) return;
+
+            const container = containerRef.current;
+            const containerRect = container.getBoundingClientRect();
+            const newLeftWidth = ((e.clientX - containerRect.left) / containerRect.width) * 100;
+
+            // Constrain between 30% and 70% to prevent either side getting too small
+            if (newLeftWidth >= 30 && newLeftWidth <= 70) {
+                setLeftWidth(newLeftWidth);
+            }
+        };
+
+        const handleMouseUp = () => {
+            isDraggingRef.current = false;
+        };
+
+        if (isDraggingRef.current) {
+            document.addEventListener('mousemove', handleMouseMove);
+            document.addEventListener('mouseup', handleMouseUp);
+            return () => {
+                document.removeEventListener('mousemove', handleMouseMove);
+                document.removeEventListener('mouseup', handleMouseUp);
+            };
+        }
+    }, []);
+
     return (
         <div className="h-screen flex flex-col bg-gray-900">
             {/* Header */}
@@ -214,11 +249,14 @@ export default function TaskPlayground() {
                 </div>
             </div>
 
-            {/* Main Content - Two Column Layout */}
-            <div className="flex-1 flex overflow-hidden gap-4 p-4">
+            {/* Main Content - Two Column Layout with Draggable Divider */}
+            <div className="flex-1 flex overflow-hidden gap-0 p-4" ref={containerRef}>
 
-                {/* CENTER COLUMN - Chat Conversation */}
-                <div className="flex-1 min-w-0 flex flex-col bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
+                {/* LEFT COLUMN - Chat Conversation */}
+                <div
+                    className="flex flex-col bg-gray-800 rounded-lg border border-gray-700 overflow-hidden"
+                    style={{ width: `${leftWidth}%` }}
+                >
                     <div className="px-4 py-3 border-b border-gray-700 bg-gray-900">
                         <h2 className="text-sm font-semibold text-gray-300">💬 Conversation</h2>
                     </div>
@@ -284,8 +322,18 @@ export default function TaskPlayground() {
                     </div>
                 </div>
 
+                {/* DRAGGABLE DIVIDER */}
+                <div
+                    className="w-1 bg-gray-700 hover:bg-blue-500 cursor-col-resize transition-colors"
+                    onMouseDown={handleMouseDown}
+                    style={{ userSelect: 'none' }}
+                />
+
                 {/* RIGHT COLUMN - Plan & Results */}
-                <div className="w-2/5 flex flex-col bg-gray-800 rounded-lg border border-gray-700 overflow-hidden flex-shrink-0">
+                <div
+                    className="flex flex-col bg-gray-800 rounded-lg border border-gray-700 overflow-hidden"
+                    style={{ width: `${100 - leftWidth}%` }}
+                >
                     <div className="px-4 py-3 border-b border-gray-700 bg-gray-900">
                         <h2 className="text-sm font-semibold text-gray-300">📋 Plan & Results</h2>
                     </div>
