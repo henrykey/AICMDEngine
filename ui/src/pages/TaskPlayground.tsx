@@ -209,8 +209,9 @@ export default function TaskPlayground() {
             <main className="flex-1 flex overflow-hidden">
                 {/* LEFT COLUMN - Conversation */}
                 <section className="flex-1 bg-white border-r border-slate-200 flex flex-col min-w-[400px]">
-                    {/* Command Sets Bar */}
-                    <div className="px-4 py-3 border-b border-slate-200 bg-white">
+                    {/* Conversation Header with Command Sets */}
+                    <header className="px-4 py-3 border-b border-slate-200 bg-white">
+                        <div className="mb-2 font-semibold text-slate-800">Conversation</div>
                         <div className="flex items-center gap-2 flex-wrap">
                             <span className="text-xs font-semibold text-slate-600">Command Sets:</span>
                             {commandSets?.map((cs) => (
@@ -227,11 +228,6 @@ export default function TaskPlayground() {
                                 </button>
                             ))}
                         </div>
-                    </div>
-
-                    {/* Conversation Header */}
-                    <header className="px-4 py-3 border-b border-slate-200 font-semibold text-slate-800">
-                        Conversation
                     </header>
 
                     {/* Messages Area */}
