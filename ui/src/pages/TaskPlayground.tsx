@@ -250,7 +250,7 @@ export default function TaskPlayground() {
             </div>
 
             {/* Main Content - Two Column Layout with Draggable Divider */}
-            <div className="flex-1 flex overflow-hidden gap-1 min-h-0 px-4 py-4" ref={containerRef}>
+            <div className="flex-1 flex overflow-hidden gap-0 min-h-0" ref={containerRef} style={{ padding: '1rem' }}>
 
                 {/* LEFT COLUMN - Chat Conversation */}
                 <div
