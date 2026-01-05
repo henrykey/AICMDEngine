@@ -185,41 +185,37 @@ export default function TaskPlayground() {
             {/* Header */}
             <div className="bg-gray-800 border-b border-gray-700 px-6 py-4">
                 <h1 className="text-2xl font-bold">Task Planning Playground</h1>
-                <p className="text-sm text-gray-400 mt-1">Select command sets, chat with AI, and execute plans</p>
+                <p className="text-sm text-gray-400 mt-1">Chat with AI, generate and execute plans</p>
             </div>
 
-            {/* Main Content - Three Column Layout */}
-            <div className="flex-1 flex overflow-hidden gap-4 p-4">
-
-                {/* LEFT COLUMN - Command Sets */}
-                <div className="w-64 flex flex-col bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
-                    <div className="px-4 py-3 border-b border-gray-700 bg-gray-900">
-                        <h2 className="text-sm font-semibold text-gray-300">📚 Command Sets</h2>
-                        <p className="text-xs text-gray-500 mt-1">Select or use all</p>
-                    </div>
-                    <div className="flex-1 overflow-y-auto p-3 space-y-2">
+            {/* Command Sets Toolbar */}
+            <div className="bg-gray-900 border-b border-gray-700 px-6 py-3">
+                <div className="flex items-center gap-3">
+                    <span className="text-sm font-semibold text-gray-400">📚 Command Sets:</span>
+                    <div className="flex flex-wrap gap-2">
                         {commandSets?.map((cs) => (
                             <button
                                 key={cs._id}
                                 onClick={() => toggleCommandSet(cs.name)}
-                                className={`w-full text-left px-3 py-2 rounded transition text-sm ${selectedCommandSets.includes(cs.name)
+                                className={`px-3 py-1 rounded transition text-sm ${selectedCommandSets.includes(cs.name)
                                         ? 'bg-blue-600 text-white'
                                         : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
                                     }`}
                             >
-                                ✓ {cs.name}
+                                {cs.name}
                             </button>
                         ))}
-                        {commandSets?.length === 0 && (
-                            <div className="text-gray-500 text-xs p-2">No command sets</div>
-                        )}
                     </div>
                     {selectedCommandSets.length > 0 && (
-                        <div className="px-3 py-2 text-xs text-blue-400 bg-gray-900 border-t border-gray-700">
+                        <span className="text-xs text-blue-400 ml-auto">
                             Selected: {selectedCommandSets.length}
-                        </div>
+                        </span>
                     )}
                 </div>
+            </div>
+
+            {/* Main Content - Two Column Layout */}
+            <div className="flex-1 flex overflow-hidden gap-4 p-4">
 
                 {/* CENTER COLUMN - Chat Conversation */}
                 <div className="flex-1 flex flex-col bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
@@ -289,7 +285,7 @@ export default function TaskPlayground() {
                 </div>
 
                 {/* RIGHT COLUMN - Plan & Results */}
-                <div className="w-96 flex flex-col bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
+                <div className="w-80 flex flex-col bg-gray-800 rounded-lg border border-gray-700 overflow-hidden flex-shrink-0">
                     <div className="px-4 py-3 border-b border-gray-700 bg-gray-900">
                         <h2 className="text-sm font-semibold text-gray-300">📋 Plan & Results</h2>
                     </div>
