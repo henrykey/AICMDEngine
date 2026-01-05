@@ -189,47 +189,55 @@ export default function TaskPlayground() {
     };
 
     return (
-        <div className="flex flex-col h-screen bg-gray-50">
-            {/* HEADER */}
-            <div className="bg-white border-b border-gray-200 px-6 py-4">
-                <h1 className="text-2xl font-bold text-gray-900">Task Planning Playground</h1>
-                <p className="text-sm text-gray-600 mt-1">Chat with AI, generate and execute plans</p>
-            </div>
-
-            {/* TOOLBAR - Command Sets */}
-            <div className="bg-white border-b border-gray-200 px-6 py-3">
-                <div className="flex items-center gap-3">
-                    <span className="text-sm font-semibold text-gray-700">Command Sets:</span>
-                    <div className="flex flex-wrap gap-2">
-                        {commandSets?.map((cs) => (
-                            <button
-                                key={cs._id}
-                                onClick={() => toggleCommandSet(cs.name)}
-                                className={`px-3 py-1 rounded text-sm font-medium transition ${
-                                    selectedCommandSets.includes(cs.name)
-                                        ? 'bg-blue-500 text-white'
-                                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                                }`}
-                            >
-                                {cs.name}
-                            </button>
-                        ))}
-                    </div>
+        <div className="flex h-screen w-full bg-slate-100">
+            {/* SIDEBAR - Navigation */}
+            <aside className="w-64 bg-slate-900 flex-shrink-0 flex flex-col p-4 text-white">
+                <div className="text-xl font-bold mb-10">NL-TPS Admin</div>
+                <nav className="flex-1 space-y-2">
+                    <div className="bg-blue-600 p-2 rounded">Task Playground</div>
+                    <div className="p-2 hover:bg-slate-800 rounded cursor-pointer">Command Sets</div>
+                </nav>
+                <div className="border-t border-slate-700 pt-4">
+                    <div className="text-xs text-slate-400 uppercase mb-2">User</div>
+                    <div className="text-sm text-white">admin</div>
+                    <div className="text-xs text-slate-400 uppercase mt-4 mb-2">Tenant</div>
+                    <div className="text-sm text-white">1</div>
                 </div>
-            </div>
+            </aside>
 
-            {/* MAIN CONTENT - Two Column Layout */}
-            <div className="flex-1 flex gap-4 overflow-hidden p-4 min-h-0">
-                {/* LEFT COLUMN - Chat Conversation */}
-                <div className="flex-1 flex flex-col bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden min-w-0">
-                    <div className="px-4 py-3 border-b border-gray-200 bg-gray-50">
-                        <h2 className="text-sm font-semibold text-gray-900">Conversation</h2>
+            {/* MAIN CONTENT */}
+            <main className="flex-1 flex overflow-hidden">
+                {/* LEFT COLUMN - Conversation */}
+                <section className="flex-1 bg-white border-r border-slate-200 flex flex-col min-w-[400px]">
+                    {/* Command Sets Bar */}
+                    <div className="px-4 py-3 border-b border-slate-200 bg-white">
+                        <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-xs font-semibold text-slate-600">Command Sets:</span>
+                            {commandSets?.map((cs) => (
+                                <button
+                                    key={cs._id}
+                                    onClick={() => toggleCommandSet(cs.name)}
+                                    className={`px-2 py-1 rounded text-xs font-medium transition ${
+                                        selectedCommandSets.includes(cs.name)
+                                            ? 'bg-blue-500 text-white'
+                                            : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                                    }`}
+                                >
+                                    {cs.name}
+                                </button>
+                            ))}
+                        </div>
                     </div>
 
-                    {/* Conversation Messages */}
-                    <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                    {/* Conversation Header */}
+                    <header className="px-4 py-3 border-b border-slate-200 font-semibold text-slate-800">
+                        Conversation
+                    </header>
+
+                    {/* Messages Area */}
+                    <div className="flex-1 overflow-y-auto px-6 py-4 space-y-3">
                         {conversationHistory.length === 0 && !lastQuestion ? (
-                            <div className="text-center text-gray-500 py-8">
+                            <div className="text-center text-slate-400 py-8">
                                 <p className="text-sm">Start a conversation...</p>
                                 <p className="text-xs mt-2">Describe what you want to do</p>
                             </div>
@@ -240,7 +248,7 @@ export default function TaskPlayground() {
                                         <div className={`max-w-xs px-3 py-2 rounded-lg text-sm ${
                                             msg.role === 'user'
                                                 ? 'bg-blue-500 text-white rounded-br-none'
-                                                : 'bg-gray-100 text-gray-900 rounded-bl-none'
+                                                : 'bg-slate-100 text-slate-900 rounded-bl-none'
                                         }`}>
                                             {msg.content}
                                         </div>
@@ -260,12 +268,12 @@ export default function TaskPlayground() {
                     </div>
 
                     {/* Input Area */}
-                    <div className="px-4 py-3 border-t border-gray-200 bg-gray-50 space-y-2">
+                    <div className="px-4 py-3 border-t border-slate-200 bg-white space-y-2">
                         <div className="flex gap-2">
                             <input
                                 type="text"
-                                className="flex-1 bg-white border border-gray-300 rounded px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none text-gray-900"
-                                placeholder={lastQuestion ? "Answer the question..." : "Type your goal here..."}
+                                className="flex-1 px-4 py-2 bg-slate-100 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-900"
+                                placeholder={lastQuestion ? "Answer the question..." : "Ask AI to plan..."}
                                 value={goal}
                                 onChange={(e) => setGoal(e.target.value)}
                                 onKeyDown={(e) => e.key === 'Enter' && handlePlanTask()}
@@ -273,31 +281,41 @@ export default function TaskPlayground() {
                             <button
                                 onClick={handlePlanTask}
                                 disabled={planMutation.isPending || !goal.trim()}
-                                className="bg-blue-500 hover:bg-blue-600 disabled:bg-gray-300 text-white px-4 py-2 rounded font-medium transition text-sm"
+                                className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white px-4 py-2 rounded-lg font-medium transition text-sm"
                             >
-                                {planMutation.isPending ? 'Planning...' : 'Send'}
+                                {planMutation.isPending ? '...' : 'Send'}
                             </button>
                         </div>
                         {conversationHistory.length > 0 && (
                             <button
                                 onClick={handleClearConversation}
-                                className="text-xs text-gray-500 hover:text-gray-700"
+                                className="text-xs text-slate-500 hover:text-slate-700"
                             >
                                 Clear conversation
                             </button>
                         )}
                     </div>
-                </div>
+                </section>
 
                 {/* RIGHT COLUMN - Plan & Results */}
-                <div className="flex-1 flex flex-col bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden min-w-0">
-                    <div className="px-4 py-3 border-b border-gray-200 bg-gray-50">
-                        <h2 className="text-sm font-semibold text-gray-900">Plan & Results</h2>
-                    </div>
+                <section className="flex-[1.5] bg-slate-50 flex flex-col">
+                    {/* Header */}
+                    <header className="px-4 py-3 border-b border-slate-200 flex justify-between items-center bg-white">
+                        <span className="font-semibold text-slate-800">Plan & Results</span>
+                        {executionId && (
+                            <button
+                                onClick={handleResetPlan}
+                                className="text-xs text-slate-600 hover:text-slate-900"
+                            >
+                                New Plan
+                            </button>
+                        )}
+                    </header>
 
-                    <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                    {/* Content */}
+                    <div className="flex-1 overflow-y-auto px-8 py-6 space-y-4">
                         {!planMutation.data ? (
-                            <div className="text-center text-gray-500 py-8">
+                            <div className="text-center text-slate-400 py-12">
                                 <p className="text-sm">No plan yet</p>
                                 <p className="text-xs mt-2">Plans will appear here</p>
                             </div>
@@ -312,29 +330,29 @@ export default function TaskPlayground() {
                                     }`}>
                                         {planMutation.data.type === 'plan_ready' ? '✓ READY' : '? NEEDS INFO'}
                                     </div>
-                                    <div className="px-2 py-1 rounded text-xs bg-gray-100 text-gray-700">
+                                    <div className="px-2 py-1 rounded text-xs bg-slate-200 text-slate-700">
                                         {(planMutation.data.confidence * 100).toFixed(0)}% confident
                                     </div>
                                 </div>
 
                                 {/* Plan Steps */}
                                 {planMutation.data.plan && planMutation.data.type === 'plan_ready' && !currentPlan && (
-                                    <div className="space-y-2">
+                                    <div className="space-y-3">
                                         <button
                                             onClick={() => handleExecutePlan(planMutation.data.plan!)}
-                                            className="w-full bg-green-500 hover:bg-green-600 text-white px-3 py-2 rounded font-medium transition text-sm"
+                                            className="w-full bg-green-600 hover:bg-green-700 text-white px-3 py-2 rounded-lg font-medium transition text-sm"
                                         >
                                             ▶ Execute Plan
                                         </button>
                                         {planMutation.data.plan.map((step) => (
-                                            <div key={step.step} className="bg-gray-50 p-3 rounded border border-gray-200 space-y-1">
-                                                <div className="flex gap-2">
-                                                    <span className="bg-blue-500 text-white w-6 h-6 rounded-full flex items-center justify-center font-bold text-xs flex-none">
+                                            <div key={step.step} className="bg-white p-4 rounded-lg border border-slate-200 space-y-2">
+                                                <div className="flex gap-3">
+                                                    <span className="bg-blue-600 text-white w-6 h-6 rounded-full flex items-center justify-center font-bold text-xs flex-none">
                                                         {step.step}
                                                     </span>
-                                                    <span className="text-gray-900 flex-1 text-sm">{step.description}</span>
+                                                    <span className="text-slate-900 flex-1 text-sm">{step.description}</span>
                                                 </div>
-                                                <div className="font-mono text-green-700 ml-8 text-xs bg-green-50 p-2 rounded border border-green-200">
+                                                <div className="font-mono text-green-700 ml-9 text-xs bg-green-50 p-2 rounded border border-green-200">
                                                     {step.command}
                                                 </div>
                                             </div>
@@ -344,65 +362,59 @@ export default function TaskPlayground() {
 
                                 {/* Execution Status */}
                                 {executionId && executionDetail && (
-                                    <div className="space-y-2">
-                                        <div className="flex justify-between items-center">
-                                            <span className="text-sm font-semibold text-blue-600">Execution In Progress</span>
-                                            <button
-                                                onClick={handleResetPlan}
-                                                className="text-xs text-gray-500 hover:text-gray-700"
-                                            >
-                                                New Plan
-                                            </button>
-                                        </div>
+                                    <div className="space-y-3">
+                                        <div className="bg-white p-4 rounded-lg border border-slate-200">
+                                            <div className="text-sm font-semibold text-blue-600 mb-3">Execution In Progress</div>
 
-                                        <div className="grid grid-cols-3 gap-2">
-                                            <div className="bg-gray-50 p-2 rounded border border-gray-200">
-                                                <div className="text-gray-600 text-xs">ID</div>
-                                                <div className="font-mono text-gray-900 text-xs">{executionId.substring(0, 8)}...</div>
-                                            </div>
-                                            <div className="bg-gray-50 p-2 rounded border border-gray-200">
-                                                <div className="text-gray-600 text-xs">Status</div>
-                                                <div className={`font-bold text-xs ${
-                                                    executionDetail.status === 'completed' ? 'text-green-600' :
-                                                    executionDetail.status === 'failed' ? 'text-red-600' :
-                                                    executionDetail.status === 'running' ? 'text-blue-600' :
-                                                    'text-yellow-600'
-                                                }`}>
-                                                    {executionDetail.status}
+                                            <div className="grid grid-cols-3 gap-3 mb-4">
+                                                <div className="bg-slate-50 p-3 rounded border border-slate-200">
+                                                    <div className="text-slate-600 text-xs mb-1">ID</div>
+                                                    <div className="font-mono text-slate-900 text-xs">{executionId.substring(0, 8)}...</div>
+                                                </div>
+                                                <div className="bg-slate-50 p-3 rounded border border-slate-200">
+                                                    <div className="text-slate-600 text-xs mb-1">Status</div>
+                                                    <div className={`font-bold text-xs ${
+                                                        executionDetail.status === 'completed' ? 'text-green-600' :
+                                                        executionDetail.status === 'failed' ? 'text-red-600' :
+                                                        executionDetail.status === 'running' ? 'text-blue-600' :
+                                                        'text-yellow-600'
+                                                    }`}>
+                                                        {executionDetail.status}
+                                                    </div>
+                                                </div>
+                                                <div className="bg-slate-50 p-3 rounded border border-slate-200">
+                                                    <div className="text-slate-600 text-xs mb-1">Progress</div>
+                                                    <div className="font-mono text-slate-900 text-xs">{executionDetail.completed_steps}/{executionDetail.total_steps}</div>
                                                 </div>
                                             </div>
-                                            <div className="bg-gray-50 p-2 rounded border border-gray-200">
-                                                <div className="text-gray-600 text-xs">Progress</div>
-                                                <div className="font-mono text-gray-900 text-xs">{executionDetail.completed_steps}/{executionDetail.total_steps}</div>
-                                            </div>
-                                        </div>
 
-                                        {executionDetail.error_message && (
-                                            <div className="bg-red-50 border border-red-200 p-2 rounded text-xs text-red-700">
-                                                {executionDetail.error_message}
-                                            </div>
-                                        )}
+                                            {executionDetail.error_message && (
+                                                <div className="bg-red-50 border border-red-200 p-3 rounded text-xs text-red-700 mb-4">
+                                                    {executionDetail.error_message}
+                                                </div>
+                                            )}
 
-                                        {executionDetail.steps && executionDetail.steps.length > 0 && (
-                                            <div className="space-y-1">
-                                                {executionDetail.steps.map((step, idx) => (
-                                                    <div key={idx} className={`flex gap-2 items-center text-xs p-2 rounded ${
-                                                        step.status === 'success' ? 'bg-green-50 text-green-700 border border-green-200' :
-                                                        step.status === 'failed' ? 'bg-red-50 text-red-700 border border-red-200' :
-                                                        'bg-gray-50 text-gray-700 border border-gray-200'
-                                                    }`}>
-                                                        <span className={`w-4 h-4 rounded-full flex items-center justify-center text-xs font-bold flex-none ${
-                                                            step.status === 'success' ? 'bg-green-600 text-white' :
-                                                            step.status === 'failed' ? 'bg-red-600 text-white' :
-                                                            'bg-gray-400 text-white'
+                                            {executionDetail.steps && executionDetail.steps.length > 0 && (
+                                                <div className="space-y-2">
+                                                    {executionDetail.steps.map((step, idx) => (
+                                                        <div key={idx} className={`flex gap-2 items-center text-xs p-2 rounded ${
+                                                            step.status === 'success' ? 'bg-green-50 text-green-700 border border-green-200' :
+                                                            step.status === 'failed' ? 'bg-red-50 text-red-700 border border-red-200' :
+                                                            'bg-slate-100 text-slate-700 border border-slate-200'
                                                         }`}>
-                                                            {idx + 1}
-                                                        </span>
-                                                        <span className="flex-1 truncate">{step.description}</span>
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        )}
+                                                            <span className={`w-4 h-4 rounded-full flex items-center justify-center text-xs font-bold flex-none ${
+                                                                step.status === 'success' ? 'bg-green-600 text-white' :
+                                                                step.status === 'failed' ? 'bg-red-600 text-white' :
+                                                                'bg-slate-400 text-white'
+                                                            }`}>
+                                                                {idx + 1}
+                                                            </span>
+                                                            <span className="flex-1 truncate">{step.description}</span>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
                                     </div>
                                 )}
                             </>
@@ -411,15 +423,15 @@ export default function TaskPlayground() {
 
                     {/* Raw Response Preview */}
                     {planMutation.data && (
-                        <div className="border-t border-gray-200 bg-gray-50 p-3 text-xs max-h-32 overflow-y-auto">
-                            <div className="text-gray-600 font-mono mb-1">Response:</div>
-                            <pre className="text-gray-700 whitespace-pre-wrap break-words text-xs">
+                        <div className="border-t border-slate-200 bg-white px-8 py-4 text-xs max-h-32 overflow-y-auto">
+                            <div className="text-slate-600 font-mono mb-2 text-xs">Response:</div>
+                            <pre className="text-slate-700 whitespace-pre-wrap break-words text-xs">
                                 {JSON.stringify(planMutation.data, null, 2)}
                             </pre>
                         </div>
                     )}
-                </div>
-            </div>
+                </section>
+            </main>
         </div>
     );
 }
