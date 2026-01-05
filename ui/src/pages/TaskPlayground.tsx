@@ -334,18 +334,18 @@ export default function TaskPlayground() {
                     className="flex flex-col bg-gray-800 rounded-lg border border-gray-700 overflow-hidden"
                     style={{ width: `${100 - leftWidth}%` }}
                 >
-                    <div className="px-4 py-3 border-b border-gray-700 bg-gray-900">
+                    <div className="px-4 py-2 border-b border-gray-700 bg-gray-900">
                         <h2 className="text-sm font-semibold text-gray-300">📋 Plan & Results</h2>
                     </div>
 
-                    <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                    <div className="flex-1 overflow-hidden flex flex-col">
                         {!mutation.data ? (
-                            <div className="text-gray-500 text-sm text-center py-8">
+                            <div className="text-gray-500 text-xs text-center py-2 flex-shrink-0">
                                 <p>No plan yet</p>
-                                <p className="text-xs mt-2">Plans will appear here</p>
+                                <p className="text-xs mt-1">Plans will appear here</p>
                             </div>
                         ) : (
-                            <>
+                            <div className="flex-1 overflow-y-auto p-2 space-y-1">
                                 {/* Status Badges */}
                                 <div className="flex gap-2 flex-wrap">
                                     <div className={`px-2 py-1 rounded text-xs font-bold ${mutation.data.type === 'plan_ready' ? 'bg-green-900 text-green-200' : 'bg-yellow-900 text-yellow-200'}`}>
@@ -364,22 +364,22 @@ export default function TaskPlayground() {
 
                                 {/* Plan Steps */}
                                 {mutation.data.plan && mutation.data.type === 'plan_ready' && !currentPlan && (
-                                    <div className="space-y-2">
+                                    <div className="space-y-1">
                                         <button
                                             onClick={() => handleExecutePlan(mutation.data.plan!)}
-                                            className="w-full bg-green-600 hover:bg-green-700 px-3 py-2 rounded font-medium transition text-sm"
+                                            className="w-full bg-green-600 hover:bg-green-700 px-2 py-1 rounded font-medium transition text-xs"
                                         >
                                             ▶ Execute Plan
                                         </button>
                                         {mutation.data.plan.map((step) => (
-                                            <div key={step.step} className="bg-gray-900 p-2 rounded border border-gray-700 text-xs space-y-1">
-                                                <div className="flex gap-2">
-                                                    <span className="bg-gray-700 w-5 h-5 rounded-full flex items-center justify-center font-bold text-xs flex-none">
+                                            <div key={step.step} className="bg-gray-900 p-1 rounded border border-gray-700 text-xs space-y-0">
+                                                <div className="flex gap-1">
+                                                    <span className="bg-gray-700 w-4 h-4 rounded-full flex items-center justify-center font-bold text-xs flex-none">
                                                         {step.step}
                                                     </span>
-                                                    <span className="text-gray-300 flex-1">{step.description}</span>
+                                                    <span className="text-gray-300 flex-1 text-xs">{step.description}</span>
                                                 </div>
-                                                <div className="font-mono text-green-400 ml-7 text-xs bg-black/30 p-1 rounded">
+                                                <div className="font-mono text-green-400 ml-5 text-xs bg-black/30 p-0.5 rounded">
                                                     {step.command}
                                                 </div>
                                             </div>
@@ -389,7 +389,7 @@ export default function TaskPlayground() {
 
                                 {/* Execution Status */}
                                 {executionId && executionDetail && (
-                                    <div className="space-y-2">
+                                    <div className="space-y-1">
                                         <div className="flex justify-between items-center">
                                             <span className="text-xs font-semibold text-blue-400">Execution</span>
                                             <button
@@ -399,14 +399,14 @@ export default function TaskPlayground() {
                                                 New
                                             </button>
                                         </div>
-                                        <div className="grid grid-cols-3 gap-2">
-                                            <div className="bg-gray-900 p-2 rounded text-xs">
-                                                <div className="text-gray-400">ID</div>
-                                                <div className="font-mono text-gray-300">{executionId.substring(0, 6)}...</div>
+                                        <div className="grid grid-cols-3 gap-1">
+                                            <div className="bg-gray-900 p-1 rounded text-xs">
+                                                <div className="text-gray-400 text-xs">ID</div>
+                                                <div className="font-mono text-gray-300 text-xs">{executionId.substring(0, 6)}...</div>
                                             </div>
-                                            <div className="bg-gray-900 p-2 rounded text-xs">
-                                                <div className="text-gray-400">Status</div>
-                                                <div className={`font-bold ${
+                                            <div className="bg-gray-900 p-1 rounded text-xs">
+                                                <div className="text-gray-400 text-xs">Status</div>
+                                                <div className={`font-bold text-xs ${
                                                     executionDetail.status === 'completed' ? 'text-green-400' :
                                                     executionDetail.status === 'failed' ? 'text-red-400' :
                                                     executionDetail.status === 'running' ? 'text-blue-400' :
@@ -415,51 +415,50 @@ export default function TaskPlayground() {
                                                     {executionDetail.status}
                                                 </div>
                                             </div>
-                                            <div className="bg-gray-900 p-2 rounded text-xs">
-                                                <div className="text-gray-400">Progress</div>
-                                                <div className="font-mono text-gray-300">{executionDetail.completed_steps}/{executionDetail.total_steps}</div>
+                                            <div className="bg-gray-900 p-1 rounded text-xs">
+                                                <div className="text-gray-400 text-xs">Progress</div>
+                                                <div className="font-mono text-gray-300 text-xs">{executionDetail.completed_steps}/{executionDetail.total_steps}</div>
                                             </div>
                                         </div>
 
                                         {executionDetail.error_message && (
-                                            <div className="bg-red-900/30 border border-red-700 p-2 rounded text-xs text-red-200">
+                                            <div className="bg-red-900/30 border border-red-700 p-1 rounded text-xs text-red-200">
                                                 {executionDetail.error_message}
                                             </div>
                                         )}
 
                                         {executionDetail.steps && executionDetail.steps.length > 0 && (
-                                            <div className="space-y-1">
+                                            <div className="space-y-0">
                                                 {executionDetail.steps.map((step, idx) => (
-                                                    <div key={idx} className={`flex gap-1 items-center text-xs p-1 rounded ${
+                                                    <div key={idx} className={`flex gap-1 items-center text-xs p-0.5 rounded ${
                                                         step.status === 'success' ? 'bg-green-900/30 text-green-300' :
                                                         step.status === 'failed' ? 'bg-red-900/30 text-red-300' :
                                                         'bg-gray-900 text-gray-300'
                                                     }`}>
-                                                        <span className={`w-4 h-4 rounded-full flex items-center justify-center text-xs font-bold ${
+                                                        <span className={`w-3 h-3 rounded-full flex items-center justify-center text-xs font-bold flex-none ${
                                                             step.status === 'success' ? 'bg-green-700' :
                                                             step.status === 'failed' ? 'bg-red-700' :
                                                             'bg-gray-600'
                                                         }`}>
                                                             {idx + 1}
                                                         </span>
-                                                        <span className="flex-1 truncate">{step.description}</span>
+                                                        <span className="flex-1 truncate text-xs">{step.description}</span>
                                                     </div>
                                                 ))}
                                             </div>
                                         )}
                                     </div>
                                 )}
-                            </>
+                            </div>
                         )}
                     </div>
 
                     {/* Raw Response Preview */}
                     {mutation.data && (
-                        <div className="border-t border-gray-700 bg-gray-900 p-3 text-xs max-h-32 overflow-auto">
-                            <div className="text-gray-400 font-mono mb-2">Response:</div>
-                            <pre className="text-gray-500 whitespace-pre-wrap break-words text-xs">
-                                {JSON.stringify(mutation.data, null, 2).substring(0, 500)}
-                                {JSON.stringify(mutation.data, null, 2).length > 500 && '...'}
+                        <div className="border-t border-gray-700 bg-gray-900 p-2 text-xs flex-1 overflow-hidden flex flex-col">
+                            <div className="text-gray-400 font-mono mb-1 text-xs flex-shrink-0">Response:</div>
+                            <pre className="text-gray-500 whitespace-pre-wrap break-words text-xs flex-1 overflow-auto">
+                                {JSON.stringify(mutation.data, null, 2)}
                             </pre>
                         </div>
                     )}
