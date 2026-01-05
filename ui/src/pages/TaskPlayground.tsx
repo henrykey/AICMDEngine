@@ -285,7 +285,7 @@ export default function TaskPlayground() {
                 </div>
 
                 {/* RIGHT COLUMN - Plan & Results */}
-                <div className="w-80 flex flex-col bg-gray-800 rounded-lg border border-gray-700 overflow-hidden flex-shrink-0">
+                <div className="w-96 flex flex-col bg-gray-800 rounded-lg border border-gray-700 overflow-hidden flex-shrink-0">
                     <div className="px-4 py-3 border-b border-gray-700 bg-gray-900">
                         <h2 className="text-sm font-semibold text-gray-300">📋 Plan & Results</h2>
                     </div>
@@ -404,6 +404,17 @@ export default function TaskPlayground() {
                             </>
                         )}
                     </div>
+
+                    {/* Raw Response Preview */}
+                    {mutation.data && (
+                        <div className="border-t border-gray-700 bg-gray-900 p-3 text-xs max-h-32 overflow-auto">
+                            <div className="text-gray-400 font-mono mb-2">Response:</div>
+                            <pre className="text-gray-500 whitespace-pre-wrap break-words text-xs">
+                                {JSON.stringify(mutation.data, null, 2).substring(0, 500)}
+                                {JSON.stringify(mutation.data, null, 2).length > 500 && '...'}
+                            </pre>
+                        </div>
+                    )}
                 </div>
             </div>
         </div>
