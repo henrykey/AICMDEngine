@@ -218,7 +218,7 @@ export default function TaskPlayground() {
             <div className="flex-1 flex overflow-hidden gap-4 p-4">
 
                 {/* CENTER COLUMN - Chat Conversation */}
-                <div className="flex-1 flex flex-col bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
+                <div className="flex-1 min-w-0 flex flex-col bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
                     <div className="px-4 py-3 border-b border-gray-700 bg-gray-900">
                         <h2 className="text-sm font-semibold text-gray-300">💬 Conversation</h2>
                     </div>
@@ -285,7 +285,7 @@ export default function TaskPlayground() {
                 </div>
 
                 {/* RIGHT COLUMN - Plan & Results */}
-                <div className="w-96 flex flex-col bg-gray-800 rounded-lg border border-gray-700 overflow-hidden flex-shrink-0">
+                <div className="w-2/5 flex flex-col bg-gray-800 rounded-lg border border-gray-700 overflow-hidden flex-shrink-0">
                     <div className="px-4 py-3 border-b border-gray-700 bg-gray-900">
                         <h2 className="text-sm font-semibold text-gray-300">📋 Plan & Results</h2>
                     </div>
