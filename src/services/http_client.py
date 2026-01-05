@@ -48,14 +48,14 @@ class HTTPClient:
         # 解析命令
         method, path = self._parse_command(command)
 
-        # 构建完整 URL
-        url = self._get_full_url(path)
-
         # 构建请求头
         headers = self._build_headers(auth_token, tenant_id)
 
-        # 构建请求参数
-        request_params = self._build_request_params(params, path)
+        # 构建请求参数并处理路径参数
+        path, request_params = self._build_request_params(params, path)
+
+        # 构建完整 URL
+        url = self._get_full_url(path)
 
         # 记录请求
         logger.info(f"Executing {method} {url}")
@@ -82,7 +82,11 @@ class HTTPClient:
                     response=response
                 )
 
-            # 解析响应
+            # 解析响应 - 处理 204 No Content 响应
+            if response.status_code == 204:
+                logger.info(f"Request successful (no content): {method} {url}")
+                return {}
+
             response_data = response.json()
             logger.info(f"Request successful: {method} {url}")
 
@@ -151,7 +155,7 @@ class HTTPClient:
             "Content-Type": "application/json"
         }
 
-    def _build_request_params(self, params: Dict[str, Any], path: str) -> Dict[str, Any]:
+    def _build_request_params(self, params: Dict[str, Any], path: str) -> tuple:
         """
         构建请求参数
 
@@ -160,31 +164,27 @@ class HTTPClient:
             path: URL 路径（用于替换路径参数）
 
         Returns:
-            httpx 请求参数
+            (updated_path, httpx 请求参数) 元组
+
+        Note: Headers are handled separately by the caller via _build_headers()
+              so we don't include them in the returned params to avoid conflicts.
         """
         request_params = {}
 
-        # Headers
-        if "headers" in params:
-            request_params["headers"] = params["headers"]
+        # Path parameters - 替换路径中的 {key} 占位符
+        if "path" in params:
+            for key, value in params["path"].items():
+                path = path.replace(f"{{{key}}}", str(value))
 
         # Query parameters
         if "query" in params:
             request_params["params"] = params["query"]
 
-        # Path parameters
-        if "path" in params:
-            # 替换路径中的 {key} 占位符
-            formatted_path = path
-            for key, value in params["path"].items():
-                formatted_path = formatted_path.replace(f"{{{key}}}", str(value))
-            return {"url": formatted_path}
-
         # Request body
         if "body" in params:
             request_params["json"] = params["body"]
 
-        return request_params
+        return path, request_params
 
     def _extract_error_detail(self, response: httpx.Response) -> str:
         """

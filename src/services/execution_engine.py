@@ -349,7 +349,8 @@ class ExecutionEngine:
                 logger.info(f"User created successfully: {user_data.get('username')}")
             else:
                 # 普通 HTTP 请求 - 使用 HTTPClient
-                client = HTTPClient()
+                from src.core.config import settings
+                client = HTTPClient(base_url=settings.membership_service_url)
                 response_data = await client.execute(
                     command=step.command,
                     params=resolved_params,
@@ -563,7 +564,8 @@ class ExecutionEngine:
         # 按步骤编号倒序排列
         steps_to_rollback.sort(key=lambda x: x.step_number, reverse=True)
 
-        http_client = HTTPClient()
+        from src.core.config import settings
+        http_client = HTTPClient(base_url=settings.membership_service_url)
         rolled_back_count = 0
 
         try:
