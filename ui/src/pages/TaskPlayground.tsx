@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useExecutionContext } from '../contexts/ExecutionContext';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { api } from '../lib/api';
 
@@ -63,8 +64,8 @@ export default function TaskPlayground() {
     const [lastQuestion, setLastQuestion] = useState<string | null>(null);
     const [selectedCommandSets, setSelectedCommandSets] = useState<string[]>([]);
     const [currentPlan, setCurrentPlan] = useState<PlanStep[] | null>(null);
-    const [executionId, setExecutionId] = useState<string | null>(null);
-    const [executionDetail, setExecutionDetail] = useState<ExecutionDetail | null>(null);
+    // execution state is lifted to ExecutionContext
+    const { setExecutionId, setExecutionDetail, setRawResponse } = useExecutionContext();
 
     const { data: commandSets } = useQuery({
         queryKey: ['command-sets'],
@@ -91,6 +92,7 @@ export default function TaskPlayground() {
         },
         onSuccess: (data) => {
             setExecutionId(data.execution_id);
+            setRawResponse(data);
             // Start polling for execution details
             pollExecutionDetails(data.execution_id);
         }
@@ -158,11 +160,7 @@ export default function TaskPlayground() {
         return () => clearInterval(interval);
     };
 
-    const resetPlan = () => {
-        setCurrentPlan(null);
-        setExecutionId(null);
-        setExecutionDetail(null);
-    };
+    
 
     const handleClearConversation = () => {
         setConversationHistory([]);
@@ -236,6 +234,7 @@ export default function TaskPlayground() {
 
                 <div className="flex gap-4">
                     <input
+                        id="goal-input"
                         type="text"
                         className="flex-1 bg-gray-900 border border-gray-700 rounded p-3 focus:ring-2 focus:ring-blue-500 outline-none"
                         placeholder={lastQuestion ? "Answer the AI's question..." : "e.g., Create a user named Alice in R&D"}
@@ -260,7 +259,8 @@ export default function TaskPlayground() {
             )}
 
             {mutation.data && (
-                <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4">
+                <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div className="md:col-span-2 space-y-6">
                     <div className="flex items-center gap-4">
                         <div className={`px-3 py-1 rounded-full text-sm font-bold ${mutation.data.type === 'plan_ready' ? 'bg-green-900 text-green-200' : 'bg-yellow-900 text-yellow-200'}`}>
                             {mutation.data.type === 'plan_ready' ? 'PLAN READY' : 'CLARIFICATION NEEDED'}
@@ -324,85 +324,6 @@ export default function TaskPlayground() {
                             ))}
                         </div>
                     )}
-
-                    {/* Execution Status Display */}
-                    {executionId && executionDetail && (
-                        <div className="bg-gray-800 p-6 rounded-lg border border-blue-700 space-y-4">
-                            <div className="flex justify-between items-center">
-                                <h3 className="text-lg font-semibold text-blue-400">Execution Status</h3>
-                                <button
-                                    onClick={resetPlan}
-                                    className="text-sm text-gray-400 hover:text-white"
-                                >
-                                    New Plan
-                                </button>
-                            </div>
-
-                            <div className="grid grid-cols-3 gap-4">
-                                <div className="bg-gray-900 p-3 rounded">
-                                    <div className="text-xs text-gray-400">Execution ID</div>
-                                    <div className="font-mono text-sm">{executionId.substring(0, 8)}...</div>
-                                </div>
-                                <div className="bg-gray-900 p-3 rounded">
-                                    <div className="text-xs text-gray-400">Status</div>
-                                    <div className={`font-bold ${
-                                        executionDetail.status === 'completed' ? 'text-green-400' :
-                                        executionDetail.status === 'failed' ? 'text-red-400' :
-                                        executionDetail.status === 'running' ? 'text-blue-400' :
-                                        'text-yellow-400'
-                                    }`}>
-                                        {executionDetail.status.toUpperCase()}
-                                    </div>
-                                </div>
-                                <div className="bg-gray-900 p-3 rounded">
-                                    <div className="text-xs text-gray-400">Progress</div>
-                                    <div className="font-mono text-sm">
-                                        {executionDetail.completed_steps}/{executionDetail.total_steps}
-                                    </div>
-                                </div>
-                            </div>
-
-                            {executionDetail.error_message && (
-                                <div className="bg-red-900/50 border border-red-700 p-3 rounded">
-                                    <div className="text-xs text-red-400">Error</div>
-                                    <div className="text-red-300">{executionDetail.error_message}</div>
-                                </div>
-                            )}
-
-                            {/* Steps Status */}
-                            {executionDetail.steps && executionDetail.steps.length > 0 && (
-                                <div className="space-y-2">
-                                    <h4 className="text-sm font-medium text-gray-300">Step Details</h4>
-                                    {executionDetail.steps.map((step, index) => (
-                                        <div key={index} className="flex items-center gap-3 bg-gray-900 p-2 rounded">
-                                            <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${
-                                                step.status === 'success' ? 'bg-green-700 text-green-200' :
-                                                step.status === 'failed' ? 'bg-red-700 text-red-200' :
-                                                step.status === 'running' ? 'bg-blue-700 text-blue-200' :
-                                                'bg-gray-600 text-gray-300'
-                                            }`}>
-                                                {step.step_number}
-                                            </div>
-                                            <div className="flex-1 min-w-0">
-                                                <div className="text-sm truncate">{step.description}</div>
-                                                <div className="text-xs text-gray-400">{step.command}</div>
-                                            </div>
-                                            <div className={`text-xs font-medium ${
-                                                step.status === 'success' ? 'text-green-400' :
-                                                step.status === 'failed' ? 'text-red-400' :
-                                                'text-gray-400'
-                                            }`}>
-                                                {step.status}
-                                            </div>
-                                        </div>
-                                    ))}
-                                </div>
-                            )}
-                        </div>
-                    )}
-
-                    <div className="bg-gray-900 p-4 rounded text-xs text-gray-600 font-mono overflow-auto max-h-40">
-                        Raw Response: {JSON.stringify(mutation.data, null, 2)}
                     </div>
                 </div>
             )}

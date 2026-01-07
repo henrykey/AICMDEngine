@@ -4,6 +4,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import CommandSets from './pages/CommandSets';
 import TaskPlayground from './pages/TaskPlayground';
 import Login from './pages/Login';
+import { ExecutionProvider } from './contexts/ExecutionContext';
+import RightPanel from './components/RightPanel';
 
 const queryClient = new QueryClient();
 
@@ -65,8 +67,11 @@ function Layout({ children }: { children: React.ReactNode }) {
         </div>
       </aside>
       <main className="flex-1 p-8 overflow-auto">
-        {children}
+        <div className="max-w-4xl w-full mx-auto">
+          {children}
+        </div>
       </main>
+      <RightPanel />
     </div>
   );
 }
@@ -80,17 +85,21 @@ function App() {
 
           <Route path="/" element={
             <ProtectedRoute>
-              <Layout>
-                <TaskPlayground />
-              </Layout>
+              <ExecutionProvider>
+                <Layout>
+                  <TaskPlayground />
+                </Layout>
+              </ExecutionProvider>
             </ProtectedRoute>
           } />
 
           <Route path="/command-sets" element={
             <ProtectedRoute>
-              <Layout>
-                <CommandSets />
-              </Layout>
+              <ExecutionProvider>
+                <Layout>
+                  <CommandSets />
+                </Layout>
+              </ExecutionProvider>
             </ProtectedRoute>
           } />
         </Routes>

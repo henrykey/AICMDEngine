@@ -23,3 +23,15 @@ build/
 
 # Git worktrees
 .worktrees/
+
+# Node frontend artifacts
+plan-ui/node_modules/
+plan-ui/dist/
+plan-ui/.vite/
+
+# Vite dev server cache
+**/.vite/
+
+# Editor / OS
+.vscode/
+.DS_Store
