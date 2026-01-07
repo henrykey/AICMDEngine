@@ -1,0 +1,6 @@
+{
+  "nlTpsApiUrl": "http://localhost:8000/v1",
+  "membershipApiUrl": "http://localhost:8001/v1",
+  "membershipLoginPath": "/v2/auth/login",
+  "membershipUserPath": "/v2/users/me"
+}
