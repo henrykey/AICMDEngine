@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import ChatPanel from '../components/ChatPanel';
 import PlannerExecutorPanel from '../components/PlannerExecutorPanel';
 
@@ -18,25 +19,26 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'commands', label: 'Command Sets', icon: '📂' },
   { id: 'settings', label: 'Settings', icon: '⚙️' },
   { id: 'analytics', label: 'Analytics', icon: '📊' },
-  { id: 'documentation', label: 'Documentation', icon: '📖' },
+  { id: 'documentation', label: 'Docs', icon: '📖' },
 ];
 
 const Dashboard = () => {
+  const navigate = useNavigate();
   const [activeNav, setActiveNav] = useState<string>('planner');
   const [selectedCommandSetId, setSelectedCommandSetId] = useState<string>('1');
 
   const commandSets: CommandSet[] = [
-    { id: '1', name: '数据处理集' },
-    { id: '2', name: '模型训练集' },
-    { id: '3', name: '部署脚本集' },
-    { id: '4', name: '监控任务集' },
-    { id: '5', name: '备份恢复集' },
-    { id: '6', name: '自定义集合' },
+    { id: '1', name: 'Data Processing' },
+    { id: '2', name: 'Model Training' },
+    { id: '3', name: 'Deployment Scripts' },
+    { id: '4', name: 'Monitoring Tasks' },
+    { id: '5', name: 'Backup & Recovery' },
+    { id: '6', name: 'Custom Set' },
   ];
 
   const handleLogout = () => {
     localStorage.clear();
-    window.location.href = '/login';
+    navigate('/login', { replace: true });
   };
 
   const username = typeof window !== 'undefined' ? localStorage.getItem('username') || 'guest' : 'guest';
@@ -86,16 +88,16 @@ const Dashboard = () => {
             <div className="flex items-center gap-3">
               <span className="text-xl text-blue-500">⚙️</span>
               <div>
-                <div className="text-base font-bold text-slate-800">CMDs Set</div>
-                <div className="text-sm text-slate-600">选择要执行的命令集合</div>
+                <div className="text-base font-bold text-slate-800">Command Set</div>
+                <div className="text-sm text-slate-600">Select a command set to execute</div>
               </div>
             </div>
             <div className="flex gap-2.5">
               <button className="px-4 py-2 border border-slate-200 rounded-md bg-white text-slate-700 text-sm flex items-center gap-1.5 hover:border-blue-500 hover:text-blue-500">
-                <span>📥</span> 导入
+                <span>📥</span> Import
               </button>
               <button className="px-4 py-2 bg-blue-500 text-white text-sm rounded-md flex items-center gap-1.5 hover:bg-blue-600">
-                <span>🔄</span> 刷新
+                <span>🔄</span> Refresh
               </button>
             </div>
           </div>
@@ -125,7 +127,7 @@ const Dashboard = () => {
                 <div className="text-base font-bold text-slate-800 flex items-center gap-2.5">
                   <span>💬</span> CHAT
                 </div>
-                <div className="text-xs px-3 py-1 bg-green-100 text-green-800 rounded-full font-semibold">AI在线</div>
+                <div className="text-xs px-3 py-1 bg-green-100 text-green-800 rounded-full font-semibold">AI Online</div>
               </div>
               <div className="flex-1 p-6 overflow-y-auto flex flex-col gap-5">
                 <ChatPanel commandSetId={selectedCommandSetId} />
@@ -133,7 +135,7 @@ const Dashboard = () => {
               <div className="p-5 border-t border-slate-200 bg-slate-50">
                 <div className="flex gap-3">
                   <textarea
-                    placeholder="输入您的消息..."
+                    placeholder="Describe your task..."
                     className="flex-1 p-3.5 border border-slate-200 rounded-xl text-sm min-h-[60px] bg-white focus:outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-500"
                   />
                   <button
@@ -161,7 +163,7 @@ const Dashboard = () => {
         ) : (
           <div className="flex-1 flex items-center justify-center">
             <p className="text-lg font-semibold text-slate-600">
-              {NAV_ITEMS.find((item) => item.id === activeNav)?.label} 即将上线...
+              {NAV_ITEMS.find((item) => item.id === activeNav)?.label} Coming soon...
             </p>
           </div>
         )}
