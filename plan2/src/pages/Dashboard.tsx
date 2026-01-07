@@ -2,11 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import ChatPanel from '../components/ChatPanel';
 import PlannerExecutorPanel from '../components/PlannerExecutorPanel';
-
-interface CommandSet {
-  id: string;
-  name: string;
-}
+import CommandSets from './CommandSets';
 
 interface NavItem {
   id: string;
@@ -25,16 +21,6 @@ const NAV_ITEMS: NavItem[] = [
 const Dashboard = () => {
   const navigate = useNavigate();
   const [activeNav, setActiveNav] = useState<string>('planner');
-  const [selectedCommandSetId, setSelectedCommandSetId] = useState<string>('1');
-
-  const commandSets: CommandSet[] = [
-    { id: '1', name: 'Data Processing' },
-    { id: '2', name: 'Model Training' },
-    { id: '3', name: 'Deployment Scripts' },
-    { id: '4', name: 'Monitoring Tasks' },
-    { id: '5', name: 'Backup & Recovery' },
-    { id: '6', name: 'Custom Set' },
-  ];
 
   const handleLogout = () => {
     localStorage.clear();
@@ -82,39 +68,14 @@ const Dashboard = () => {
 
       {/* 右侧工作区 */}
       <div className="flex-1 flex flex-col min-w-0">
-        {/* 顶部：命令集选择 */}
+        {/* 顶部：工作区标题 */}
         <div className="bg-white p-4 border-b border-slate-200 shadow-sm">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-3">
-              <span className="text-xl text-blue-500">⚙️</span>
-              <div>
-                <div className="text-base font-bold text-slate-800">Command Set</div>
-                <div className="text-sm text-slate-600">Select a command set to execute</div>
-              </div>
+          <div className="flex items-center gap-3">
+            <span className="text-xl text-blue-500">🎯</span>
+            <div>
+              <div className="text-base font-bold text-slate-800">Task Playground</div>
+              <div className="text-sm text-slate-600">Plan and execute tasks using AI-powered orchestration</div>
             </div>
-            <div className="flex gap-2.5">
-              <button className="px-4 py-2 border border-slate-200 rounded-md bg-white text-slate-700 text-sm flex items-center gap-1.5 hover:border-blue-500 hover:text-blue-500">
-                <span>📥</span> Import
-              </button>
-              <button className="px-4 py-2 bg-blue-500 text-white text-sm rounded-md flex items-center gap-1.5 hover:bg-blue-600">
-                <span>🔄</span> Refresh
-              </button>
-            </div>
-          </div>
-          <div className="flex gap-2 overflow-x-auto pb-0.5">
-            {commandSets.map((commandSet) => (
-              <div
-                key={commandSet.id}
-                onClick={() => setSelectedCommandSetId(commandSet.id)}
-                className={`px-5 py-2 rounded-md text-sm font-semibold whitespace-nowrap cursor-pointer ${
-                  selectedCommandSetId === commandSet.id
-                    ? 'bg-blue-500 text-white shadow-[0_2px_4px_rgba(59,130,246,0.2)]'
-                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                }`}
-              >
-                {commandSet.name}
-              </div>
-            ))}
           </div>
         </div>
 
@@ -129,22 +90,8 @@ const Dashboard = () => {
                 </div>
                 <div className="text-xs px-3 py-1 bg-green-100 text-green-800 rounded-full font-semibold">AI Online</div>
               </div>
-              <div className="flex-1 p-6 overflow-y-auto flex flex-col gap-5">
-                <ChatPanel commandSetId={selectedCommandSetId} />
-              </div>
-              <div className="p-5 border-t border-slate-200 bg-slate-50">
-                <div className="flex gap-3">
-                  <textarea
-                    placeholder="Describe your task..."
-                    className="flex-1 p-3.5 border border-slate-200 rounded-xl text-sm min-h-[60px] bg-white focus:outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-500"
-                  />
-                  <button
-                    type="button"
-                    className="w-12 bg-blue-500 text-white rounded-xl flex items-center justify-center text-xl hover:bg-blue-600 transition-transform hover:-translate-y-0.5"
-                  >
-                    ↵
-                  </button>
-                </div>
+              <div className="flex-1 p-6 overflow-hidden flex flex-col">
+                <ChatPanel />
               </div>
             </div>
 
@@ -155,10 +102,14 @@ const Dashboard = () => {
                   <span>🧠</span> Planner & Executor
                 </div>
               </div>
-              <div className="flex-1 overflow-y-auto p-5 flex flex-col gap-6">
-                <PlannerExecutorPanel commandSetId={selectedCommandSetId} />
+              <div className="flex-1 overflow-hidden p-5 flex flex-col">
+                <PlannerExecutorPanel />
               </div>
             </div>
+          </div>
+        ) : activeNav === 'commands' ? (
+          <div className="flex-1 overflow-y-auto">
+            <CommandSets />
           </div>
         ) : (
           <div className="flex-1 flex items-center justify-center">

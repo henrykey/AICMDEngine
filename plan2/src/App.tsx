@@ -2,6 +2,7 @@ import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
+import { TaskProvider } from './contexts/TaskContext';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const token = localStorage.getItem('token');
@@ -19,7 +20,9 @@ function App() {
 
         <Route path="/" element={
           <ProtectedRoute>
-            <Dashboard />
+            <TaskProvider>
+              <Dashboard />
+            </TaskProvider>
           </ProtectedRoute>
         } />
 
