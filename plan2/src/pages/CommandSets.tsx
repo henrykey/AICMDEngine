@@ -8,19 +8,33 @@ interface CommandSet {
     version?: string;
 }
 
+interface Command {
+    _id?: string;
+    command: string;
+    summary: string;
+    description?: string;
+    riskLevel?: string;
+    response_schema?: any;
+}
+
 const CommandSets = () => {
     const [commandSets, setCommandSets] = useState<CommandSet[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState('');
     const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
     const [isImportModalOpen, setIsImportModalOpen] = useState(false);
+    const [isViewCommandsModalOpen, setIsViewCommandsModalOpen] = useState(false);
     const [selectedSetId, setSelectedSetId] = useState<string | null>(null);
+    const [selectedSetName, setSelectedSetName] = useState('');
 
     const [name, setName] = useState('');
     const [desc, setDesc] = useState('');
     const [docContent, setDocContent] = useState('');
     const [status, setStatus] = useState('');
     const [docFile, setDocFile] = useState<File | null>(null);
+
+    const [commands, setCommands] = useState<Command[]>([]);
+    const [isCommandsLoading, setIsCommandsLoading] = useState(false);
 
     useEffect(() => {
         loadCommandSets();
@@ -131,6 +145,23 @@ const CommandSets = () => {
         }
     };
 
+    const handleViewCommands = async (setId: string, setName: string) => {
+        setSelectedSetId(setId);
+        setSelectedSetName(setName);
+        setIsViewCommandsModalOpen(true);
+        setIsCommandsLoading(true);
+
+        try {
+            const res = await api.get<Command[]>(`/command-sets/${setId}/commands`);
+            setCommands(res.data);
+        } catch (err: any) {
+            setError(`Failed to load commands: ${err.message}`);
+            setCommands([]);
+        } finally {
+            setIsCommandsLoading(false);
+        }
+    };
+
     return (
         <div className="max-w-6xl mx-auto p-6">
             <div className="flex justify-between items-center mb-6">
@@ -181,7 +212,9 @@ const CommandSets = () => {
                             </div>
 
                             <div className="flex gap-2 mt-auto pt-4 border-t border-slate-200">
-                                <button className="text-sm bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded flex-1 transition">
+                                <button
+                                    onClick={() => handleViewCommands(set._id || '', set.name)}
+                                    className="text-sm bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded flex-1 transition">
                                     View Commands
                                 </button>
                                 <button
@@ -379,6 +412,93 @@ Example:
                                 </div>
                             </div>
                         </form>
+                    </div>
+                </div>
+            )}
+
+            {/* View Commands Modal */}
+            {isViewCommandsModalOpen && (
+                <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+                    <div className="bg-white rounded-lg p-6 w-full max-w-4xl border border-slate-300 shadow-lg flex flex-col h-[80vh]">
+                        <div className="flex justify-between items-center mb-4">
+                            <h3 className="text-xl font-bold">
+                                Commands in "{selectedSetName}"
+                            </h3>
+                            <button
+                                onClick={() => setIsViewCommandsModalOpen(false)}
+                                className="text-slate-400 hover:text-slate-600 text-2xl"
+                            >
+                                ✕
+                            </button>
+                        </div>
+
+                        <div className="flex-1 overflow-y-auto">
+                            {isCommandsLoading ? (
+                                <div className="flex items-center justify-center h-full text-slate-500">
+                                    <p>Loading commands...</p>
+                                </div>
+                            ) : commands.length === 0 ? (
+                                <div className="flex items-center justify-center h-full text-slate-500">
+                                    <p>No commands found in this command set.</p>
+                                </div>
+                            ) : (
+                                <div className="space-y-3">
+                                    {commands.map((cmd) => (
+                                        <div
+                                            key={cmd._id}
+                                            className="border border-slate-200 rounded-lg p-4 hover:border-slate-300 transition"
+                                        >
+                                            <div className="flex justify-between items-start mb-2">
+                                                <div className="flex-1">
+                                                    <div className="font-mono font-semibold text-blue-700">
+                                                        {cmd.command}
+                                                    </div>
+                                                    <div className="text-sm text-slate-700 mt-1">
+                                                        {cmd.summary}
+                                                    </div>
+                                                </div>
+                                                {cmd.riskLevel && (
+                                                    <span
+                                                        className={`text-xs px-2 py-1 rounded whitespace-nowrap ml-2 font-medium ${
+                                                            cmd.riskLevel === 'high'
+                                                                ? 'bg-red-100 text-red-700'
+                                                                : cmd.riskLevel === 'critical'
+                                                                  ? 'bg-red-200 text-red-800'
+                                                                  : 'bg-green-100 text-green-700'
+                                                        }`}
+                                                    >
+                                                        {cmd.riskLevel.toUpperCase()}
+                                                    </span>
+                                                )}
+                                            </div>
+
+                                            {cmd.description && (
+                                                <p className="text-xs text-slate-600 mb-2">{cmd.description}</p>
+                                            )}
+
+                                            {cmd.response_schema && (
+                                                <div className="text-xs bg-slate-50 p-2 rounded border border-slate-200 text-slate-600">
+                                                    <span className="font-semibold">Response:</span>{' '}
+                                                    <span className="font-mono">
+                                                        {cmd.response_schema.type}
+                                                        {cmd.response_schema.wrapper ? ` (${cmd.response_schema.wrapper})` : ''}
+                                                    </span>
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="flex justify-end gap-2 mt-4 pt-4 border-t border-slate-200">
+                            <button
+                                onClick={() => setIsViewCommandsModalOpen(false)}
+                                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded transition"
+                            >
+                                Close
+                            </button>
+                        </div>
                     </div>
                 </div>
             )}
