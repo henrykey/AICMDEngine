@@ -455,8 +455,9 @@ class ExecutionEngine:
         # 递归解析所有字符串值
         def resolve_value(value: Any) -> Any:
             if isinstance(value, str):
-                # 检测 JSONPath 引用：$.steps[N].response.body.*
-                if value.startswith("$.steps[") and "].response" in value:
+                # 检测 JSONPath 引用：多种格式支持
+                # $.steps[N].response.body.* 或 $.steps[N].response.data[0].* 等
+                if value.startswith("$.steps["):
                     return self._extract_from_jsonpath(value, step_results)
                 return value
             elif isinstance(value, dict):
@@ -475,7 +476,11 @@ class ExecutionEngine:
         """
         从 JSONPath 提取值
 
-        支持格式：$.steps[N].response.body.field
+        支持格式：
+        - $.steps[N].response.body.field (标准)
+        - $.steps[N].response.data[0].field (数组包装)
+        - $.steps[N].response.data.field (对象包装)
+        - $.steps[N].data[0].field (简化格式)
 
         Args:
             jsonpath: JSONPath 表达式
@@ -501,8 +506,7 @@ class ExecutionEngine:
                 logger.error(f"Step {step.step_number} (index {step_idx}) has no response data")
                 return None
 
-            # 解析路径：response.body.field 或其他路径格式
-            # 处理 .response.body.field 或 .response_data.field 等变化
+            # 解析路径
             path_str = jsonpath[end_idx + 1:].strip(".")
             if not path_str:
                 # 如果没有路径，返回整个响应数据
@@ -510,16 +514,49 @@ class ExecutionEngine:
 
             path_parts = path_str.split(".")
 
+            # 尝试导航到目标字段
             current = step.response_data
+            skipped_response = False
+
             for i, part in enumerate(path_parts):
                 if current is None:
                     logger.error(f"Cannot access path at {'.'.join(path_parts[:i])}, value is None")
                     return None
 
                 if isinstance(current, dict):
-                    current = current.get(part)
-                elif isinstance(current, list) and part.isdigit():
-                    current = current[int(part)]
+                    # 如果是 "response" 并且在响应数据的顶层，跳过它
+                    # 因为 response_data 本身就是响应的内容
+                    if part == "response" and i == 0 and not skipped_response:
+                        skipped_response = True
+                        continue
+
+                    # 尝试直接访问
+                    if part in current:
+                        current = current[part]
+                    else:
+                        # 如果字段不存在，尝试在 "data" 字段中查找
+                        # 这处理响应被包装在 data 字段中的情况（如 Membership 服务的响应）
+                        if "data" in current and isinstance(current["data"], (dict, list)):
+                            if isinstance(current["data"], dict) and part in current["data"]:
+                                current = current["data"][part]
+                            else:
+                                # 尝试访问当前的 data 字段本身
+                                logger.warning(f"Field '{part}' not found in root or data, checking if data itself contains the value")
+                                return None
+                        else:
+                            logger.error(f"Cannot access path: {part}, available keys: {list(current.keys())}")
+                            return None
+                elif isinstance(current, list):
+                    # 处理数组访问
+                    if part.isdigit():
+                        try:
+                            current = current[int(part)]
+                        except IndexError:
+                            logger.error(f"Array index out of bounds: {part}, array length: {len(current)}")
+                            return None
+                    else:
+                        logger.error(f"Cannot index array with non-numeric key: {part}")
+                        return None
                 else:
                     logger.error(f"Cannot access path: {part}, current value type: {type(current).__name__}")
                     return None
