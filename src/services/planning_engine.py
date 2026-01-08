@@ -40,6 +40,9 @@ class PlanningEngine:
                 "parameters": doc.get("parameters", []),
                 "riskLevel": doc.get("riskLevel", "normal")
             }
+            # Include response schema if available - helps LLM generate correct JSONPath
+            if "response_schema" in doc and doc["response_schema"]:
+                cmd_dict["responseSchema"] = doc["response_schema"]
             commands.append(cmd_dict)
 
         logger.info(f"Loaded {len(commands)} commands for tenant {tenant_id}")
@@ -159,11 +162,14 @@ Here are the available commands you can use. Each command is an API endpoint.
      }}
      ```
 5. **Default Tenant ID**: Unless the user explicitly mentions a different tenant, ALWAYS use {tenant_id} (as an INTEGER) as the X-Tenant-ID header value.
-6. Dependency Identification: If a step requires information from a previous step's result, use JSONPath syntax. Examples:
-   - For data in response body: "$.steps[0].response.body.id"
-   - For data wrapped in a 'data' field: "$.steps[0].response.data[0].id" or "$.steps[0].response.data.id"
-   - For array results: "$.steps[0].response.data[0].id" (note: use index [0] for the first array element)
-   The system will intelligently resolve these references by checking both direct paths and wrapped data structures.
+6. Dependency Identification: If a step requires information from a previous step's result, use JSONPath syntax.
+   **IMPORTANT**: Check the command's responseSchema field to understand the response structure:
+   - If responseSchema.type == "wrapped" and responseSchema.wrapper == "data":
+     * For array items: "$.steps[0].response.data[0].id"
+     * For object items: "$.steps[0].response.data.id"
+   - If responseSchema.type == "object": "$.steps[0].response.body.id"
+   - Always adjust the JSONPath based on the documented response structure, not assumptions.
+   The system will dynamically parse responses according to their documented schemas.
 7. Risk Assessment: Evaluate the plan. If it involves high-risk actions (like DELETE, or commands marked as 'critical'), allow it but flag it in the 'risk_assessment' field.
 8. **Clarification Protocol**:
    - If confidence < 0.8 due to missing information → Ask a specific question
