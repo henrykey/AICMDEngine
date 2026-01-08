@@ -323,6 +323,10 @@ class ExecutionEngine:
             step_results=step_results
         )
 
+        # 检查是否有未解析的 JSONPath 引用（值为 None）
+        if self._contains_none_values(resolved_params):
+            logger.warning(f"Step {step.step_number} contains unresolved JSONPath references: {step_def.get('params', {})}")
+
         # 记录请求数据
         await self.repository.update_step(
             step_id=step.id,
@@ -413,6 +417,24 @@ class ExecutionEngine:
             if client is not None:
                 await client.close()
 
+    def _contains_none_values(self, obj: Any) -> bool:
+        """
+        检查对象中是否包含 None 值（表示未解析的引用）
+
+        Args:
+            obj: 要检查的对象
+
+        Returns:
+            如果包含 None 值，返回 True
+        """
+        if obj is None:
+            return True
+        elif isinstance(obj, dict):
+            return any(self._contains_none_values(v) for v in obj.values())
+        elif isinstance(obj, list):
+            return any(self._contains_none_values(item) for item in obj)
+        return False
+
     def _resolve_params(
         self,
         params: Dict[str, Any],
@@ -469,26 +491,37 @@ class ExecutionEngine:
             step_idx = int(jsonpath[start_idx:end_idx])
 
             # 获取对应步骤的结果
+            # 注意：JSONPath 中的步骤号是 0-indexed，需要转换为 step_number (1-indexed)
             if step_idx >= len(step_results):
-                logger.error(f"Invalid step index: {step_idx}")
+                logger.error(f"Invalid step index: {step_idx}, total steps: {len(step_results)}")
                 return None
 
             step = step_results[step_idx]
             if not step.response_data:
-                logger.error(f"Step {step_idx} has no response data")
+                logger.error(f"Step {step.step_number} (index {step_idx}) has no response data")
                 return None
 
-            # 解析路径：response.body.field
-            path_parts = jsonpath[end_idx + 1:].strip(".").split(".")
+            # 解析路径：response.body.field 或其他路径格式
+            # 处理 .response.body.field 或 .response_data.field 等变化
+            path_str = jsonpath[end_idx + 1:].strip(".")
+            if not path_str:
+                # 如果没有路径，返回整个响应数据
+                return step.response_data
+
+            path_parts = path_str.split(".")
 
             current = step.response_data
-            for part in path_parts:
+            for i, part in enumerate(path_parts):
+                if current is None:
+                    logger.error(f"Cannot access path at {'.'.join(path_parts[:i])}, value is None")
+                    return None
+
                 if isinstance(current, dict):
                     current = current.get(part)
                 elif isinstance(current, list) and part.isdigit():
                     current = current[int(part)]
                 else:
-                    logger.error(f"Cannot access path: {part}")
+                    logger.error(f"Cannot access path: {part}, current value type: {type(current).__name__}")
                     return None
 
             return current
