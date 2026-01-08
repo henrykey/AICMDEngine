@@ -20,6 +20,7 @@ const CommandSets = () => {
     const [desc, setDesc] = useState('');
     const [docContent, setDocContent] = useState('');
     const [status, setStatus] = useState('');
+    const [docFile, setDocFile] = useState<File | null>(null);
 
     useEffect(() => {
         loadCommandSets();
@@ -39,6 +40,21 @@ const CommandSets = () => {
         }
     };
 
+    const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (file) {
+            setDocFile(file);
+            try {
+                const content = await file.text();
+                setDocContent(content);
+                setStatus('📄 File loaded successfully');
+                setTimeout(() => setStatus(''), 2000);
+            } catch (err) {
+                setStatus('❌ Failed to read file');
+            }
+        }
+    };
+
     const handleCreateSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         setStatus('Creating...');
@@ -47,7 +63,6 @@ const CommandSets = () => {
             const response = await api.post('/command-sets/', {
                 name,
                 description: desc,
-                tenant_id: 'auto-filled',
                 source_type: 'manual'
             });
 
@@ -70,6 +85,7 @@ const CommandSets = () => {
                 setName('');
                 setDesc('');
                 setDocContent('');
+                setDocFile(null);
                 setStatus('');
             }, 1500);
         } catch (error: any) {
@@ -221,10 +237,30 @@ const CommandSets = () => {
                                 <label className="block text-sm font-medium mb-2 flex items-center gap-2">
                                     📄 Documentation (Optional)
                                 </label>
-                                <div className="bg-blue-50 text-blue-900 p-3 rounded text-xs mb-2 border border-blue-200">
-                                    Paste any format of technical documentation. AI will automatically extract all commands/APIs.
+                                <div className="bg-blue-50 text-blue-900 p-3 rounded text-xs mb-3 border border-blue-200">
+                                    Upload a file or paste documentation. AI will automatically extract all commands/APIs.
                                 </div>
 
+                                {/* File Upload */}
+                                <div className="mb-3">
+                                    <label className="flex items-center justify-center w-full px-4 py-3 border-2 border-dashed border-slate-300 rounded-lg cursor-pointer hover:border-blue-400 hover:bg-blue-50 transition">
+                                        <div className="flex flex-col items-center justify-center">
+                                            <span className="text-2xl mb-1">📤</span>
+                                            <span className="text-sm text-slate-600">
+                                                {docFile ? `📁 ${docFile.name}` : 'Click to upload or drag file'}
+                                            </span>
+                                        </div>
+                                        <input
+                                            type="file"
+                                            accept=".yaml,.yml,.json,.md,.txt,.openapi"
+                                            onChange={handleFileChange}
+                                            className="hidden"
+                                        />
+                                    </label>
+                                </div>
+
+                                {/* Or Paste */}
+                                <div className="text-sm text-slate-500 text-center mb-2">or paste content below:</div>
                                 <textarea
                                     className="w-full bg-white border border-slate-300 rounded p-3 focus:ring-2 focus:ring-blue-500 outline-none text-slate-800 font-mono text-sm h-32"
                                     value={docContent}
@@ -284,11 +320,30 @@ Examples:
                         </div>
 
                         <div className="bg-blue-50 text-blue-900 p-4 rounded text-sm mb-4 border border-blue-200">
-                            <p className="font-semibold mb-1">Paste any format of documentation, AI will intelligently extract commands!</p>
+                            <p className="font-semibold mb-1">Upload or paste documentation, AI will intelligently extract commands!</p>
                             <p className="text-xs opacity-90">Supported formats: OpenAPI YAML, Markdown documents, Man Pages, plain text descriptions...</p>
                         </div>
 
                         <form onSubmit={handleImportSubmit} className="flex flex-col flex-1">
+                            {/* File Upload in Import Modal */}
+                            <div className="mb-3">
+                                <label className="flex items-center justify-center w-full px-4 py-3 border-2 border-dashed border-slate-300 rounded-lg cursor-pointer hover:border-blue-400 hover:bg-blue-50 transition">
+                                    <div className="flex flex-col items-center justify-center">
+                                        <span className="text-2xl mb-1">📤</span>
+                                        <span className="text-sm text-slate-600">
+                                            {docFile ? `📁 ${docFile.name}` : 'Click to upload file'}
+                                        </span>
+                                    </div>
+                                    <input
+                                        type="file"
+                                        accept=".yaml,.yml,.json,.md,.txt,.openapi"
+                                        onChange={handleFileChange}
+                                        className="hidden"
+                                    />
+                                </label>
+                            </div>
+
+                            <div className="text-sm text-slate-500 text-center mb-2">or paste content below:</div>
                             <textarea
                                 className="flex-1 w-full bg-white border border-slate-300 rounded p-4 font-mono text-sm text-slate-800 focus:ring-2 focus:ring-blue-500 outline-none resize-none mb-4"
                                 value={docContent}

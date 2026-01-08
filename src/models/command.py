@@ -28,6 +28,13 @@ class Command(BaseModel):
     examples: List[str] = []
     risk_level: RiskLevel = Field(default=RiskLevel.NORMAL, alias="riskLevel")
 
+    # Response schema describes how the API returns data
+    # Examples:
+    # - {"type": "object", "root": "body"} - Direct response body
+    # - {"type": "wrapped", "wrapper": "data", "items": "array"} - Wrapped in 'data' array
+    # - {"type": "wrapped", "wrapper": "data", "items": "object"} - Wrapped in 'data' object
+    response_schema: Optional[Dict[str, Any]] = None
+
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 

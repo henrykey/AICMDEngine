@@ -3,7 +3,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from src.core.config import settings, setup_logging
-from src.routers import tasks, command_sets, executions
+from src.routers import tasks, command_sets, executions, auth
 
 # Setup logging
 setup_logging(settings)
@@ -45,6 +45,7 @@ async def shutdown_db_client():
     app.mongodb_client.close()
     logger.info("Disconnected from MongoDB")
 
+app.include_router(auth.router, prefix="/v1/auth", tags=["Auth"])
 app.include_router(tasks.router, prefix="/v1/tasks", tags=["Tasks"])
 app.include_router(command_sets.router, prefix="/v1/command-sets", tags=["Command Sets"])
 app.include_router(executions.router, prefix="/v1/executions", tags=["Executions"])

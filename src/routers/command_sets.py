@@ -19,8 +19,12 @@ async def create_command_set(
     tenant_id: int = Depends(get_tenant_id),
     db: AsyncIOMotorDatabase = Depends(get_db)
 ):
-    # Enforce tenant_id from context
+    # Enforce tenant_id from X-Tenant-ID header
     command_set.tenant_id = tenant_id
+
+    # Validate required fields
+    if not command_set.name:
+        raise HTTPException(status_code=400, detail="Command set name is required")
 
     # Store in database
     command_set_dict = command_set.model_dump(by_alias=True, exclude={"id"})

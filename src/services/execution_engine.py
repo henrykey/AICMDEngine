@@ -438,7 +438,8 @@ class ExecutionEngine:
     def _resolve_params(
         self,
         params: Dict[str, Any],
-        step_results: List[StepExecution]
+        step_results: List[StepExecution],
+        response_schemas: Dict[int, Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         解析参数中的 JSONPath 引用
@@ -446,6 +447,7 @@ class ExecutionEngine:
         Args:
             params: 原始参数
             step_results: 已执行的步骤结果
+            response_schemas: 步骤对应命令的响应schema字典，key为step_number, value为response_schema
 
         Returns:
             解析后的参数
@@ -458,7 +460,7 @@ class ExecutionEngine:
                 # 检测 JSONPath 引用：多种格式支持
                 # $.steps[N].response.body.* 或 $.steps[N].response.data[0].* 等
                 if value.startswith("$.steps["):
-                    return self._extract_from_jsonpath(value, step_results)
+                    return self._extract_from_jsonpath(value, step_results, response_schemas)
                 return value
             elif isinstance(value, dict):
                 return {k: resolve_value(v) for k, v in value.items()}
@@ -471,7 +473,8 @@ class ExecutionEngine:
     def _extract_from_jsonpath(
         self,
         jsonpath: str,
-        step_results: List[StepExecution]
+        step_results: List[StepExecution],
+        response_schemas: Dict[int, Dict[str, Any]] = None
     ) -> Any:
         """
         从 JSONPath 提取值
@@ -482,9 +485,14 @@ class ExecutionEngine:
         - $.steps[N].response.data.field (对象包装)
         - $.steps[N].data[0].field (简化格式)
 
+        优先级：
+        1. 使用命令的 response_schema（来自命令集定义）
+        2. 如果没有schema，使用智能回退逻辑
+
         Args:
             jsonpath: JSONPath 表达式
             step_results: 步骤执行结果
+            response_schemas: 响应schema映射（步骤号 -> schema定义）
 
         Returns:
             提取的值

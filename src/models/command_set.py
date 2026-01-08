@@ -7,7 +7,7 @@ class CommandSet(BaseModel):
     id: Optional[str] = Field(None, alias="_id")
     name: str
     description: Optional[str] = None
-    tenant_id: int
+    tenant_id: Optional[int] = None  # Will be set from X-Tenant-ID header
     source_type: str = "manual"
     source_uri: Optional[str] = None
     version: str = "1.0.0"

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { membershipApi } from '../lib/api';
+import { api } from '../lib/api';
 import { getConfig } from '../config';
 
 export default function Login() {
@@ -16,16 +16,13 @@ export default function Login() {
         setError('');
 
         try {
-            const config = getConfig();
-            // According to backend docs, X-Tenant-ID is required
-            // We use '1' or 'default' as initial tenant for login if not known
             const tenantId = localStorage.getItem('tenantId') || '1';
 
-            const loginPath = config.membershipLoginPath || '/v2/auth/login';
-            const res = await membershipApi.post(loginPath, {
+            // Call NL-TPS auth endpoint (which will delegate to Membership or other auth backend)
+            const res = await api.post('/auth/login', {
                 username,
                 password,
-                device_id: 'plan2-admin-01' // Optional but recommended
+                device_id: 'plan2-admin-01'
             }, {
                 headers: {
                     'X-Tenant-ID': tenantId
@@ -108,7 +105,7 @@ export default function Login() {
                     </button>
 
                     <div className="text-xs text-center text-slate-500 mt-4">
-                        Connecting to: {getConfig().membershipApiUrl || 'Membership Service'}
+                        Connecting to: {getConfig().nlTpsApiUrl || 'NL-TPS Service'}
                     </div>
                 </form>
             </div>
