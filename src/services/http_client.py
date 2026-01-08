@@ -174,6 +174,8 @@ class HTTPClient:
         # Path parameters - 替换路径中的 {key} 占位符
         if "path" in params:
             for key, value in params["path"].items():
+                if value is None:
+                    raise ValueError(f"Path parameter '{key}' is None. This usually means a previous step failed to extract the required value. Cannot proceed without this value.")
                 path = path.replace(f"{{{key}}}", str(value))
 
         # Query parameters

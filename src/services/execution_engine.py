@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import json
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -325,7 +326,38 @@ class ExecutionEngine:
 
         # 检查是否有未解析的 JSONPath 引用（值为 None）
         if self._contains_none_values(resolved_params):
-            logger.warning(f"Step {step.step_number} contains unresolved JSONPath references: {step_def.get('params', {})}")
+            unresolved_fields = self._find_unresolved_fields(resolved_params, step_def.get('params', {}))
+            error_msg = f"Step {step.step_number} failed to extract values from previous steps. Could not resolve: {unresolved_fields}. This usually means a previous step did not return the expected data structure."
+            logger.error(error_msg)
+            logger.debug(f"Original params: {step_def.get('params', {})}, Resolved params: {resolved_params}")
+
+            # 更新内存中的步骤对象
+            step.status = StepStatus.FAILED
+            step.error_message = error_msg
+            step.completed_at = datetime.utcnow()
+
+            # 更新数据库
+            await self.repository.update_step(
+                step_id=step.id,
+                status=StepStatus.FAILED,
+                error_message=error_msg,
+                completed_at=datetime.utcnow()
+            )
+
+            # 写入审计日志
+            await self.repository.write_audit_log(
+                tenant_id=tenant_id,
+                category="task_execution",
+                action="step_failed",
+                resource=f"execution:{step.execution_id}:step:{step.step_number}",
+                subject=auth_token,
+                payload={
+                    "step_number": step.step_number,
+                    "command": step.command,
+                    "error": "Unresolved JSONPath references"
+                }
+            )
+            raise ValueError(error_msg)
 
         # 记录请求数据
         await self.repository.update_step(
@@ -365,6 +397,12 @@ class ExecutionEngine:
 
             # 记录响应数据
             if response_data is not None:
+                # 更新内存中的步骤对象，这样后续步骤可以访问响应数据
+                step.response_data = response_data
+                step.status = StepStatus.SUCCESS
+                step.completed_at = datetime.utcnow()
+
+                # 同时更新数据库
                 await self.repository.update_step(
                     step_id=step.id,
                     status=StepStatus.SUCCESS,
@@ -389,7 +427,12 @@ class ExecutionEngine:
         except Exception as e:
             logger.error(f"Step {step.step_number} failed: {e}")
 
-            # 记录错误
+            # 更新内存中的步骤对象
+            step.status = StepStatus.FAILED
+            step.error_message = str(e)
+            step.completed_at = datetime.utcnow()
+
+            # 记录错误到数据库
             await self.repository.update_step(
                 step_id=step.id,
                 status=StepStatus.FAILED,
@@ -434,6 +477,58 @@ class ExecutionEngine:
         elif isinstance(obj, list):
             return any(self._contains_none_values(item) for item in obj)
         return False
+
+    def _parse_jsonpath_parts(self, path_str: str) -> List[str]:
+        """
+        解析 JSONPath 路径字符串，正确处理数组索引
+
+        Examples:
+            "data[0].id" -> ["data", "[0]", "id"]
+            "body.user.name" -> ["body", "user", "name"]
+            "items[0].fields[1].value" -> ["items", "[0]", "fields", "[1]", "value"]
+
+        Args:
+            path_str: 路径字符串
+
+        Returns:
+            路径部分列表
+        """
+        import re
+        parts = []
+        # 使用正则表达式分割：支持 . 分割和 [] 形式的索引
+        # 匹配模式：字段名或 [数字]
+        pattern = r'(\w+|\[\d+\])'
+        matches = re.findall(pattern, path_str)
+        return matches
+
+    def _find_unresolved_fields(self, resolved: Any, original: Any, path: str = "") -> List[str]:
+        """
+        找出哪些字段无法解析（值为 None）
+
+        Args:
+            resolved: 解析后的参数
+            original: 原始参数
+            path: 当前路径（用于递归）
+
+        Returns:
+            无法解析的字段列表
+        """
+        unresolved = []
+
+        if isinstance(resolved, dict) and isinstance(original, dict):
+            for key, value in resolved.items():
+                current_path = f"{path}.{key}" if path else key
+                if value is None and original.get(key) is not None:
+                    # 这个字段在原始参数中有值，但解析后变成了 None
+                    unresolved.append(f"{current_path} (original: {original.get(key)})")
+                elif isinstance(value, (dict, list)):
+                    unresolved.extend(self._find_unresolved_fields(value, original.get(key, {}), current_path))
+        elif isinstance(resolved, list) and isinstance(original, list):
+            for i, (r_item, o_item) in enumerate(zip(resolved, original)):
+                current_path = f"{path}[{i}]"
+                unresolved.extend(self._find_unresolved_fields(r_item, o_item, current_path))
+
+        return unresolved
 
     def _resolve_params(
         self,
@@ -520,7 +615,13 @@ class ExecutionEngine:
                 # 如果没有路径，返回整个响应数据
                 return step.response_data
 
-            path_parts = path_str.split(".")
+            # 记录原始响应结构用于调试
+            logger.debug(f"Extracting from JSONPath: {jsonpath}")
+            logger.debug(f"Step {step.step_number} response structure: {json.dumps(step.response_data, indent=2, default=str) if isinstance(step.response_data, (dict, list)) else step.response_data}")
+
+            # 解析路径，支持 data[0].id 这样的格式
+            # 首先需要处理带 [] 的部分
+            path_parts = self._parse_jsonpath_parts(path_str)
 
             # 尝试导航到目标字段
             current = step.response_data
@@ -531,6 +632,21 @@ class ExecutionEngine:
                     logger.error(f"Cannot access path at {'.'.join(path_parts[:i])}, value is None")
                     return None
 
+                # 处理数组索引 [N] 格式
+                if part.startswith("[") and part.endswith("]"):
+                    index_str = part[1:-1]
+                    if isinstance(current, list):
+                        try:
+                            current = current[int(index_str)]
+                        except (IndexError, ValueError):
+                            logger.error(f"Array index out of bounds: {part}, array length: {len(current) if isinstance(current, list) else 'N/A'}")
+                            return None
+                    else:
+                        logger.error(f"Cannot index non-list with {part}, current type: {type(current).__name__}")
+                        return None
+                    continue
+
+                # 处理对象字段访问
                 if isinstance(current, dict):
                     # 如果是 "response" 并且在响应数据的顶层，跳过它
                     # 因为 response_data 本身就是响应的内容
@@ -542,29 +658,12 @@ class ExecutionEngine:
                     if part in current:
                         current = current[part]
                     else:
-                        # 如果字段不存在，尝试在 "data" 字段中查找
-                        # 这处理响应被包装在 data 字段中的情况（如 Membership 服务的响应）
-                        if "data" in current and isinstance(current["data"], (dict, list)):
-                            if isinstance(current["data"], dict) and part in current["data"]:
-                                current = current["data"][part]
-                            else:
-                                # 尝试访问当前的 data 字段本身
-                                logger.warning(f"Field '{part}' not found in root or data, checking if data itself contains the value")
-                                return None
-                        else:
-                            logger.error(f"Cannot access path: {part}, available keys: {list(current.keys())}")
-                            return None
-                elif isinstance(current, list):
-                    # 处理数组访问
-                    if part.isdigit():
-                        try:
-                            current = current[int(part)]
-                        except IndexError:
-                            logger.error(f"Array index out of bounds: {part}, array length: {len(current)}")
-                            return None
-                    else:
-                        logger.error(f"Cannot index array with non-numeric key: {part}")
+                        logger.error(f"Cannot access field '{part}' in dict. Available keys: {list(current.keys())}")
                         return None
+                elif isinstance(current, list):
+                    # 如果不是 [N] 格式，无法在列表上访问字段
+                    logger.error(f"Cannot access field '{part}' in list. Expected array index like [0]")
+                    return None
                 else:
                     logger.error(f"Cannot access path: {part}, current value type: {type(current).__name__}")
                     return None
