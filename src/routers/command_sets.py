@@ -11,6 +11,143 @@ router = APIRouter()
 def get_db(request: Request) -> AsyncIOMotorDatabase:
     return request.app.mongodb
 
+# --- Helper Functions ---
+
+def _extract_response_schema_from_openapi(operation: dict, method: str, spec: dict = None) -> dict:
+    """
+    Extract response schema from OpenAPI operation definition.
+
+    Returns schema in internal format:
+    - {"type": "wrapped", "wrapper": "data", "items": "array"} - wrapped in 'data' array
+    - {"type": "wrapped", "wrapper": "data", "items": "object"} - wrapped in 'data' object
+    - {"type": "object", "root": "body"} - direct object response
+    - {"type": "status_code", "success_codes": [200, 204]} - status-only response
+    """
+    responses = operation.get('responses', {})
+    if not responses:
+        return None
+
+    # Look for successful responses (2xx codes)
+    success_response = None
+    for code in ['200', '201', '204']:
+        if code in responses:
+            success_response = responses[code]
+            break
+
+    if not success_response:
+        # Try to find any 2xx response
+        for code, resp in responses.items():
+            if code.startswith('2'):
+                success_response = resp
+                break
+
+    if not success_response:
+        return None
+
+    # Handle status-only responses (204 No Content, or 200 with no content)
+    if 'content' not in success_response:
+        return {
+            "type": "status_code",
+            "success_codes": [200, 204],
+            "description": "Status-only response, no content"
+        }
+
+    content = success_response.get('content', {})
+    if not content:
+        return None
+
+    # Try JSON content first
+    json_content = content.get('application/json', {})
+    if not json_content:
+        return None
+
+    schema = json_content.get('schema', {})
+    if not schema:
+        return None
+
+    # Resolve schema references if needed
+    if '$ref' in schema and spec:
+        schema = _resolve_schema_ref(schema['$ref'], spec)
+
+    # Analyze the schema to determine response structure
+    return _analyze_schema_structure(schema)
+
+def _resolve_schema_ref(ref: str, spec: dict) -> dict:
+    """
+    Resolve OpenAPI schema references like '#/components/schemas/PageMembers'
+    """
+    if not ref.startswith('#/'):
+        return {}
+
+    parts = ref[2:].split('/')  # Remove '#/' and split
+    current = spec
+
+    for part in parts:
+        if isinstance(current, dict) and part in current:
+            current = current[part]
+        else:
+            return {}
+
+    return current if isinstance(current, dict) else {}
+
+def _analyze_schema_structure(schema: dict) -> dict:
+    """
+    Analyze OpenAPI schema to determine response structure.
+
+    Detects patterns like:
+    - Direct object response
+    - Array wrapped in a property (e.g., "data")
+    - Object wrapped in a property
+    """
+    schema_type = schema.get('type', '')
+
+    # Case 1: Direct array
+    if schema_type == 'array':
+        return {
+            "type": "array",
+            "items": "array",
+            "description": "Direct array response"
+        }
+
+    # Case 2: Direct object
+    if schema_type == 'object' or schema_type == '':
+        # Check if it has standard wrapping pattern (data + meta)
+        properties = schema.get('properties', {})
+
+        if 'data' in properties:
+            data_schema = properties['data']
+            data_type = data_schema.get('type', '')
+
+            # Wrapped array response
+            if data_type == 'array':
+                return {
+                    "type": "wrapped",
+                    "wrapper": "data",
+                    "items": "array",
+                    "metadata_wrapper": "meta" if 'meta' in properties else None,
+                    "description": "Response wrapped in 'data' array with optional 'meta' pagination"
+                }
+
+            # Wrapped object response
+            if data_type == 'object':
+                return {
+                    "type": "wrapped",
+                    "wrapper": "data",
+                    "items": "object",
+                    "metadata_wrapper": "meta" if 'meta' in properties else None,
+                    "description": "Response wrapped in 'data' object with optional 'meta' info"
+                }
+
+        # No wrapping - direct object response
+        return {
+            "type": "object",
+            "root": "body",
+            "description": "Direct object response in body"
+        }
+
+    # Default: unknown structure
+    return None
+
 # --- Command Sets ---
 
 @router.post("/", response_model=CommandSet)
@@ -140,19 +277,29 @@ async def smart_import_commands(
             # Direct OpenAPI parsing (no LLM needed)
             spec = parsed_yaml
             paths = spec.get('paths', {})
-            
+
             for path, methods in paths.items():
                 for method, operation in methods.items():
                     if method.upper() not in ['GET', 'POST', 'PUT', 'DELETE', 'PATCH']:
                         continue
-                    
-                    cmd =  {
+
+                    # Extract response schema from OpenAPI spec
+                    response_schema = _extract_response_schema_from_openapi(
+                        operation, method.upper(), spec
+                    )
+
+                    cmd = {
                         "command": f"{method.upper()} {path}",
                         "summary": operation.get('summary', f"{method.upper()} {path}"),
                         "description": operation.get('description', ''),
                         "parameters": operation.get('parameters', []),
                         "riskLevel": "high" if method.upper() in ['POST', 'PUT', 'DELETE'] else "normal"
                     }
+
+                    # Add response schema if available
+                    if response_schema:
+                        cmd["response_schema"] = response_schema
+
                     commands_data.append(cmd)
                     
         else:
