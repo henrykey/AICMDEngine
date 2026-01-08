@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, Body
 from typing import List
+from datetime import datetime
 from src.models.command_set import CommandSet
 from src.models.command import Command
 from src.core.deps import get_tenant_id
@@ -347,7 +348,37 @@ Return format:
             cmd_data["tenant_id"] = tenant_id
             await db["commands"].insert_one(cmd_data)
             inserted_count += 1
-        
+
+        # Update command set metadata
+        if inserted_count > 0:
+            # Parse current version and increment
+            current_version = parent_set.get("version", "1.0.0")
+            version_parts = current_version.split(".")
+            try:
+                major = int(version_parts[0])
+                minor = int(version_parts[1]) if len(version_parts) > 1 else 0
+                patch = int(version_parts[2]) if len(version_parts) > 2 else 0
+                # Increment minor version on re-import
+                minor += 1
+                # Preserve original format (with or without patch)
+                if len(version_parts) >= 3:
+                    new_version = f"{major}.{minor}.{patch}"
+                else:
+                    new_version = f"{major}.{minor}"
+            except:
+                new_version = "1.0.0"
+
+            # Update command set with new timestamp and version
+            await db["command_sets"].update_one(
+                {"_id": ObjectId(set_id)},
+                {
+                    "$set": {
+                        "updated_at": datetime.utcnow(),
+                        "version": new_version
+                    }
+                }
+            )
+
         return {
             "status": "success",
             "commands_extracted": inserted_count,
