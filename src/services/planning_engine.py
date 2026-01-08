@@ -159,7 +159,11 @@ Here are the available commands you can use. Each command is an API endpoint.
      }}
      ```
 5. **Default Tenant ID**: Unless the user explicitly mentions a different tenant, ALWAYS use {tenant_id} (as an INTEGER) as the X-Tenant-ID header value.
-6. Dependency Identification: If a step requires information from a previous step's result, use JSONPath syntax (e.g., "$.steps[0].response.body.id").
+6. Dependency Identification: If a step requires information from a previous step's result, use JSONPath syntax. Examples:
+   - For data in response body: "$.steps[0].response.body.id"
+   - For data wrapped in a 'data' field: "$.steps[0].response.data[0].id" or "$.steps[0].response.data.id"
+   - For array results: "$.steps[0].response.data[0].id" (note: use index [0] for the first array element)
+   The system will intelligently resolve these references by checking both direct paths and wrapped data structures.
 7. Risk Assessment: Evaluate the plan. If it involves high-risk actions (like DELETE, or commands marked as 'critical'), allow it but flag it in the 'risk_assessment' field.
 8. **Clarification Protocol**:
    - If confidence < 0.8 due to missing information → Ask a specific question
