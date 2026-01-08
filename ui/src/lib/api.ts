@@ -24,15 +24,12 @@ api.interceptors.request.use((reqConfig) => {
     return reqConfig;
 });
 
-// Membership Service Client for login only
+// Membership Service Client
 export const membershipApi = axios.create();
 
 membershipApi.interceptors.request.use((reqConfig) => {
-    // Set baseURL dynamically from the loaded config
-    const config = getConfig();
-    if (config.membershipApiUrl) {
-        reqConfig.baseURL = config.membershipApiUrl;
-    }
+    // Set baseURL dynamically
+    reqConfig.baseURL = getConfig().membershipApiUrl;
 
     const token = localStorage.getItem('token');
     if (token) {
@@ -40,4 +37,3 @@ membershipApi.interceptors.request.use((reqConfig) => {
     }
     return reqConfig;
 });
-

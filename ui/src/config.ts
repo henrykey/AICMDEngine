@@ -1,12 +1,16 @@
 export interface AppConfig {
     nlTpsApiUrl: string;
-    membershipApiUrl?: string;
-    membershipLoginPath?: string;
+    membershipApiUrl: string;
+    membershipLoginPath: string;
+    membershipUserPath: string;
 }
 
 // Default config matches the JSON structure but serves as fallback
 let config: AppConfig = {
-    nlTpsApiUrl: 'http://localhost:8000/v1'
+    nlTpsApiUrl: 'http://localhost:8000/v1',
+    membershipApiUrl: 'http://localhost:8080',
+    membershipLoginPath: '/api/v1/auth/login',
+    membershipUserPath: '/api/v1/users/me'
 };
 
 export const loadConfig = async (): Promise<void> => {

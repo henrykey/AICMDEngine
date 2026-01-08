@@ -16,13 +16,14 @@ export default function Login() {
         setError('');
 
         try {
-            const config = getConfig();
-            // According to backend docs, X-Tenant-ID is required
+            const config = getConfig(); // Get latest config
+
+            // 1. Login to get Token
+            // According to docs/MEMBERSHIP_USAGE_MANUAL.md, X-Tenant-ID is required
             // We use '1' or 'default' as initial tenant for login if not known
             const tenantId = localStorage.getItem('tenantId') || '1';
 
-            const loginPath = config.membershipLoginPath || '/v2/auth/login';
-            const res = await membershipApi.post(loginPath, {
+            const res = await membershipApi.post(config.membershipLoginPath, {
                 username,
                 password,
                 device_id: 'nl-tps-admin-01' // Optional but recommended
@@ -43,9 +44,9 @@ export default function Login() {
             localStorage.setItem('token', token);
             localStorage.setItem('username', username);
 
-            // Default tenant check - must match database tenant_id (integer 1)
+            // Default tenant check
             if (!localStorage.getItem('tenantId')) {
-                localStorage.setItem('tenantId', '1');
+                localStorage.setItem('tenantId', 'tenant-dev-001');
             }
 
             navigate('/');
@@ -104,7 +105,7 @@ export default function Login() {
                     </button>
 
                     <div className="text-xs text-center text-gray-500 mt-4">
-                        Connecting to: {getConfig().membershipApiUrl || 'Membership Service'}
+                        Connecting to: {getConfig().membershipApiUrl}
                     </div>
                 </form>
             </div>

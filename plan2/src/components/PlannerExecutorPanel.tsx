@@ -7,9 +7,11 @@ interface ExecutionStep {
     command: string;
     description: string;
     params: Record<string, any>;
-    status?: 'pending' | 'running' | 'completed' | 'failed';
+    status?: 'pending' | 'running' | 'completed' | 'failed' | 'success' | 'skipped';
     result?: any;
     error?: string;
+    error_message?: string;
+    response_data?: any;
 }
 
 interface ExecutionResponse {
@@ -28,7 +30,17 @@ interface ExecutionDetail {
     started_at: string;
     completed_at?: string;
     error_message?: string;
-    steps: ExecutionStep[];
+    steps: Array<{
+        step_number?: number;
+        step?: number;
+        command: string;
+        description: string;
+        status: string;
+        error_message?: string;
+        error?: string;
+        response_data?: any;
+        result?: any;
+    }>;
 }
 
 const PlannerExecutorPanel: React.FC = () => {
@@ -38,6 +50,7 @@ const PlannerExecutorPanel: React.FC = () => {
     const [executionId, setExecutionId] = useState<string | null>(null);
     const [executionStatus, setExecutionStatus] = useState<string | null>(null);
     const [error, setError] = useState('');
+    const [executionError, setExecutionError] = useState<string | null>(null);
 
     // Initialize steps from plan response
     useEffect(() => {
@@ -59,6 +72,7 @@ const PlannerExecutorPanel: React.FC = () => {
 
         setIsExecuting(true);
         setError('');
+        setExecutionError(null);
 
         try {
             const tenantId = localStorage.getItem('tenantId');
@@ -91,19 +105,24 @@ const PlannerExecutorPanel: React.FC = () => {
 
                 // Update steps with status and results
                 const updatedSteps = executionSteps.map(step => {
-                    const execStep = data.steps.find(s => s.step === step.step);
+                    const execStep = data.steps.find(s => (s.step_number ?? s.step) === step.step);
                     if (execStep) {
                         return {
                             ...step,
-                            status: execStep.status || step.status,
-                            result: execStep.result,
-                            error: execStep.error
+                            status: (execStep.status as any) || step.status,
+                            result: execStep.result || execStep.response_data,
+                            error: execStep.error_message || execStep.error,
+                            error_message: execStep.error_message,
+                            response_data: execStep.response_data
                         };
                     }
                     return step;
                 });
                 setExecutionSteps(updatedSteps);
                 setExecutionStatus(data.status);
+                if (data.error_message) {
+                    setExecutionError(data.error_message);
+                }
 
                 // Stop polling if execution is complete
                 if (['completed', 'failed', 'partial_failed', 'timeout', 'rollback'].includes(data.status)) {
@@ -183,7 +202,17 @@ const PlannerExecutorPanel: React.FC = () => {
                 </div>
             )}
 
-            {/* Error Message */}
+            {/* Execution-level Error Message */}
+            {executionError && (
+                <div className="p-4 bg-red-50 border border-red-300 rounded-lg">
+                    <div className="text-sm font-semibold text-red-800 mb-2">Execution Error:</div>
+                    <div className="text-sm text-red-700 font-mono whitespace-pre-wrap overflow-auto max-h-32">
+                        {executionError}
+                    </div>
+                </div>
+            )}
+
+            {/* Request-level Error Message */}
             {error && (
                 <div className="p-3 bg-red-100 border border-red-300 rounded-lg text-sm text-red-700">
                     {error}
@@ -224,14 +253,32 @@ const PlannerExecutorPanel: React.FC = () => {
 
                                 {/* Step Result or Error */}
                                 {step.result && (
-                                    <div className="mt-2 text-xs text-green-700 bg-green-50 p-2 rounded font-mono">
+                                    <div className="mt-2 text-xs text-green-700 bg-green-50 p-2 rounded font-mono overflow-auto max-h-32">
                                         Result: {typeof step.result === 'string' ? step.result : JSON.stringify(step.result, null, 2)}
                                     </div>
                                 )}
 
-                                {step.error && (
+                                {step.error_message && (
+                                    <div className="mt-2 p-3 rounded bg-red-50 border border-red-200">
+                                        <div className="text-xs font-semibold text-red-800 mb-1">Error Details:</div>
+                                        <div className="text-xs text-red-700 font-mono whitespace-pre-wrap overflow-auto max-h-24">
+                                            {step.error_message}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {step.error && !step.error_message && (
                                     <div className="mt-2 text-xs text-red-700 bg-red-50 p-2 rounded font-mono">
                                         Error: {step.error}
+                                    </div>
+                                )}
+
+                                {step.response_data && step.status === 'failed' && (
+                                    <div className="mt-2 p-3 rounded bg-orange-50 border border-orange-200">
+                                        <div className="text-xs font-semibold text-orange-800 mb-1">Response Data:</div>
+                                        <div className="text-xs text-orange-700 font-mono overflow-auto max-h-32 whitespace-pre-wrap">
+                                            {typeof step.response_data === 'string' ? step.response_data : JSON.stringify(step.response_data, null, 2)}
+                                        </div>
                                     </div>
                                 )}
                             </div>
