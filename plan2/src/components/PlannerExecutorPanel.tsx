@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { api } from '../lib/api';
 import { useTask } from '../contexts/TaskContext';
+import MCPSelector from './MCPSelector';
 
 interface ExecutionStep {
     step: number;
@@ -188,6 +189,9 @@ const PlannerExecutorPanel: React.FC = () => {
 
     return (
         <div className="flex flex-1 flex-col gap-6 overflow-y-auto">
+            {/* MCP Selector */}
+            <MCPSelector />
+
             {/* Execution Summary */}
             {executionId && (
                 <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">

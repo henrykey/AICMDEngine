@@ -23,6 +23,20 @@ export interface ConversationMessage {
     content: string;
 }
 
+export interface MCPToolInfo {
+    name: string;
+    description: string;
+    input_schema: Record<string, any>;
+}
+
+export interface MCPServerInfo {
+    name: string;
+    version: string;
+    description: string;
+    status: 'running' | 'stopped' | 'error';
+    tools: MCPToolInfo[];
+}
+
 export interface TaskContextType {
     // Chat state
     conversationHistory: ConversationMessage[];
@@ -41,6 +55,12 @@ export interface TaskContextType {
     setExecutionId: (id: string | null) => void;
     executionStatus: string | null;
     setExecutionStatus: (status: string | null) => void;
+
+    // MCP selection state
+    selectedMcp: string | null;
+    setSelectedMcp: (mcp: string | null) => void;
+    availableMcps: MCPServerInfo[];
+    setAvailableMcps: (mcps: MCPServerInfo[]) => void;
 }
 
 const TaskContext = createContext<TaskContextType | undefined>(undefined);
@@ -52,6 +72,8 @@ export const TaskProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     const [currentPlanResponse, setCurrentPlanResponse] = useState<PlanResponse | null>(null);
     const [executionId, setExecutionId] = useState<string | null>(null);
     const [executionStatus, setExecutionStatus] = useState<string | null>(null);
+    const [selectedMcp, setSelectedMcp] = useState<string | null>(null);
+    const [availableMcps, setAvailableMcps] = useState<MCPServerInfo[]>([]);
 
     const value: TaskContextType = {
         conversationHistory,
@@ -66,6 +88,10 @@ export const TaskProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         setExecutionId,
         executionStatus,
         setExecutionStatus,
+        selectedMcp,
+        setSelectedMcp,
+        availableMcps,
+        setAvailableMcps,
     };
 
     return (
