@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import ChatPanel from '../components/ChatPanel';
 import PlannerExecutorPanel from '../components/PlannerExecutorPanel';
 import CommandSets from './CommandSets';
+import Settings from './Settings';
+import MCPTools from './MCPTools';
 
 interface NavItem {
   id: string;
@@ -12,7 +14,7 @@ interface NavItem {
 
 const NAV_ITEMS: NavItem[] = [
   { id: 'planner', label: 'Task Playground', icon: '🚀' },
-  { id: 'commands', label: 'Command Sets', icon: '📂' },
+  { id: 'mcp-tools', label: 'MCP Tools', icon: '🔧' },
   { id: 'settings', label: 'Settings', icon: '⚙️' },
   { id: 'analytics', label: 'Analytics', icon: '📊' },
   { id: 'documentation', label: 'Docs', icon: '📖' },
@@ -71,10 +73,26 @@ const Dashboard = () => {
         {/* 顶部：工作区标题 */}
         <div className="bg-white p-4 border-b border-slate-200 shadow-sm">
           <div className="flex items-center gap-3">
-            <span className="text-xl text-blue-500">🎯</span>
+            <span className="text-xl text-blue-500">
+              {activeNav === 'planner' && '🎯'}
+              {activeNav === 'mcp-tools' && '🔧'}
+              {activeNav === 'commands' && '📂'}
+              {activeNav === 'settings' && '⚙️'}
+              {activeNav === 'analytics' && '📊'}
+              {activeNav === 'documentation' && '📖'}
+            </span>
             <div>
-              <div className="text-base font-bold text-slate-800">Task Playground</div>
-              <div className="text-sm text-slate-600">Plan and execute tasks using AI-powered orchestration</div>
+              <div className="text-base font-bold text-slate-800">
+                {NAV_ITEMS.find((item) => item.id === activeNav)?.label}
+              </div>
+              <div className="text-sm text-slate-600">
+                {activeNav === 'planner' && 'Plan and execute tasks using AI-powered orchestration'}
+                {activeNav === 'mcp-tools' && 'Browse and explore MCP tools from available servers'}
+                {activeNav === 'commands' && 'Manage and view command sets'}
+                {activeNav === 'settings' && 'Configure system settings and preferences'}
+                {activeNav === 'analytics' && 'View analytics and metrics'}
+                {activeNav === 'documentation' && 'Read documentation and guides'}
+              </div>
             </div>
           </div>
         </div>
@@ -107,9 +125,17 @@ const Dashboard = () => {
               </div>
             </div>
           </div>
+        ) : activeNav === 'mcp-tools' ? (
+          <div className="flex-1 overflow-hidden">
+            <MCPTools />
+          </div>
         ) : activeNav === 'commands' ? (
           <div className="flex-1 overflow-y-auto">
             <CommandSets />
+          </div>
+        ) : activeNav === 'settings' ? (
+          <div className="flex-1 overflow-hidden">
+            <Settings />
           </div>
         ) : (
           <div className="flex-1 flex items-center justify-center">
