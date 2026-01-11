@@ -2,39 +2,17 @@ import { useState, useRef, useEffect } from 'react';
 import { api } from '../lib/api';
 import { useTask, PlanResponse } from '../contexts/TaskContext';
 
-interface CommandSet {
-    _id?: string;
-    name: string;
-    description?: string;
-}
-
 const ChatPanel: React.FC = () => {
-    const { conversationHistory, setConversationHistory, lastQuestion, setLastQuestion, setCurrentPlanResponse } = useTask();
+    const { conversationHistory, setConversationHistory, lastQuestion, setLastQuestion, setCurrentPlanResponse, selectedCommandSets } = useTask();
     const [goal, setGoal] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState('');
-    const [commandSets, setCommandSets] = useState<CommandSet[]>([]);
-    const [selectedCommandSets, setSelectedCommandSets] = useState<string[]>([]);
     const messagesEndRef = useRef<HTMLDivElement>(null);
-
-    // Load command sets on mount
-    useEffect(() => {
-        loadCommandSets();
-    }, []);
 
     // Auto-scroll to latest message
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [conversationHistory]);
-
-    const loadCommandSets = async () => {
-        try {
-            const res = await api.get<CommandSet[]>('/command-sets/');
-            setCommandSets(res.data);
-        } catch (err) {
-            console.error('Failed to load command sets:', err);
-        }
-    };
 
     const handlePlanTask = async () => {
         if (!goal.trim()) return;
@@ -55,16 +33,21 @@ const ChatPanel: React.FC = () => {
             const res = await api.post<PlanResponse>('/tasks/', payload);
             const data = res.data;
 
+            // Always add user's goal to conversation history
+            const newHistory = [
+                ...conversationHistory,
+                { role: 'user' as const, content: goal }
+            ];
+
             if (data.question) {
                 setLastQuestion(data.question);
-                const newHistory = [
-                    ...conversationHistory,
-                    { role: 'user' as const, content: goal },
-                    { role: 'assistant' as const, content: data.question }
-                ];
+                // Add the AI's clarifying question to history
+                newHistory.push({ role: 'assistant' as const, content: data.question });
                 setConversationHistory(newHistory);
             } else {
                 setLastQuestion(null);
+                // For direct plans, still preserve the user's goal in history
+                setConversationHistory(newHistory);
                 setCurrentPlanResponse(data);
             }
 
@@ -83,37 +66,8 @@ const ChatPanel: React.FC = () => {
         setError('');
     };
 
-    const toggleCommandSet = (name: string) => {
-        setSelectedCommandSets(prev =>
-            prev.includes(name) ? prev.filter(n => n !== name) : [...prev, name]
-        );
-    };
-
     return (
         <div className="flex flex-1 flex-col overflow-hidden gap-4">
-            {/* Command Sets Selection */}
-            {commandSets.length > 0 && (
-                <div className="p-3 bg-slate-100 rounded-lg border border-slate-200">
-                    <label className="block text-xs font-medium text-slate-700 mb-2">
-                        Command Sets (optional)
-                    </label>
-                    <div className="flex flex-wrap gap-2">
-                        {commandSets.map((cs) => (
-                            <button
-                                key={cs._id}
-                                onClick={() => toggleCommandSet(cs.name)}
-                                className={`px-3 py-1 rounded text-xs transition ${selectedCommandSets.includes(cs.name)
-                                    ? 'bg-blue-500 text-white'
-                                    : 'bg-slate-200 text-slate-700 hover:bg-slate-300'
-                                    }`}
-                            >
-                                {cs.name}
-                            </button>
-                        ))}
-                    </div>
-                </div>
-            )}
-
             {/* Conversation History */}
             <div className="chat-messages flex flex-1 flex-col gap-4 overflow-y-auto pr-1">
                 {conversationHistory.map((msg, idx) => (

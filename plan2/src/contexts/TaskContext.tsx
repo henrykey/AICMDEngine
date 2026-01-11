@@ -61,6 +61,10 @@ export interface TaskContextType {
     setSelectedMcp: (mcp: string | null) => void;
     availableMcps: MCPServerInfo[];
     setAvailableMcps: (mcps: MCPServerInfo[]) => void;
+
+    // Command Sets selection state
+    selectedCommandSets: string[];
+    setSelectedCommandSets: (sets: string[]) => void;
 }
 
 const TaskContext = createContext<TaskContextType | undefined>(undefined);
@@ -74,6 +78,7 @@ export const TaskProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     const [executionStatus, setExecutionStatus] = useState<string | null>(null);
     const [selectedMcp, setSelectedMcp] = useState<string | null>(null);
     const [availableMcps, setAvailableMcps] = useState<MCPServerInfo[]>([]);
+    const [selectedCommandSets, setSelectedCommandSets] = useState<string[]>([]);
 
     const value: TaskContextType = {
         conversationHistory,
@@ -92,6 +97,8 @@ export const TaskProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         setSelectedMcp,
         availableMcps,
         setAvailableMcps,
+        selectedCommandSets,
+        setSelectedCommandSets,
     };
 
     return (

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import ChatPanel from '../components/ChatPanel';
 import PlannerExecutorPanel from '../components/PlannerExecutorPanel';
+import CommandSetSelector from '../components/CommandSetSelector';
 import CommandSets from './CommandSets';
 import Settings from './Settings';
 import MCPTools from './MCPTools';
@@ -73,28 +74,35 @@ const Dashboard = () => {
       <div className="flex-1 flex flex-col min-w-0">
         {/* 顶部：工作区标题 */}
         <div className="bg-white p-4 border-b border-slate-200 shadow-sm">
-          <div className="flex items-center gap-3">
-            <span className="text-xl text-blue-500">
-              {activeNav === 'planner' && '🎯'}
-              {activeNav === 'mcp-tools' && '🔧'}
-              {activeNav === 'commands' && '📂'}
-              {activeNav === 'settings' && '⚙️'}
-              {activeNav === 'analytics' && '📊'}
-              {activeNav === 'documentation' && '📖'}
-            </span>
-            <div>
-              <div className="text-base font-bold text-slate-800">
-                {NAV_ITEMS.find((item) => item.id === activeNav)?.label}
-              </div>
-              <div className="text-sm text-slate-600">
-                {activeNav === 'planner' && 'Plan and execute tasks using AI-powered orchestration'}
-                {activeNav === 'mcp-tools' && 'Browse and explore MCP tools from available servers'}
-                {activeNav === 'commands' && 'Manage and view command sets'}
-                {activeNav === 'settings' && 'Configure system settings and preferences'}
-                {activeNav === 'analytics' && 'View analytics and metrics'}
-                {activeNav === 'documentation' && 'Read documentation and guides'}
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex items-start gap-3 flex-1">
+              <span className="text-xl text-blue-500 mt-0.5">
+                {activeNav === 'planner' && '🎯'}
+                {activeNav === 'mcp-tools' && '🔧'}
+                {activeNav === 'commands' && '📂'}
+                {activeNav === 'settings' && '⚙️'}
+                {activeNav === 'analytics' && '📊'}
+                {activeNav === 'documentation' && '📖'}
+              </span>
+              <div className="flex-1">
+                <div className="text-base font-bold text-slate-800">
+                  {NAV_ITEMS.find((item) => item.id === activeNav)?.label}
+                </div>
+                <div className="text-sm text-slate-600">
+                  {activeNav === 'planner' && 'Plan and execute tasks using AI-powered orchestration'}
+                  {activeNav === 'mcp-tools' && 'Browse and explore MCP tools from available servers'}
+                  {activeNav === 'commands' && 'Manage and view command sets'}
+                  {activeNav === 'settings' && 'Configure system settings and preferences'}
+                  {activeNav === 'analytics' && 'View analytics and metrics'}
+                  {activeNav === 'documentation' && 'Read documentation and guides'}
+                </div>
               </div>
             </div>
+            {activeNav === 'planner' && (
+              <div className="flex-shrink-0">
+                <CommandSetSelector />
+              </div>
+            )}
           </div>
         </div>
 

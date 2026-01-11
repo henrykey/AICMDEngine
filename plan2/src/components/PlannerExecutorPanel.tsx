@@ -123,6 +123,24 @@ const PlannerExecutorPanel: React.FC = () => {
                 setExecutionStatus(data.status);
                 if (data.error_message) {
                     setExecutionError(data.error_message);
+
+                    // Check if error is due to token expiration
+                    const errorMsg = data.error_message.toLowerCase();
+                    if (errorMsg.includes('token') &&
+                        (errorMsg.includes('expired') || errorMsg.includes('refresh') || errorMsg.includes('login'))) {
+                        console.warn('Token expired detected, redirecting to login');
+                        clearInterval(interval);
+                        setIsExecuting(false);
+
+                        // Clear stored credentials
+                        localStorage.removeItem('token');
+                        localStorage.removeItem('username');
+                        localStorage.removeItem('tenantId');
+
+                        // Redirect to login
+                        window.location.href = '/login';
+                        return;
+                    }
                 }
 
                 // Stop polling if execution is complete

@@ -401,7 +401,7 @@ class ExecutionEngine:
                 else:
                     # 回退到 HTTP 客户端
                     logger.warning(f"MCP not found for command: {step.command}, falling back to HTTP")
-                    client = HTTPClient(base_url=settings.membership_service_url)
+                    client = HTTPClient(base_url=settings.membership_service_url, membership_url=settings.membership_service_url)
                     response_data = await client.execute(
                         command=step.command,
                         params=resolved_params,
@@ -411,7 +411,7 @@ class ExecutionEngine:
                     )
             else:
                 # 如果没有 MCP registry，直接使用 HTTP 客户端
-                client = HTTPClient(base_url=settings.membership_service_url)
+                client = HTTPClient(base_url=settings.membership_service_url, membership_url=settings.membership_service_url)
                 response_data = await client.execute(
                     command=step.command,
                     params=resolved_params,
@@ -767,7 +767,7 @@ class ExecutionEngine:
         steps_to_rollback.sort(key=lambda x: x.step_number, reverse=True)
 
         from src.core.config import settings
-        http_client = HTTPClient(base_url=settings.membership_service_url)
+        http_client = HTTPClient(base_url=settings.membership_service_url, membership_url=settings.membership_service_url)
         rolled_back_count = 0
 
         try:
