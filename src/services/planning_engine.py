@@ -1,4 +1,4 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from motor.motor_asyncio import AsyncIOMotorDatabase
 import json
 import logging
@@ -6,47 +6,92 @@ from src.models.models import TaskRequest, TaskPlanResponse, PlanStep, RiskAsses
 from src.models.command_set import CommandSet
 from src.models.command import Command
 from src.services.llm_client import llm_client
+from src.mcp.registry import MCPRegistry
 
 logger = logging.getLogger(__name__)
 
 class PlanningEngine:
-    def __init__(self, db: AsyncIOMotorDatabase):
+    def __init__(self, db: AsyncIOMotorDatabase, mcp_registry: Optional[MCPRegistry] = None):
         self.db = db
+        self.mcp_registry = mcp_registry
 
     async def get_available_commands(self, tenant_id: int, command_set_names: List[str] = None) -> List[Dict[str, Any]]:
         """
         Fetch commands available for the given tenant and optional command set names.
+        Can load from both database and MCP servers.
         """
-        query = {"tenant_id": tenant_id}
-        if command_set_names:
-            # First find the command set IDs
-            cs_cursor = self.db["command_sets"].find(
-                {"tenant_id": tenant_id, "name": {"$in": command_set_names}},
-                {"_id": 1}
-            )
-            cs_ids = [str(doc["_id"]) async for doc in cs_cursor]
-            query["command_set_id"] = {"$in": cs_ids}
-
-        # Fetch commands (limit to prevent memory issues)
-        cursor = self.db["commands"].find(query).limit(1000)
         commands = []
-        async for doc in cursor:
-            # Convert ObjectId to string for JSON serialization if needed, or keep as is
-            # For the prompt, we need a clean dictionary representation
-            cmd_dict = {
-                "command": doc["command"],
-                "summary": doc["summary"],
-                "description": doc.get("description", ""),
-                "parameters": doc.get("parameters", []),
-                "riskLevel": doc.get("riskLevel", "normal")
-            }
-            # Include response schema if available - helps LLM generate correct JSONPath
-            if "response_schema" in doc and doc["response_schema"]:
-                cmd_dict["responseSchema"] = doc["response_schema"]
-            commands.append(cmd_dict)
 
-        logger.info(f"Loaded {len(commands)} commands for tenant {tenant_id}")
+        # First, load commands from database (existing behavior)
+        if self.db is not None:
+            query = {"tenant_id": tenant_id}
+            if command_set_names:
+                # First find the command set IDs
+                cs_cursor = self.db["command_sets"].find(
+                    {"tenant_id": tenant_id, "name": {"$in": command_set_names}},
+                    {"_id": 1}
+                )
+                cs_ids = [str(doc["_id"]) async for doc in cs_cursor]
+                query["command_set_id"] = {"$in": cs_ids}
+
+            # Fetch commands (limit to prevent memory issues)
+            cursor = self.db["commands"].find(query).limit(1000)
+            async for doc in cursor:
+                # Convert ObjectId to string for JSON serialization if needed, or keep as is
+                # For the prompt, we need a clean dictionary representation
+                cmd_dict = {
+                    "command": doc["command"],
+                    "summary": doc["summary"],
+                    "description": doc.get("description", ""),
+                    "parameters": doc.get("parameters", []),
+                    "riskLevel": doc.get("riskLevel", "normal")
+                }
+                # Include response schema if available - helps LLM generate correct JSONPath
+                if "response_schema" in doc and doc["response_schema"]:
+                    cmd_dict["responseSchema"] = doc["response_schema"]
+                commands.append(cmd_dict)
+
+            logger.info(f"Loaded {len(commands)} commands from database for tenant {tenant_id}")
+
+        # Then, load commands from MCP servers if available
+        if self.mcp_registry:
+            mcp_commands = await self._get_mcp_commands()
+            # Add MCP commands to the list
+            commands.extend(mcp_commands)
+            logger.info(f"Loaded {len(mcp_commands)} commands from MCP servers")
+
+        logger.info(f"Loaded {len(commands)} total commands for tenant {tenant_id}")
         return commands
+
+    async def _get_mcp_commands(self) -> List[Dict[str, Any]]:
+        """
+        Get commands from all registered MCP servers.
+        """
+        mcp_commands = []
+
+        if not self.mcp_registry:
+            return mcp_commands
+
+        for mcp in self.mcp_registry.get_all_mcps():
+            try:
+                tools = mcp.get_tools()
+                for tool in tools:
+                    # Convert MCP tool to command format
+                    cmd_dict = {
+                        "command": f"MCP.{mcp.name}.{tool.name}",
+                        "summary": tool.description or f"{mcp.name} - {tool.name}",
+                        "description": tool.description or f"Execute {tool.name} via {mcp.name}",
+                        "parameters": tool.input_schema if hasattr(tool, 'input_schema') else {},
+                        "riskLevel": "normal",  # Default risk level for MCP commands
+                        "source": "mcp",
+                        "mcp_server": mcp.name,
+                        "mcp_tool": tool.name
+                    }
+                    mcp_commands.append(cmd_dict)
+            except Exception as e:
+                logger.warning(f"Error loading commands from MCP {mcp.name}: {e}")
+
+        return mcp_commands
 
     async def plan_task(self, request: TaskRequest, tenant_id: int, user_id: str = None) -> TaskPlanResponse:
         # 1. Load Knowledge (Commands)

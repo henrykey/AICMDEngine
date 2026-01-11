@@ -6,7 +6,7 @@ from src.services.planning_engine import PlanningEngine
 router = APIRouter()
 
 def get_planning_engine(request: Request) -> PlanningEngine:
-    return PlanningEngine(request.app.mongodb)
+    return PlanningEngine(request.app.mongodb, getattr(request.app, 'mcp_registry', None))
 
 @router.post("/", response_model=TaskPlanResponse)
 async def create_task(

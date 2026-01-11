@@ -20,9 +20,11 @@ def get_db(request: Request) -> AsyncIOMotorDatabase:
     return request.app.mongodb
 
 
-def get_engine(db: AsyncIOMotorDatabase = Depends(get_db)) -> ExecutionEngine:
+def get_engine(request: Request) -> ExecutionEngine:
     """获取执行引擎实例"""
-    return ExecutionEngine(db)
+    db = request.app.mongodb
+    mcp_registry = getattr(request.app, 'mcp_registry', None)
+    return ExecutionEngine(db, mcp_registry)
 
 
 @router.post("/", response_model=ExecutionResponse)

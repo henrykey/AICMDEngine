@@ -1,6 +1,7 @@
 import logging
 import asyncio
 import json
+import re
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -20,6 +21,7 @@ from src.services.execution_repository import ExecutionRepository
 from src.services.http_client import HTTPClient
 from src.services.membership_client import MembershipClient
 from src.core.config import settings
+from src.mcp.registry import MCPRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -27,15 +29,17 @@ logger = logging.getLogger(__name__)
 class ExecutionEngine:
     """执行引擎 - 负责执行计划并管理步骤"""
 
-    def __init__(self, db: AsyncIOMotorDatabase):
+    def __init__(self, db: AsyncIOMotorDatabase, mcp_registry: Optional[MCPRegistry] = None):
         """
         初始化执行引擎
 
         Args:
             db: MongoDB 异步数据库实例
+            mcp_registry: MCP registry for executing MCP commands (optional)
         """
         self.db = db
         self.repository = ExecutionRepository(db)
+        self.mcp_registry = mcp_registry
 
     async def execute_plan(
         self,
@@ -368,24 +372,45 @@ class ExecutionEngine:
         # 执行步骤并处理结果
         client = None
         try:
-            # 特殊处理用户创建命令
             response_data = None
-            if step.command.startswith("POST /v2/members"):
-                # 用户创建命令 - 使用 MembershipClient
-                client = MembershipClient()
-                user_data = resolved_params.get("body", {})
-                response_data = await client.create_member(
-                    tenant_id=tenant_id,
-                    username=user_data.get("username"),
-                    email=user_data.get("email"),
-                    password=user_data.get("password"),
-                    is_virtual=user_data.get("is_virtual", True),
-                    auth_token=auth_token
-                )
-                logger.info(f"User created successfully: {user_data.get('username')}")
+
+            # 优先使用 MCP 命令执行
+            if self.mcp_registry:
+                # 尝试从命令字符串中提取 MCP 名称和工具名称
+                mcp_name, tool_name = self._parse_command_to_mcp(step.command)
+
+                if mcp_name and tool_name:
+                    # 使用 MCP 执行命令
+                    logger.info(f"Executing MCP command: {mcp_name}.{tool_name}")
+                    result = await self.mcp_registry.execute_command(
+                        mcp_name=mcp_name,
+                        tool_name=tool_name,
+                        **resolved_params
+                    )
+
+                    if result.is_error:
+                        error_msg = f"MCP command failed: {result.content}"
+                        logger.error(error_msg)
+                        raise ValueError(error_msg)
+
+                    response_data = result.content if result.content else result.data
+                    if response_data is None:
+                        response_data = {"success": True}
+
+                    logger.info(f"MCP command executed successfully: {mcp_name}.{tool_name}")
+                else:
+                    # 回退到 HTTP 客户端
+                    logger.warning(f"MCP not found for command: {step.command}, falling back to HTTP")
+                    client = HTTPClient(base_url=settings.membership_service_url)
+                    response_data = await client.execute(
+                        command=step.command,
+                        params=resolved_params,
+                        auth_token=auth_token,
+                        tenant_id=tenant_id,
+                        timeout=step.timeout
+                    )
             else:
-                # 普通 HTTP 请求 - 使用 HTTPClient
-                from src.core.config import settings
+                # 如果没有 MCP registry，直接使用 HTTP 客户端
                 client = HTTPClient(base_url=settings.membership_service_url)
                 response_data = await client.execute(
                     command=step.command,
@@ -807,3 +832,111 @@ class ExecutionEngine:
 
         finally:
             await http_client.close()
+
+    def _parse_command_to_mcp(self, command: str) -> tuple[Optional[str], Optional[str]]:
+        """
+        Parse a command string to extract MCP name and tool name.
+
+        This method handles both traditional HTTP commands and MCP commands.
+        For example:
+        - "POST /v1/members" -> ("membership", "create_member")
+        - "GET /v1/members/{id}" -> ("membership", "get_member")
+        - "GET /v2/time" -> ("test", "get_time")
+        - "MCP.membership.create_member" -> ("membership", "create_member")
+        - "MCP.test.get_time" -> ("test", "get_time")
+
+        Args:
+            command: The command string to parse
+
+        Returns:
+            Tuple of (mcp_name, tool_name) or (None, None) if no match found
+        """
+        if not command:
+            return None, None
+
+        # First, check if it's already an MCP command
+        if command.startswith("MCP."):
+            # Parse MCP format: "MCP.membership.create_member"
+            parts = command.split(".")
+            if len(parts) == 3:
+                # Skip the "MCP" prefix
+                mcp_name = parts[1]
+                tool_name = parts[2]
+                logger.info(f"Found MCP command: {mcp_name}.{tool_name}")
+                return mcp_name, tool_name
+
+        # Define command-to-MCP mappings
+        command_mappings = {
+            # Membership operations
+            "POST /v1/members": ("membership", "create_member"),
+            "POST /v1/members/{id}": ("membership", "update_member"),
+            "GET /v1/members": ("membership", "list_members"),
+            "GET /v1/members/{id}": ("membership", "get_member"),
+            "DELETE /v1/members/{id}": ("membership", "delete_member"),
+            "GET /v1/roles": ("membership", "list_roles"),
+            "POST /v1/members/{id}/roles": ("membership", "assign_role"),
+
+            # Test operations
+            "GET /v2/time": ("test", "get_time"),
+            "GET /v2/echo": ("test", "echo"),
+            "POST /v2/calculate": ("test", "add"),
+
+            # More commands can be added here
+        }
+
+        # Exact match first
+        if command in command_mappings:
+            return command_mappings[command]
+
+        # Pattern matching for dynamic parameters
+        for pattern, (mcp_name, tool_name) in command_mappings.items():
+            if pattern.endswith("{id}"):
+                # Extract the base path
+                base_pattern = pattern.replace("/{id}", "")
+                base_command = command.rsplit("/", 1)[0]
+                if base_command == base_pattern:
+                    return mcp_name, tool_name
+
+        # For now, fall back to simple extraction based on path segments
+        try:
+            parts = command.split()
+            if len(parts) >= 2:
+                method, path = parts[0], parts[1]
+
+                # Extract the main path segment after /v1/ or /v2/
+                if "/v1/" in path or "/v2/" in path:
+                    path_segments = path.split("/")
+                    if len(path_segments) >= 3:
+                        main_segment = path_segments[2]
+
+                        # Map main segments to tools
+                        if main_segment == "members":
+                            if method == "POST":
+                                return "membership", "create_member"
+                            elif method == "GET" and len(path_segments) == 3:
+                                return "membership", "list_members"
+                            elif method == "GET" and len(path_segments) > 3:
+                                return "membership", "get_member"
+                            elif method == "DELETE":
+                                return "membership", "delete_member"
+                            elif method == "POST" and len(path_segments) > 3:
+                                return "membership", "update_member"
+                        elif main_segment == "roles":
+                            if method == "GET":
+                                return "membership", "list_roles"
+                            elif method == "POST" and len(path_segments) > 3:
+                                return "membership", "assign_role"
+                        elif main_segment == "time":
+                            if method == "GET":
+                                return "test", "get_time"
+                        elif main_segment == "echo":
+                            if method == "GET":
+                                return "test", "echo"
+                        elif main_segment == "calculate":
+                            if method == "POST":
+                                return "test", "add"
+
+        except Exception as e:
+            logger.warning(f"Error parsing command '{command}': {e}")
+
+        return None, None
