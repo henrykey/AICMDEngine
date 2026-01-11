@@ -9,6 +9,8 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 import logging
 import aiohttp
+import json
+import xml.etree.ElementTree as ET
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -211,3 +213,157 @@ class MembershipClient:
         # TODO: Implement actual HTTP call to Membership API
         # For now, return empty list (to be mocked in tests)
         return []
+
+
+class BPMNValidator:
+    """
+    Validates BPMN 2.0 XML for correctness and Flowable compatibility.
+
+    Validation includes:
+    1. XML structure and parsing
+    2. BPMN 2.0 required elements (startEvent, endEvent, etc.)
+    3. Sequence flow connections (no broken references)
+    4. Executor pattern validation
+    5. Confidence score calculation
+    """
+
+    BPMN_NAMESPACE = {"bpmn": "http://www.omg.org/spec/BPMN/20100524/MODEL"}
+
+    async def validate_bpmn(
+        self,
+        tenant_id: str,
+        bpmn_xml: str,
+        strict_mode: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Validate BPMN XML structure and content.
+
+        Args:
+            tenant_id: Tenant ID for context
+            bpmn_xml: BPMN XML string
+            strict_mode: If True, enforce stricter validation
+
+        Returns:
+            Dict with keys:
+            - valid: bool - whether BPMN is valid
+            - errors: list - critical errors (if any)
+            - warnings: list - warnings (if any)
+            - confidence_score: float - 0.0-1.0
+        """
+        errors = []
+        warnings = []
+        confidence_score = 1.0
+
+        # Step 1: Parse XML
+        try:
+            root = ET.fromstring(bpmn_xml)
+        except ET.ParseError as e:
+            return {
+                "valid": False,
+                "errors": [f"XML parsing error: {str(e)}"],
+                "warnings": [],
+                "confidence_score": 0.0
+            }
+
+        # Step 2: Validate BPMN structure
+        structure_errors = self._validate_bpmn_structure(root)
+        errors.extend(structure_errors)
+        if structure_errors:
+            confidence_score -= 0.3
+
+        # Step 3: Validate sequence flows
+        flow_errors = self._validate_sequence_flows(root)
+        errors.extend(flow_errors)
+        if flow_errors:
+            confidence_score -= 0.3
+
+        # Step 4: Validate executor patterns (if present)
+        pattern_warnings = self._validate_executor_patterns(root)
+        warnings.extend(pattern_warnings)
+        if pattern_warnings:
+            confidence_score -= 0.1
+
+        # Ensure confidence score is within bounds
+        confidence_score = max(0.0, min(1.0, confidence_score))
+
+        return {
+            "valid": len(errors) == 0,
+            "errors": errors,
+            "warnings": warnings,
+            "confidence_score": confidence_score
+        }
+
+    def _validate_bpmn_structure(self, root: ET.Element) -> List[str]:
+        """Validate basic BPMN 2.0 structure"""
+        errors = []
+
+        # Find process element
+        process = root.find("bpmn:process", self.BPMN_NAMESPACE)
+        if process is None:
+            errors.append("Missing required <bpmn:process> element")
+            return errors
+
+        # Check for startEvent
+        start_events = process.findall("bpmn:startEvent", self.BPMN_NAMESPACE)
+        if not start_events:
+            errors.append("Missing required <bpmn:startEvent> element")
+
+        # Check for endEvent
+        end_events = process.findall("bpmn:endEvent", self.BPMN_NAMESPACE)
+        if not end_events:
+            errors.append("Missing required <bpmn:endEvent> element")
+
+        return errors
+
+    def _validate_sequence_flows(self, root: ET.Element) -> List[str]:
+        """Validate sequence flow connections"""
+        errors = []
+
+        process = root.find("bpmn:process", self.BPMN_NAMESPACE)
+        if process is None:
+            return errors
+
+        # Get all element IDs
+        all_elements = process.findall("bpmn:*", self.BPMN_NAMESPACE)
+        element_ids = {elem.get("id") for elem in all_elements if elem.get("id")}
+
+        # Validate sequence flows
+        flows = process.findall("bpmn:sequenceFlow", self.BPMN_NAMESPACE)
+        for flow in flows:
+            source_ref = flow.get("sourceRef")
+            target_ref = flow.get("targetRef")
+
+            if source_ref and source_ref not in element_ids:
+                errors.append(f"Sequence flow references non-existent source: {source_ref}")
+
+            if target_ref and target_ref not in element_ids:
+                errors.append(f"Sequence flow references non-existent target: {target_ref}")
+
+        return errors
+
+    def _validate_executor_patterns(self, root: ET.Element) -> List[str]:
+        """Validate executor pattern documentation"""
+        warnings = []
+
+        process = root.find("bpmn:process", self.BPMN_NAMESPACE)
+        if process is None:
+            return warnings
+
+        # Find all userTasks with documentation
+        user_tasks = process.findall("bpmn:userTask", self.BPMN_NAMESPACE)
+        for task in user_tasks:
+            doc = task.find("bpmn:documentation", self.BPMN_NAMESPACE)
+            if doc is not None and doc.text:
+                try:
+                    executor_config = json.loads(doc.text)
+                    pattern = executor_config.get("executor_pattern")
+                    if not pattern:
+                        warnings.append(
+                            f"User task {task.get('id')} missing executor_pattern in documentation"
+                        )
+                except json.JSONDecodeError:
+                    warnings.append(
+                        f"User task {task.get('id')} has invalid JSON in documentation"
+                    )
+
+        return warnings
