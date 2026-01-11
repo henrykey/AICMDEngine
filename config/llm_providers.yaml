@@ -1,0 +1,105 @@
+# LLM Providers Configuration
+# API keys should be stored in .env file, referenced by key name
+
+providers:
+  openai:
+    type: openai_compatible
+    base_url: https://api.openai.com/v1
+    model: gpt-5
+    api_key_ref: OPENAI_API_KEY
+    timeout: 30
+    temperature: 0.7
+    max_tokens: 2048
+    top_p: 1.0
+    cost_per_1k_tokens: 0.003
+    priority: 1
+    enabled: true
+    metadata:
+      provider_name: OpenAI
+      region: Global
+      max_qps: 3500
+
+  deepseek:
+    type: openai_compatible
+    base_url: https://api.deepseek.com/v1
+    model: deepseek-v3.2
+    api_key_ref: DEEPSEEK_API_KEY
+    timeout: 30
+    temperature: 0.7
+    max_tokens: 2048
+    top_p: 1.0
+    cost_per_1k_tokens: 0.0001
+    priority: 2
+    enabled: true
+    metadata:
+      provider_name: DeepSeek
+      region: China
+      max_qps: 1000
+
+  qwen:
+    type: openai_compatible
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    model: qwen-max
+    api_key_ref: QWEN_API_KEY
+    timeout: 30
+    temperature: 0.7
+    max_tokens: 2048
+    top_p: 1.0
+    cost_per_1k_tokens: 0.0005
+    priority: 3
+    enabled: false
+    metadata:
+      provider_name: Alibaba Qwen
+      region: China
+      max_qps: 500
+
+  kimi:
+    type: openai_compatible
+    base_url: https://api.moonshot.cn/v1
+    model: moonshot-v1-128k
+    api_key_ref: KIMI_API_KEY
+    timeout: 30
+    temperature: 0.7
+    max_tokens: 2048
+    top_p: 1.0
+    cost_per_1k_tokens: 0.0008
+    priority: 4
+    enabled: false
+    metadata:
+      provider_name: Moonshot (Kimi)
+      region: China
+      max_qps: 300
+
+  glm:
+    type: openai_compatible
+    base_url: https://open.bigmodel.cn/api/paas/v4
+    model: glm-4
+    api_key_ref: GLM_API_KEY
+    timeout: 30
+    temperature: 0.7
+    max_tokens: 2048
+    top_p: 1.0
+    cost_per_1k_tokens: 0.001
+    priority: 5
+    enabled: false
+    metadata:
+      provider_name: Zhipu GLM
+      region: China
+      max_qps: 200
+
+  local:
+    type: openai_compatible
+    base_url: http://localhost:8000/v1
+    model: local-model
+    api_key_ref: LOCAL_API_KEY
+    timeout: 60
+    temperature: 0.7
+    max_tokens: 4096
+    top_p: 1.0
+    cost_per_1k_tokens: 0.0
+    priority: 99
+    enabled: false
+    metadata:
+      provider_name: Local Deployment
+      region: Local
+      max_qps: unlimited
