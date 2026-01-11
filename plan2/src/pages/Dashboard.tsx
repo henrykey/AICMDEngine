@@ -15,6 +15,7 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { id: 'planner', label: 'Task Playground', icon: '🚀' },
   { id: 'mcp-tools', label: 'MCP Tools', icon: '🔧' },
+  { id: 'commands', label: 'Command Sets', icon: '📂' },
   { id: 'settings', label: 'Settings', icon: '⚙️' },
   { id: 'analytics', label: 'Analytics', icon: '📊' },
   { id: 'documentation', label: 'Docs', icon: '📖' },

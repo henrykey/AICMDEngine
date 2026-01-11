@@ -51,6 +51,7 @@ async def list_mcp_servers(request: Request) -> Dict[str, Any]:
                 "last_heartbeat": last_heartbeat.isoformat(),
                 "tools_count": tools_count,
                 "commands_count": commands_count,
+                "tools": mcp_info.get('tools', []),
                 "metadata": {
                     "description": getattr(mcp, 'description', f'MCP Server: {mcp.name}'),
                     "version": getattr(mcp, 'version', '1.0.0'),
