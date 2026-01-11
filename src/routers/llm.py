@@ -1,0 +1,285 @@
+"""
+LLM Provider Management API routes.
+"""
+
+from fastapi import APIRouter, HTTPException, Depends
+from typing import List, Dict, Any, Optional
+import logging
+
+from src.llm.config_loader import LLMConfig
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/llm", tags=["llm"])
+
+# Global provider manager instance (will be set during app startup)
+_provider_manager = None
+
+
+def set_provider_manager(manager):
+    """Set the global provider manager instance."""
+    global _provider_manager
+    _provider_manager = manager
+
+
+async def get_provider_manager():
+    """Dependency to get the provider manager."""
+    if not _provider_manager:
+        raise HTTPException(status_code=500, detail="Provider manager not initialized")
+    return _provider_manager
+
+
+@router.get("/providers")
+async def list_providers(manager=Depends(get_provider_manager)):
+    """Get list of all LLM providers."""
+    try:
+        providers = manager.get_providers()
+        provider_list = [
+            {
+                **config.to_dict(),
+                "is_current": name == manager.get_current_provider(),
+                "is_initialized": name in manager.clients,
+            }
+            for name, config in providers.items()
+        ]
+        return {"providers": provider_list}
+    except Exception as e:
+        logger.error(f"Error listing providers: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/providers/{name}")
+async def get_provider(name: str, manager=Depends(get_provider_manager)):
+    """Get details of a specific provider."""
+    try:
+        info = manager.get_provider_info(name)
+        if not info:
+            raise HTTPException(status_code=404, detail=f"Provider {name} not found")
+        return info
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting provider {name}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/providers")
+async def create_provider(
+    provider: Dict[str, Any],
+    manager=Depends(get_provider_manager),
+):
+    """Create a new LLM provider."""
+    try:
+        name = provider.get("name")
+        if not name:
+            raise HTTPException(status_code=400, detail="Provider name is required")
+
+        if name in manager.get_providers():
+            raise HTTPException(status_code=409, detail=f"Provider {name} already exists")
+
+        # Save to MongoDB
+        if manager.db_client:
+            db = manager.db_client.nl_tps
+            collection = db.llm_providers
+            await collection.insert_one(provider)
+
+            # Reload providers
+            manager.providers = await manager.config_loader.load_from_mongodb(manager.db_client)
+            await manager.initialize(manager.db_client)
+        else:
+            raise HTTPException(status_code=500, detail="Database client not initialized")
+
+        # Return the created provider info without MongoDB's _id field
+        provider_copy = {k: v for k, v in provider.items() if k != "_id"}
+        return {"success": True, "provider": provider_copy}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating provider: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/providers/{name}")
+async def update_provider(
+    name: str,
+    provider_data: Dict[str, Any],
+    manager=Depends(get_provider_manager),
+):
+    """Update an existing LLM provider."""
+    try:
+        # Check if provider exists
+        if name not in manager.get_providers():
+            raise HTTPException(status_code=404, detail=f"Provider {name} not found")
+
+        # Update in MongoDB
+        if manager.db_client:
+            db = manager.db_client.nl_tps
+            collection = db.llm_providers
+            result = await collection.update_one(
+                {"name": name},
+                {"$set": provider_data}
+            )
+
+            if result.matched_count == 0:
+                raise HTTPException(status_code=404, detail=f"Provider {name} not found in database")
+
+            # Reload providers
+            manager.providers = await manager.config_loader.load_from_mongodb(manager.db_client)
+            await manager.initialize(manager.db_client)
+        else:
+            raise HTTPException(status_code=500, detail="Database client not initialized")
+
+        return {"success": True, "message": f"Provider {name} updated"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating provider {name}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/providers/{name}")
+async def delete_provider(
+    name: str,
+    manager=Depends(get_provider_manager),
+):
+    """Delete an LLM provider."""
+    try:
+        # Check if provider exists
+        if name not in manager.get_providers():
+            raise HTTPException(status_code=404, detail=f"Provider {name} not found")
+
+        # Can't delete if it's the current provider
+        if name == manager.get_current_provider():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot delete the active provider '{name}'. Please select another provider first."
+            )
+
+        # Delete from MongoDB
+        if manager.db_client:
+            db = manager.db_client.nl_tps
+            collection = db.llm_providers
+            result = await collection.delete_one({"name": name})
+
+            if result.deleted_count == 0:
+                raise HTTPException(status_code=404, detail=f"Provider {name} not found in database")
+
+            # Reload providers
+            manager.providers = await manager.config_loader.load_from_mongodb(manager.db_client)
+            await manager.initialize(manager.db_client)
+        else:
+            raise HTTPException(status_code=500, detail="Database client not initialized")
+
+        return {"success": True, "message": f"Provider {name} deleted"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting provider {name}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/providers/{name}/select")
+async def select_provider(
+    name: str,
+    manager=Depends(get_provider_manager),
+):
+    """Select a provider as the current active provider."""
+    try:
+        if not manager.set_current_provider(name):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to select provider {name}"
+            )
+        return {"success": True, "current_provider": name}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error selecting provider {name}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/providers/{name}/test")
+async def test_provider(
+    name: str,
+    test_data: Dict[str, str],
+    manager=Depends(get_provider_manager),
+):
+    """Test a provider connection with a simple message."""
+    try:
+        message = test_data.get("message", "Hello, this is a test message.")
+
+        result = await manager.complete(
+            messages=[{"role": "user", "content": message}],
+            provider=name,
+        )
+
+        if result is None:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to get response from provider {name}"
+            )
+
+        return {
+            "success": True,
+            "provider": name,
+            "message": result,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error testing provider {name}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/providers/{name}/costs")
+async def get_provider_costs(
+    name: str,
+    manager=Depends(get_provider_manager),
+):
+    """Get cost information for a provider."""
+    try:
+        if name not in manager.get_providers():
+            raise HTTPException(status_code=404, detail=f"Provider {name} not found")
+
+        cost = manager.cost_tracker.get(name, 0.0)
+        return {
+            "provider": name,
+            "cost_accumulated": cost,
+            "cost_per_1k_tokens": manager.get_provider(name).cost_per_1k_tokens,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting costs for {name}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/current")
+async def get_current_provider(manager=Depends(get_provider_manager)):
+    """Get the current active provider."""
+    try:
+        current = manager.get_current_provider()
+        if not current:
+            raise HTTPException(status_code=404, detail="No provider currently selected")
+
+        info = manager.get_provider_info(current)
+        return info
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting current provider: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/costs")
+async def get_all_costs(manager=Depends(get_provider_manager)):
+    """Get cost summary for all providers."""
+    try:
+        costs = manager.get_cost_summary()
+        return {
+            "costs": costs,
+            "total_cost": sum(costs.values()),
+        }
+    except Exception as e:
+        logger.error(f"Error getting costs: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
