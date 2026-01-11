@@ -16,7 +16,7 @@ const MCPTools = () => {
       setLoading(true);
       setError(null);
       try {
-        const response = await api.get<{ success?: boolean; servers?: any[] }>(
+        const response = await api.get<{ success?: boolean; servers?: any[]; data?: any[] }>(
           '/v1/mcp/servers'
         );
 
@@ -55,20 +55,6 @@ const MCPTools = () => {
     tool.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
     tool.description.toLowerCase().includes(searchQuery.toLowerCase())
   );
-
-  const getStatusBadge = (status: string) => {
-    const statusConfig: Record<string, { icon: string; color: string }> = {
-      running: { icon: '🟢', color: 'bg-green-100 text-green-800' },
-      stopped: { icon: '⚪', color: 'bg-gray-100 text-gray-800' },
-      error: { icon: '🔴', color: 'bg-red-100 text-red-800' }
-    };
-    const config = statusConfig[status] || statusConfig.stopped;
-    return (
-      <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${config.color}`}>
-        {config.icon} {status}
-      </span>
-    );
-  };
 
   return (
     <div className="flex flex-col gap-6 h-full p-6 bg-slate-50">

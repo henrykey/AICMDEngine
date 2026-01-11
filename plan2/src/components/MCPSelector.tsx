@@ -13,7 +13,7 @@ const MCPSelector: React.FC = () => {
       setLoading(true);
       setError(null);
       try {
-        const response = await api.get<{ success?: boolean; servers?: any[] }>(
+        const response = await api.get<{ success?: boolean; servers?: any[]; data?: any[] }>(
           '/v1/mcp/servers'
         );
 
