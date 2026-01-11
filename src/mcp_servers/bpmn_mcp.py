@@ -367,3 +367,243 @@ class BPMNValidator:
                     )
 
         return warnings
+
+
+class ExecutorPatternValidator:
+    """
+    Validates executor pattern configurations for all 5 patterns:
+    1. Static (fixed role/dept/member)
+    2. Form-driven (user selection at start)
+    3. Dynamic (data-driven routing)
+    4. Queue-claim (first-available)
+    5. Automation (MCP tool or virtual member)
+    """
+
+    async def validate(
+        self,
+        pattern: str,
+        config: Dict[str, Any],
+        available_roles: Optional[List[Dict[str, Any]]] = None,
+        available_departments: Optional[List[Dict[str, Any]]] = None,
+        available_members: Optional[List[Dict[str, Any]]] = None,
+        available_form_fields: Optional[List[str]] = None,
+        available_mcp_tools: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """
+        Validate executor pattern configuration.
+
+        Args:
+            pattern: One of: static, form_driven, dynamic, queue_claim, automation
+            config: Pattern-specific configuration dict
+            available_*: Lists of available entities for validation
+
+        Returns:
+            Dict with keys:
+            - valid: bool
+            - error: str (optional, if invalid)
+            - warnings: list (optional)
+        """
+        if pattern == "static":
+            return await self._validate_static(config, available_roles, available_departments, available_members)
+        elif pattern == "form_driven":
+            return await self._validate_form_driven(config, available_form_fields)
+        elif pattern == "dynamic":
+            return await self._validate_dynamic(config, available_mcp_tools)
+        elif pattern == "queue_claim":
+            return await self._validate_queue_claim(config, available_roles, available_departments)
+        elif pattern == "automation":
+            return await self._validate_automation(config, available_mcp_tools)
+        else:
+            return {
+                "valid": False,
+                "error": f"Unknown executor pattern: {pattern}"
+            }
+
+    async def _validate_static(
+        self,
+        config: Dict[str, Any],
+        roles: Optional[List[Dict[str, Any]]],
+        departments: Optional[List[Dict[str, Any]]],
+        members: Optional[List[Dict[str, Any]]]
+    ) -> Dict[str, Any]:
+        """Validate static executor pattern"""
+        exec_type = config.get("type")
+        value = config.get("value")
+
+        if not exec_type:
+            return {
+                "valid": False,
+                "error": "Static executor requires 'type' field (role, department, or member)"
+            }
+
+        if not value:
+            return {
+                "valid": False,
+                "error": f"Static executor requires 'value' field for type '{exec_type}'"
+            }
+
+        if exec_type == "role":
+            if not roles:
+                return {"valid": False, "error": "No roles provided for validation"}
+            if any(r["name"] == value for r in roles):
+                return {"valid": True}
+            else:
+                return {"valid": False, "error": f"Role not found: {value}"}
+
+        elif exec_type == "department":
+            if not departments:
+                return {"valid": False, "error": "No departments provided for validation"}
+            if any(d["name"] == value for d in departments):
+                return {"valid": True}
+            else:
+                return {"valid": False, "error": f"Department not found: {value}"}
+
+        elif exec_type == "member":
+            if not members:
+                return {"valid": False, "error": "No members provided for validation"}
+            if any(m["id"] == value or m["name"] == value for m in members):
+                return {"valid": True}
+            else:
+                return {"valid": False, "error": f"Member not found: {value}"}
+
+        else:
+            return {
+                "valid": False,
+                "error": f"Unknown static type: {exec_type}. Must be: role, department, or member"
+            }
+
+    async def _validate_form_driven(
+        self,
+        config: Dict[str, Any],
+        form_fields: Optional[List[str]]
+    ) -> Dict[str, Any]:
+        """Validate form-driven executor pattern"""
+        form_field = config.get("form_field")
+
+        if not form_field:
+            return {
+                "valid": False,
+                "error": "Form-driven executor requires 'form_field' key"
+            }
+
+        if not form_fields:
+            return {"valid": False, "error": "No form fields provided for validation"}
+
+        if form_field in form_fields:
+            return {"valid": True}
+        else:
+            return {
+                "valid": False,
+                "error": f"Form field not found in process: {form_field}"
+            }
+
+    async def _validate_dynamic(
+        self,
+        config: Dict[str, Any],
+        mcp_tools: Optional[List[str]]
+    ) -> Dict[str, Any]:
+        """Validate dynamic executor pattern"""
+        mcp_tool = config.get("mcp_tool")
+
+        if not mcp_tool:
+            return {
+                "valid": False,
+                "error": "Dynamic executor requires 'mcp_tool' key"
+            }
+
+        if not mcp_tools:
+            return {"valid": False, "error": "No MCP tools provided for validation"}
+
+        if mcp_tool in mcp_tools:
+            return {"valid": True}
+        else:
+            return {
+                "valid": False,
+                "error": f"MCP tool not registered: {mcp_tool}"
+            }
+
+    async def _validate_queue_claim(
+        self,
+        config: Dict[str, Any],
+        roles: Optional[List[Dict[str, Any]]],
+        departments: Optional[List[Dict[str, Any]]]
+    ) -> Dict[str, Any]:
+        """Validate queue-claim executor pattern"""
+        claim_group = config.get("claim_group")
+        group_name = config.get("group_name")
+
+        if not claim_group or not group_name:
+            return {
+                "valid": False,
+                "error": "Queue-claim executor requires 'claim_group' and 'group_name' keys"
+            }
+
+        if claim_group == "role":
+            if not roles:
+                return {"valid": False, "error": "No roles provided for validation"}
+            if any(r["name"] == group_name for r in roles):
+                return {"valid": True}
+            else:
+                return {"valid": False, "error": f"Role not found for queue-claim: {group_name}"}
+
+        elif claim_group == "department":
+            if not departments:
+                return {"valid": False, "error": "No departments provided for validation"}
+            if any(d["name"] == group_name for d in departments):
+                return {"valid": True}
+            else:
+                return {"valid": False, "error": f"Department not found for queue-claim: {group_name}"}
+
+        else:
+            return {
+                "valid": False,
+                "error": f"Unknown queue-claim group: {claim_group}. Must be: role or department"
+            }
+
+    async def _validate_automation(
+        self,
+        config: Dict[str, Any],
+        mcp_tools: Optional[List[str]]
+    ) -> Dict[str, Any]:
+        """Validate automation executor pattern"""
+        automation_type = config.get("automation_type")
+
+        if not automation_type:
+            return {
+                "valid": False,
+                "error": "Automation executor requires 'automation_type' key (mcp_tool or virtual_member)"
+            }
+
+        if automation_type == "mcp_tool":
+            mcp_tool_name = config.get("mcp_tool_name")
+            if not mcp_tool_name:
+                return {
+                    "valid": False,
+                    "error": "MCP tool automation requires 'mcp_tool_name' key"
+                }
+
+            if not mcp_tools:
+                return {"valid": False, "error": "No MCP tools provided for validation"}
+
+            if mcp_tool_name in mcp_tools:
+                return {"valid": True}
+            else:
+                return {
+                    "valid": False,
+                    "error": f"MCP tool not registered: {mcp_tool_name}"
+                }
+
+        elif automation_type == "virtual_member":
+            virtual_member_name = config.get("virtual_member_name")
+            if not virtual_member_name:
+                return {
+                    "valid": False,
+                    "error": "Virtual member automation requires 'virtual_member_name' key"
+                }
+            return {"valid": True}
+
+        else:
+            return {
+                "valid": False,
+                "error": f"Unknown automation type: {automation_type}. Must be: mcp_tool or virtual_member"
+            }
