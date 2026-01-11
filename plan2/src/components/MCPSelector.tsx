@@ -14,7 +14,7 @@ const MCPSelector: React.FC = () => {
       setError(null);
       try {
         const response = await api.get<{ success?: boolean; servers?: any[]; data?: any[] }>(
-          '/v1/mcp/servers'
+          '/mcp/servers'
         );
 
         // Handle both response formats
