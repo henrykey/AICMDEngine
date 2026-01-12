@@ -7,6 +7,7 @@ import FieldPropertiesPanel from './FieldPropertiesPanel';
 const FormEditor: React.FC<FormEditorProps> = ({
   formJson = { id: '', name: '', fields: [] },
   onFormChange,
+  bpmnXml,
   readOnly = false,
 }) => {
   const [selectedFieldId, setSelectedFieldId] = useState<string | null>(null);
@@ -84,6 +85,7 @@ const FormEditor: React.FC<FormEditorProps> = ({
         <FieldPropertiesPanel
           field={formJson.fields.find(f => f.id === selectedFieldId)!}
           onUpdate={(updates) => handleUpdateField(selectedFieldId, updates)}
+          bpmnXml={bpmnXml}
         />
       )}
     </div>

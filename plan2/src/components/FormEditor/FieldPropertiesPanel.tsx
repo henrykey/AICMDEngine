@@ -1,15 +1,18 @@
 import React, { useState } from 'react';
 import { FormField } from '../../types/bpmn';
 import PermissionRuleEditor from './PermissionRuleEditor';
+import TaskBindingEditor from './TaskBindingEditor';
 
 interface FieldPropertiesPanelProps {
   field: FormField;
   onUpdate: (updates: Partial<FormField>) => void;
+  bpmnXml?: string;
 }
 
 const FieldPropertiesPanel: React.FC<FieldPropertiesPanelProps> = ({
   field,
   onUpdate,
+  bpmnXml,
 }) => {
   return (
     <div className="w-80 bg-white border-l border-gray-300 p-4 overflow-y-auto max-h-screen">
@@ -80,6 +83,20 @@ const FieldPropertiesPanel: React.FC<FieldPropertiesPanelProps> = ({
           onChange={(permissions) => onUpdate({ permissions })}
         />
       </div>
+
+      {/* Task Binding */}
+      {bpmnXml && (
+        <div className="mb-4 pt-4 border-t border-gray-200">
+          <h4 className="text-sm font-medium text-gray-700 mb-2">
+            Task Binding
+          </h4>
+          <TaskBindingEditor
+            bpmnXml={bpmnXml}
+            currentBinding={field.taskBinding || ''}
+            onBindingChange={(taskId) => onUpdate({ taskBinding: taskId })}
+          />
+        </div>
+      )}
     </div>
   );
 };
