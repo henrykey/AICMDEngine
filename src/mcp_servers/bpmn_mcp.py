@@ -874,3 +874,147 @@ async def validate_prompt_response(response: str) -> Dict[str, Any]:
         "warnings": warnings,
         "confidence": confidence
     }
+
+
+# ============================================================================
+# Task 5: generate_process Tool Implementation
+# ============================================================================
+
+async def generate_process(
+    tenant_id: str,
+    description: str,
+    org_context: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Generate BPMN process from natural language description.
+
+    Main entry point for BPMN generation workflow:
+    1. Build system prompt + input context
+    2. Get few-shot examples
+    3. Send to Mock LLM (Task 5) / Real LLM (Task 6)
+    4. Validate response using BPMNValidator
+    5. Return result with confidence score
+
+    Args:
+        tenant_id: Tenant ID for process ownership
+        description: Natural language process description
+        org_context: Organizational context with departments, roles, members
+
+    Returns:
+        Result dict with:
+        - bpmn_xml: Generated BPMN 2.0 XML string
+        - valid: Whether BPMN is valid
+        - confidence_score: 0.0-1.0 quality indicator
+        - errors: List of validation errors (if any)
+        - metadata: Process generation metadata
+    """
+    # Initialize components
+    membership_client = MembershipClient("http://membership:8000", tenant_id)
+    validator = BPMNValidator()
+    mock_llm = MockLLMClient()
+
+    # Build prompts
+    system_prompt = await build_system_prompt()
+    few_shot_examples = await get_few_shot_examples()
+    input_context = await build_input_context(tenant_id, description, org_context)
+
+    # Format few-shot examples for LLM
+    few_shot_text = "\n\n".join([
+        f"Example {i+1}:\nRequirement: {ex['input']}\n\nBPMN Output:\n{ex['output']}"
+        for i, ex in enumerate(few_shot_examples)
+    ])
+
+    # Build final user prompt
+    user_prompt = f"""Few-shot examples:
+
+{few_shot_text}
+
+Now generate BPMN for this requirement:
+Requirement: {description}
+
+Organization Context:
+- Departments: {input_context['org_context']['departments']}
+- Roles: {input_context['org_context']['roles']}
+- Members: {input_context['org_context']['members']}
+
+Generate the BPMN XML (no explanation, just raw XML):"""
+
+    # Send to Mock LLM (using Mock for Task 5 tests)
+    bpmn_response = await mock_llm.send_prompt(system_prompt, user_prompt)
+
+    # Validate response
+    validation_result = await validator.validate_bpmn(tenant_id, bpmn_response)
+
+    # Return result
+    return {
+        "bpmn_xml": bpmn_response,
+        "valid": validation_result.get("valid", False),
+        "confidence_score": validation_result.get("confidence_score", 0.5),
+        "errors": validation_result.get("errors", []),
+        "warnings": validation_result.get("warnings", []),
+        "metadata": {
+            "tenant_id": tenant_id,
+            "description": description,
+            "pattern": "bpmn_generation",
+            "timestamp": datetime.now().isoformat()
+        }
+    }
+
+
+class GenerateProcessTool:
+    """
+    MCP Tool wrapper for generate_process function.
+    Handles tool registration and schema definition.
+    """
+
+    def __init__(self):
+        """Initialize GenerateProcessTool."""
+        self.name = "generate_process"
+        self.description = "Generate BPMN 2.0 process definitions from natural language requirements"
+        self.schema = {
+            "tenant_id": {
+                "type": "string",
+                "description": "Tenant ID for process ownership"
+            },
+            "description": {
+                "type": "string",
+                "description": "Natural language process description"
+            },
+            "org_context": {
+                "type": "object",
+                "description": "Organizational context with departments, roles, members",
+                "properties": {
+                    "departments": {
+                        "type": "array",
+                        "items": {"type": "object"}
+                    },
+                    "roles": {
+                        "type": "array",
+                        "items": {"type": "object"}
+                    },
+                    "members": {
+                        "type": "array",
+                        "items": {"type": "object"}
+                    }
+                }
+            }
+        }
+
+    async def execute(
+        self,
+        tenant_id: str,
+        description: str,
+        org_context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Execute the generate_process tool.
+
+        Args:
+            tenant_id: Tenant ID
+            description: Process description
+            org_context: Org context
+
+        Returns:
+            Generated BPMN result
+        """
+        return await generate_process(tenant_id, description, org_context)
