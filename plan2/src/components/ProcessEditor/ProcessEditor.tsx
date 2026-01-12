@@ -1,7 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import BpmnModeler from 'bpmn-js/lib/Modeler';
-import { ProcessEditorProps } from '../../types/bpmn';
+import { ProcessEditorProps, ValidationResult } from '../../types/bpmn';
 import PropertiesPanel from './PropertiesPanel';
+import ValidationPanel from './ValidationPanel';
+import { validateBpmn } from '../../services/bpmnValidator';
 
 const ProcessEditor: React.FC<ProcessEditorProps> = ({
   bpmnXml = '',
@@ -12,6 +14,7 @@ const ProcessEditor: React.FC<ProcessEditorProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const modelerRef = useRef<BpmnModeler | null>(null);
   const [selectedElement, setSelectedElement] = useState<any>(null);
+  const [validation, setValidation] = useState<ValidationResult | null>(null);
 
   useEffect(() => {
     if (!modelerRef.current) return;
@@ -29,6 +32,12 @@ const ProcessEditor: React.FC<ProcessEditorProps> = ({
       }
     });
   }, []);
+
+  useEffect(() => {
+    if (bpmnXml) {
+      validateBpmn(bpmnXml).then(setValidation);
+    }
+  }, [bpmnXml]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -82,24 +91,27 @@ const ProcessEditor: React.FC<ProcessEditorProps> = ({
   }, [bpmnXml, onBpmnChange]);
 
   return (
-    <div className="w-full h-full flex" data-testid="bpmn-canvas">
-      <div className="flex-1 overflow-hidden" data-testid="bpmn-modeler">
-        <div
-          ref={containerRef}
-          className="w-full h-full"
+    <div className="w-full h-full flex flex-col" data-testid="bpmn-canvas">
+      <div className="flex-1 overflow-hidden flex">
+        <div className="flex-1" data-testid="bpmn-modeler">
+          <div
+            ref={containerRef}
+            className="w-full h-full"
+          />
+        </div>
+        <PropertiesPanel
+          element={selectedElement}
+          onPropertyChange={(prop, value) => {
+            if (selectedElement && modelerRef.current) {
+              const modeling = modelerRef.current.get('modeling');
+              if (prop === 'name') {
+                modeling.updateProperties(selectedElement, { name: value });
+              }
+            }
+          }}
         />
       </div>
-      <PropertiesPanel
-        element={selectedElement}
-        onPropertyChange={(prop, value) => {
-          if (selectedElement && modelerRef.current) {
-            const modeling = modelerRef.current.get('modeling');
-            if (prop === 'name') {
-              modeling.updateProperties(selectedElement, { name: value });
-            }
-          }
-        }}
-      />
+      <ValidationPanel validation={validation} />
     </div>
   );
 };
