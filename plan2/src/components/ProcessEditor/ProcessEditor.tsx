@@ -1,6 +1,7 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import BpmnModeler from 'bpmn-js/lib/Modeler';
 import { ProcessEditorProps } from '../../types/bpmn';
+import PropertiesPanel from './PropertiesPanel';
 
 const ProcessEditor: React.FC<ProcessEditorProps> = ({
   bpmnXml = '',
@@ -10,6 +11,24 @@ const ProcessEditor: React.FC<ProcessEditorProps> = ({
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const modelerRef = useRef<BpmnModeler | null>(null);
+  const [selectedElement, setSelectedElement] = useState<any>(null);
+
+  useEffect(() => {
+    if (!modelerRef.current) return;
+
+    const canvas = modelerRef.current.get('canvas');
+    const eventBus = modelerRef.current.get('eventBus');
+
+    eventBus.on('element.click', (event: any) => {
+      setSelectedElement(event.element);
+    });
+
+    eventBus.on('canvas.viewbox.changed', () => {
+      if (selectedElement && !canvas.getRootElement().children.includes(selectedElement)) {
+        setSelectedElement(null);
+      }
+    });
+  }, []);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -63,13 +82,24 @@ const ProcessEditor: React.FC<ProcessEditorProps> = ({
   }, [bpmnXml, onBpmnChange]);
 
   return (
-    <div className="w-full h-full flex flex-col" data-testid="bpmn-canvas">
+    <div className="w-full h-full flex" data-testid="bpmn-canvas">
       <div className="flex-1 overflow-hidden" data-testid="bpmn-modeler">
         <div
           ref={containerRef}
           className="w-full h-full"
         />
       </div>
+      <PropertiesPanel
+        element={selectedElement}
+        onPropertyChange={(prop, value) => {
+          if (selectedElement && modelerRef.current) {
+            const modeling = modelerRef.current.get('modeling');
+            if (prop === 'name') {
+              modeling.updateProperties(selectedElement, { name: value });
+            }
+          }
+        }}
+      />
     </div>
   );
 };
