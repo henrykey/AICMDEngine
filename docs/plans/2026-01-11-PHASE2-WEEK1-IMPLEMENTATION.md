@@ -257,9 +257,8 @@ Ready for Next Phase:
 ## References
 
 - [BPMN-MCP Design PRD](2026-01-11-BPMN-MCP-Design.md) - Full specification
-- [Membership OpenAPI v2.2](docs/membership_docs/membership_openapi_v2.2.yaml) - API reference
+- [Membership OpenAPI v2.4](docs/membership_docs/membership_v2.4_openapi.yaml) - API reference
 - [TDD Methodology](../../.claude/plugins/cache/superpowers-marketplace/superpowers/4.0.2/skills/test-driven-development/README.md)
-
 ---
 
 ---

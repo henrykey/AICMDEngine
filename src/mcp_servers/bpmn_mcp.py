@@ -12,6 +12,8 @@ import aiohttp
 import json
 import xml.etree.ElementTree as ET
 from datetime import datetime
+from openai import AsyncOpenAI
+from src.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -821,6 +823,88 @@ class MockLLMClient:
         return response
 
 
+class RealLLMClient:
+    """
+    Real LLM client for BPMN generation using OpenAI-compatible API.
+    Uses AsyncOpenAI with fallback providers (DeepSeek, OpenAI, etc).
+    """
+
+    def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None, model: Optional[str] = None):
+        """
+        Initialize Real LLM client with OpenAI-compatible API.
+
+        Args:
+            base_url: Optional custom base URL (uses settings if not provided)
+            api_key: Optional API key (uses settings if not provided)
+            model: Optional model name (uses settings if not provided)
+        """
+        # Use settings for configuration if not provided
+        self.base_url = base_url or settings.deepseek_base_url or settings.openai_base_url
+        self.api_key = api_key or settings.deepseek_api_key or settings.openai_api_key
+        self.model = model or settings.deepseek_model_name or settings.openai_model_name
+
+        if not self.api_key or not self.base_url or not self.model:
+            raise ValueError("Missing required LLM configuration (api_key, base_url, or model)")
+
+        # Initialize OpenAI-compatible client
+        self.client = AsyncOpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url
+        )
+        self._response_cache = {}
+
+    async def send_prompt(self, system_prompt: str, user_prompt: str) -> str:
+        """
+        Send prompt to OpenAI-compatible API and return BPMN response.
+
+        Args:
+            system_prompt: System context prompt
+            user_prompt: User's process description
+
+        Returns:
+            BPMN XML response from LLM
+
+        Raises:
+            RuntimeError: If API call fails or returns invalid response
+        """
+        # Create cache key from prompts
+        cache_key = f"{system_prompt}:::{user_prompt}"
+
+        # Return cached response if available
+        if cache_key in self._response_cache:
+            return self._response_cache[cache_key]
+
+        try:
+            # Call OpenAI-compatible API
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": system_prompt
+                    },
+                    {
+                        "role": "user",
+                        "content": user_prompt
+                    }
+                ],
+                temperature=0.3,
+                max_tokens=4096
+            )
+
+            # Extract response text
+            text_response = response.choices[0].message.content
+
+            # Cache and return response
+            self._response_cache[cache_key] = text_response
+            return text_response
+
+        except Exception as e:
+            error_msg = f"LLM API error: {str(e)}"
+            logger.error(error_msg)
+            raise RuntimeError(error_msg) from e
+
+
 async def validate_prompt_response(response: str) -> Dict[str, Any]:
     """
     Validate LLM response for BPMN correctness.
@@ -883,7 +967,9 @@ async def validate_prompt_response(response: str) -> Dict[str, Any]:
 async def generate_process(
     tenant_id: str,
     description: str,
-    org_context: Dict[str, Any]
+    org_context: Dict[str, Any],
+    use_real_llm: bool = False,
+    api_key: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Generate BPMN process from natural language description.
@@ -899,6 +985,8 @@ async def generate_process(
         tenant_id: Tenant ID for process ownership
         description: Natural language process description
         org_context: Organizational context with departments, roles, members
+        use_real_llm: If True, use Claude API; if False, use MockLLMClient
+        api_key: Optional Anthropic API key (uses ANTHROPIC_API_KEY env var if not provided)
 
     Returns:
         Result dict with:
@@ -911,7 +999,12 @@ async def generate_process(
     # Initialize components
     membership_client = MembershipClient("http://membership:8000", tenant_id)
     validator = BPMNValidator()
-    mock_llm = MockLLMClient()
+
+    # Use either Real or Mock LLM client
+    if use_real_llm:
+        llm_client = RealLLMClient(api_key=api_key)
+    else:
+        llm_client = MockLLMClient()
 
     # Build prompts
     system_prompt = await build_system_prompt()
@@ -939,8 +1032,8 @@ Organization Context:
 
 Generate the BPMN XML (no explanation, just raw XML):"""
 
-    # Send to Mock LLM (using Mock for Task 5 tests)
-    bpmn_response = await mock_llm.send_prompt(system_prompt, user_prompt)
+    # Send to LLM (Mock or Real based on use_real_llm flag)
+    bpmn_response = await llm_client.send_prompt(system_prompt, user_prompt)
 
     # Validate response
     validation_result = await validator.validate_bpmn(tenant_id, bpmn_response)
