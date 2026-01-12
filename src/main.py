@@ -10,6 +10,7 @@ from src.mcp.registry import MCPRegistry
 from src.mcp_servers.membership_mcp import MembershipMCPServer
 from src.mcp_servers.test_mcp import TestMCPServer
 from src.mcp_servers.kb_mcp import KBMCP
+from src.mcp_servers.bpmn_mcp import BPMN_MCP
 
 # Setup logging
 setup_logging(settings)
@@ -72,10 +73,16 @@ async def startup_db_client():
             kb_base_url=settings.kb_base_url,
             kb_api_key=settings.kb_api_key
         )
+        bpmn_mcp = BPMN_MCP(
+            membership_base_url=settings.membership_service_url,
+            use_real_llm=False,
+            kb_base_url=settings.kb_base_url
+        )
 
         mcp_registry.register_mcp(membership_mcp)
         mcp_registry.register_mcp(test_mcp)
         mcp_registry.register_mcp(kb_mcp)
+        mcp_registry.register_mcp(bpmn_mcp)
 
         # Set global MCP registry for dependency injection
         app.mcp_registry = mcp_registry
