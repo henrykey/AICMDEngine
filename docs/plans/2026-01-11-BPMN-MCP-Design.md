@@ -1,8 +1,8 @@
 # BPMN-MCP Detailed Design PRD
 
-**Version**: 1.0
+**Version**: 1.0 (Updated 2026-01-12)
 **Date**: 2026-01-11
-**Status**: Design Phase - Ready for Implementation
+**Status**: Implementation In Progress (Task 6 Complete)
 **Phase**: 2.1 (Weeks 1-2)
 **Team**: Backend (2), LLM/AI (1)
 
@@ -548,9 +548,67 @@ NL: "The system should automatically check financial compliance. Only if it pass
 
 ---
 
-### 3. LLM Prompt Engineering
+### 3. LLM Client Architecture
 
-#### 3.1 System Prompt for BPMN Generation
+#### 3.1 Multi-Provider Fallback Strategy
+
+**Implementation Status**: ✅ COMPLETED (Task 6 - 2026-01-12)
+
+The BPMN-MCP uses a robust multi-provider LLM architecture consistent with the project's existing `src/services/llm_client.py`:
+
+**Providers** (in priority order):
+1. **DeepSeek** - Primary provider (faster, cost-effective)
+   - Configuration: `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL_NAME`
+   - Default Model: `deepseek-chat`
+
+2. **OpenAI** - Fallback provider (higher quality, higher cost)
+   - Configuration: `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL_NAME`
+   - Default Model: `gpt-4`
+
+**Automatic Fallback Logic**:
+```
+Try DeepSeek
+├─ Success? Return response
+├─ Rate limit? Switch to OpenAI
+├─ Connection error? Switch to OpenAI
+├─ Auth error? Switch to OpenAI
+└─ Other error? Switch to OpenAI
+
+Try OpenAI
+├─ Success? Return response
+└─ Failure? Raise RuntimeError("All LLM providers failed")
+```
+
+**Error Handling**:
+- `RateLimitError` → Switch provider
+- `AuthenticationError` → Switch provider
+- `APIConnectionError` → Switch provider
+- `APIError` (recoverable) → Switch provider
+- `APIError` (non-recoverable) → Raise immediately
+- All providers failed → Clear error message with last error details
+
+**Response Caching**:
+- Cache key: `sha256(system_prompt + user_prompt)`
+- Reduces duplicate API calls and costs
+- Shared across all providers
+
+**Configuration Loading** (Priority order):
+1. Custom parameters (if provided to `RealLLMClient()`)
+2. Environment variables (via `src/core/config.Settings`)
+3. Default values (fallback)
+
+**Implementation File**: `src/mcp_servers/bpmn_mcp.py:826-992` (`RealLLMClient` class)
+
+**Test Coverage**:
+- Unit Tests: 13 tests (mocked, no API calls) - 100% passing
+- Integration Tests: 9 optional tests (real API calls, skipped if no credentials) - 100% passing
+- Total: 22 tests covering multi-provider fallback, caching, error handling
+
+---
+
+### 4. LLM Prompt Engineering
+
+#### 4.1 System Prompt for BPMN Generation
 
 ```
 You are a BPMN 2.0 process expert that translates natural language process descriptions
@@ -601,7 +659,7 @@ Return ONLY valid BPMN 2.0 XML, wrapped in:
 Do NOT include markdown backticks or explanations.
 ```
 
-#### 3.2 Input Context Template
+#### 4.2 Input Context Template
 
 ```json
 {
@@ -641,7 +699,7 @@ Do NOT include markdown backticks or explanations.
 }
 ```
 
-#### 3.3 Few-Shot Examples for Prompt
+#### 4.3 Few-Shot Examples for Prompt
 
 **Example 1: Static Pattern**
 ```
