@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { FormDefinition, FormEditorProps } from '../../types/bpmn';
 import FieldPalette from './FieldPalette';
 import FormCanvas from './FormCanvas';
+import FieldPropertiesPanel from './FieldPropertiesPanel';
 
 const FormEditor: React.FC<FormEditorProps> = ({
   formJson = { id: '', name: '', fields: [] },
@@ -77,6 +78,14 @@ const FormEditor: React.FC<FormEditorProps> = ({
           readOnly={readOnly}
         />
       </div>
+
+      {/* Field Properties Panel */}
+      {selectedFieldId && (
+        <FieldPropertiesPanel
+          field={formJson.fields.find(f => f.id === selectedFieldId)!}
+          onUpdate={(updates) => handleUpdateField(selectedFieldId, updates)}
+        />
+      )}
     </div>
   );
 };
