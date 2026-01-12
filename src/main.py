@@ -9,6 +9,7 @@ from src.llm.config_loader import LLMConfigLoader
 from src.mcp.registry import MCPRegistry
 from src.mcp_servers.membership_mcp import MembershipMCPServer
 from src.mcp_servers.test_mcp import TestMCPServer
+from src.mcp_servers.kb_mcp import KBMCP
 
 # Setup logging
 setup_logging(settings)
@@ -67,9 +68,14 @@ async def startup_db_client():
         # Register MCP servers
         membership_mcp = MembershipMCPServer()
         test_mcp = TestMCPServer()
+        kb_mcp = KBMCP(
+            kb_base_url=settings.kb_base_url,
+            kb_api_key=settings.kb_api_key
+        )
 
         mcp_registry.register_mcp(membership_mcp)
         mcp_registry.register_mcp(test_mcp)
+        mcp_registry.register_mcp(kb_mcp)
 
         # Set global MCP registry for dependency injection
         app.mcp_registry = mcp_registry

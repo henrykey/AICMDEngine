@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     # Membership Service Configuration
     membership_service_url: str = Field(default="http://localhost:8080", env="MEMBERSHIP_SERVICE_URL")
 
+    # Knowledge Base Configuration
+    kb_base_url: str = Field(default="http://localhost:8001", env="KB_BASE_URL")
+    kb_api_key: str = Field(default="", env="KB_API_KEY")
+
     # Logging Configuration
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
 
