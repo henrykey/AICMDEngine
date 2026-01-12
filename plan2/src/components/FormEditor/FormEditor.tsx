@@ -1,8 +1,10 @@
-import React, { useState } from 'react';
-import { FormDefinition, FormEditorProps } from '../../types/bpmn';
+import React, { useState, useEffect } from 'react';
+import { FormDefinition, FormEditorProps, ValidationResult } from '../../types/bpmn';
 import FieldPalette from './FieldPalette';
 import FormCanvas from './FormCanvas';
 import FieldPropertiesPanel from './FieldPropertiesPanel';
+import FormValidationPanel from './FormValidationPanel';
+import { validateForm } from '../../services/formValidator';
 
 const FormEditor: React.FC<FormEditorProps> = ({
   formJson = { id: '', name: '', fields: [] },
@@ -11,6 +13,11 @@ const FormEditor: React.FC<FormEditorProps> = ({
   readOnly = false,
 }) => {
   const [selectedFieldId, setSelectedFieldId] = useState<string | null>(null);
+  const [validation, setValidation] = useState<ValidationResult | null>(null);
+
+  useEffect(() => {
+    setValidation(validateForm(formJson));
+  }, [formJson]);
 
   const handleAddField = (fieldType: string) => {
     const newField = {
@@ -51,43 +58,48 @@ const FormEditor: React.FC<FormEditorProps> = ({
   };
 
   return (
-    <div className="w-full h-full flex gap-4 p-4 bg-gray-50">
-      {/* Field Palette */}
-      <FieldPalette onAddField={handleAddField} />
+    <div className="w-full h-full flex flex-col gap-4 p-4 bg-gray-50">
+      <div className="flex gap-4 flex-1">
+        {/* Field Palette */}
+        <FieldPalette onAddField={handleAddField} />
 
-      {/* Canvas */}
-      <div className="flex-1 flex flex-col">
-        <div className="mb-3">
-          <input
-            type="text"
-            value={formJson.name}
-            onChange={(e) =>
-              onFormChange({ ...formJson, name: e.target.value })
-            }
-            placeholder="Form Name"
-            className="text-xl font-semibold px-3 py-2 border border-gray-300 rounded"
-            disabled={readOnly}
+        {/* Canvas Area */}
+        <div className="flex-1 flex flex-col">
+          <div className="mb-3">
+            <input
+              type="text"
+              value={formJson.name}
+              onChange={(e) =>
+                onFormChange({ ...formJson, name: e.target.value })
+              }
+              placeholder="Form Name"
+              className="text-xl font-semibold px-3 py-2 border border-gray-300 rounded"
+              disabled={readOnly}
+            />
+          </div>
+
+          <FormCanvas
+            form={formJson}
+            selectedFieldId={selectedFieldId}
+            onSelectField={setSelectedFieldId}
+            onRemoveField={handleRemoveField}
+            onUpdateField={handleUpdateField}
+            readOnly={readOnly}
           />
         </div>
 
-        <FormCanvas
-          form={formJson}
-          selectedFieldId={selectedFieldId}
-          onSelectField={setSelectedFieldId}
-          onRemoveField={handleRemoveField}
-          onUpdateField={handleUpdateField}
-          readOnly={readOnly}
-        />
+        {/* Field Properties Panel */}
+        {selectedFieldId && (
+          <FieldPropertiesPanel
+            field={formJson.fields.find(f => f.id === selectedFieldId)!}
+            onUpdate={(updates) => handleUpdateField(selectedFieldId, updates)}
+            bpmnXml={bpmnXml}
+          />
+        )}
       </div>
 
-      {/* Field Properties Panel */}
-      {selectedFieldId && (
-        <FieldPropertiesPanel
-          field={formJson.fields.find(f => f.id === selectedFieldId)!}
-          onUpdate={(updates) => handleUpdateField(selectedFieldId, updates)}
-          bpmnXml={bpmnXml}
-        />
-      )}
+      {/* Validation Panel */}
+      <FormValidationPanel validation={validation} />
     </div>
   );
 };
