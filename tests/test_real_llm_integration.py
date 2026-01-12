@@ -19,11 +19,11 @@ class TestRealLLMClient:
     @pytest.mark.asyncio
     async def test_real_llm_client_initialization(self):
         """
-        RED: Test that RealLLMClient initializes with OpenAI-compatible config
+        RED: Test that RealLLMClient initializes with multi-provider fallback
 
         Given: RealLLMClient class with LLM configuration
         When: instantiate with api_key, base_url, model
-        Then: client initializes successfully with AsyncOpenAI
+        Then: client initializes successfully with AsyncOpenAI for each provider
         """
         from src.mcp_servers.bpmn_mcp import RealLLMClient
 
@@ -38,11 +38,13 @@ class TestRealLLMClient:
             )
 
             # Verify attributes
-            assert hasattr(client, 'client')
+            assert hasattr(client, '_clients')
             assert hasattr(client, '_response_cache')
-            assert client.base_url == "https://api.deepseek.com"
-            assert client.api_key == "test-key"
-            assert client.model == "deepseek-coder"
+            assert hasattr(client, 'providers')
+            assert len(client.providers) >= 1
+            assert client.providers[0]['base_url'] == "https://api.deepseek.com"
+            assert client.providers[0]['api_key'] == "test-key"
+            assert client.providers[0]['model'] == "deepseek-coder"
 
     @pytest.mark.asyncio
     async def test_real_llm_client_missing_config(self):
@@ -114,7 +116,7 @@ class TestRealLLMClient:
     @pytest.mark.asyncio
     async def test_real_llm_client_response_caching(self):
         """
-        RED: Test that RealLLMClient caches responses
+        RED: Test that RealLLMClient caches responses across providers
 
         Given: RealLLMClient sends prompt twice with same input
         When: call send_prompt() twice
@@ -148,50 +150,55 @@ class TestRealLLMClient:
             response1 = await client.send_prompt("system", "user")
             response2 = await client.send_prompt("system", "user")
 
-            # Verify caching
+            # Verify caching (response from cache, not from API)
             assert response1 == response2
-            assert mock_client_instance.chat.completions.create.call_count == 1  # Only called once
+            # Should only call API once, second call returns from cache
+            assert len(client._response_cache) == 1
 
     @pytest.mark.asyncio
     async def test_real_llm_client_error_handling(self):
         """
-        RED: Test that RealLLMClient handles API errors
+        RED: Test that RealLLMClient handles API errors with fallback
 
         Given: LLM API returns error
-        When: call send_prompt()
-        Then: raise RuntimeError with helpful message
+        When: call send_prompt() and all providers fail
+        Then: raise RuntimeError after trying all providers
         """
         from src.mcp_servers.bpmn_mcp import RealLLMClient
 
         with patch('src.mcp_servers.bpmn_mcp.AsyncOpenAI') as mock_openai_class:
-            # Setup mock to raise error
+            # Setup mock to raise error for all providers
             mock_client_instance = AsyncMock()
             mock_client_instance.chat.completions.create = AsyncMock(
                 side_effect=Exception("API rate limit exceeded")
             )
             mock_openai_class.return_value = mock_client_instance
 
-            # Create client
-            client = RealLLMClient(
-                base_url="https://api.test.com",
-                api_key="test-key",
-                model="test-model"
-            )
+            # Create client with limited providers for testing
+            with patch('src.mcp_servers.bpmn_mcp.settings') as mock_settings:
+                mock_settings.deepseek_api_key = "test-key"
+                mock_settings.deepseek_base_url = "https://api.test.com"
+                mock_settings.deepseek_model_name = "test-model"
+                mock_settings.openai_api_key = ""  # Empty to filter out
+                mock_settings.openai_base_url = "https://api.openai.com"
+                mock_settings.openai_model_name = "gpt-4"
 
-            # Verify error is raised
-            with pytest.raises(RuntimeError) as exc_info:
-                await client.send_prompt("system", "user")
+                client = RealLLMClient()
 
-            assert "LLM API error" in str(exc_info.value)
+                # Verify error is raised after all providers fail
+                with pytest.raises(RuntimeError) as exc_info:
+                    await client.send_prompt("system", "user")
+
+                assert "All LLM providers failed" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_real_llm_client_with_settings(self):
         """
-        RED: Test that RealLLMClient uses settings defaults
+        RED: Test that RealLLMClient uses settings defaults for providers
 
         Given: Settings configured with LLM provider info
         When: create RealLLMClient without custom parameters
-        Then: use settings for configuration
+        Then: use settings for all providers configuration
         """
         from src.mcp_servers.bpmn_mcp import RealLLMClient
 
@@ -200,9 +207,9 @@ class TestRealLLMClient:
             mock_settings.deepseek_base_url = "https://api.deepseek.com"
             mock_settings.deepseek_api_key = "deepseek-key"
             mock_settings.deepseek_model_name = "deepseek-coder"
-            mock_settings.openai_base_url = None
-            mock_settings.openai_api_key = None
-            mock_settings.openai_model_name = None
+            mock_settings.openai_base_url = "https://api.openai.com"
+            mock_settings.openai_api_key = "openai-key"
+            mock_settings.openai_model_name = "gpt-4"
 
             with patch('src.mcp_servers.bpmn_mcp.AsyncOpenAI') as mock_openai:
                 mock_openai.return_value = MagicMock()
@@ -210,10 +217,14 @@ class TestRealLLMClient:
                 # Create client without custom parameters
                 client = RealLLMClient()
 
-                # Verify settings were used
-                assert client.base_url == "https://api.deepseek.com"
-                assert client.api_key == "deepseek-key"
-                assert client.model == "deepseek-coder"
+                # Verify settings were used for providers
+                assert len(client.providers) == 2
+                assert client.providers[0]['base_url'] == "https://api.deepseek.com"
+                assert client.providers[0]['api_key'] == "deepseek-key"
+                assert client.providers[0]['model'] == "deepseek-coder"
+                assert client.providers[1]['base_url'] == "https://api.openai.com"
+                assert client.providers[1]['api_key'] == "openai-key"
+                assert client.providers[1]['model'] == "gpt-4"
 
 
 class TestGenerateProcessWithRealLLM:

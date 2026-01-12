@@ -12,7 +12,7 @@ import aiohttp
 import json
 import xml.etree.ElementTree as ET
 from datetime import datetime
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, RateLimitError, APIError, APIConnectionError, AuthenticationError
 from src.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -826,36 +826,63 @@ class MockLLMClient:
 class RealLLMClient:
     """
     Real LLM client for BPMN generation using OpenAI-compatible API.
-    Uses AsyncOpenAI with fallback providers (DeepSeek, OpenAI, etc).
+    Implements multi-provider fallback mechanism consistent with src/services/llm_client.py.
+
+    Configuration priority:
+    1. Custom parameters (base_url, api_key, model) if provided
+    2. Environment variables via settings (deepseek_* or openai_*)
+
+    Fallback strategy: Tries providers in order, switches on rate limit/connection errors.
     """
 
     def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None, model: Optional[str] = None):
         """
-        Initialize Real LLM client with OpenAI-compatible API.
+        Initialize Real LLM client with multi-provider fallback.
 
         Args:
             base_url: Optional custom base URL (uses settings if not provided)
             api_key: Optional API key (uses settings if not provided)
             model: Optional model name (uses settings if not provided)
         """
-        # Use settings for configuration if not provided
-        self.base_url = base_url or settings.deepseek_base_url or settings.openai_base_url
-        self.api_key = api_key or settings.deepseek_api_key or settings.openai_api_key
-        self.model = model or settings.deepseek_model_name or settings.openai_model_name
+        # Define provider list (consistent with src/services/llm_client.py)
+        self.providers = [
+            {
+                'name': 'deepseek',
+                'base_url': base_url or settings.deepseek_base_url,
+                'api_key': api_key or settings.deepseek_api_key,
+                'model': model or settings.deepseek_model_name
+            },
+            {
+                'name': 'openai',
+                'base_url': settings.openai_base_url,
+                'api_key': settings.openai_api_key,
+                'model': settings.openai_model_name
+            }
+        ]
 
-        if not self.api_key or not self.base_url or not self.model:
-            raise ValueError("Missing required LLM configuration (api_key, base_url, or model)")
+        # Filter out providers without API key configured
+        self.providers = [p for p in self.providers if p['api_key']]
+        if not self.providers:
+            raise ValueError("Missing required LLM configuration (no provider with API key configured)")
 
-        # Initialize OpenAI-compatible client
-        self.client = AsyncOpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url
-        )
+        # Initialize clients for all providers
+        self._clients = {}
+        for provider in self.providers:
+            self._clients[provider['name']] = AsyncOpenAI(
+                api_key=provider['api_key'],
+                base_url=provider['base_url']
+            )
+
+        # Current provider index for fallback
+        self.current_provider_index = 0
         self._response_cache = {}
+
+        logger.info(f"RealLLMClient initialized with {len(self.providers)} provider(s): "
+                   f"{', '.join(p['name'] for p in self.providers)}")
 
     async def send_prompt(self, system_prompt: str, user_prompt: str) -> str:
         """
-        Send prompt to OpenAI-compatible API and return BPMN response.
+        Send prompt to OpenAI-compatible API with automatic provider fallback.
 
         Args:
             system_prompt: System context prompt
@@ -865,7 +892,7 @@ class RealLLMClient:
             BPMN XML response from LLM
 
         Raises:
-            RuntimeError: If API call fails or returns invalid response
+            RuntimeError: If all providers fail or returns invalid response
         """
         # Create cache key from prompts
         cache_key = f"{system_prompt}:::{user_prompt}"
@@ -874,35 +901,95 @@ class RealLLMClient:
         if cache_key in self._response_cache:
             return self._response_cache[cache_key]
 
-        try:
-            # Call OpenAI-compatible API
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": system_prompt
-                    },
-                    {
-                        "role": "user",
-                        "content": user_prompt
-                    }
-                ],
-                temperature=0.3,
-                max_tokens=4096
-            )
+        last_error = None
 
-            # Extract response text
-            text_response = response.choices[0].message.content
+        # Try all providers with fallback
+        for attempt in range(len(self.providers)):
+            current_provider = self.providers[self.current_provider_index]
+            client = self._clients[current_provider['name']]
 
-            # Cache and return response
-            self._response_cache[cache_key] = text_response
-            return text_response
+            try:
+                logger.info(f"Attempting LLM call with provider='{current_provider['name']}', "
+                           f"model='{current_provider['model']}', "
+                           f"base_url='{current_provider['base_url']}'")
 
-        except Exception as e:
-            error_msg = f"LLM API error: {str(e)}"
-            logger.error(error_msg)
-            raise RuntimeError(error_msg) from e
+                # Call OpenAI-compatible API
+                response = await client.chat.completions.create(
+                    model=current_provider['model'],
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": system_prompt
+                        },
+                        {
+                            "role": "user",
+                            "content": user_prompt
+                        }
+                    ],
+                    temperature=0.3,
+                    max_tokens=4096
+                )
+
+                # Extract response text
+                text_response = response.choices[0].message.content
+                logger.info(f"Successfully got response from provider='{current_provider['name']}'")
+
+                # Cache and return response
+                self._response_cache[cache_key] = text_response
+                return text_response
+
+            except RateLimitError as e:
+                last_error = e
+                logger.warning(f"Rate limit error with provider='{current_provider['name']}': {e}")
+                self._switch_to_next_provider()
+
+            except AuthenticationError as e:
+                last_error = e
+                logger.error(f"Authentication error with provider='{current_provider['name']}': {e}")
+                self._switch_to_next_provider()
+
+            except APIConnectionError as e:
+                last_error = e
+                logger.warning(f"Connection error with provider='{current_provider['name']}': {e}")
+                self._switch_to_next_provider()
+
+            except APIError as e:
+                last_error = e
+                logger.warning(f"API error with provider='{current_provider['name']}': {e}")
+                if self._is_recoverable_api_error(e):
+                    self._switch_to_next_provider()
+                else:
+                    raise RuntimeError(f"LLM API error: {str(e)}") from e
+
+            except Exception as e:
+                last_error = e
+                logger.error(f"Unexpected error with provider='{current_provider['name']}': {e}", exc_info=True)
+                self._switch_to_next_provider()
+
+        # All providers failed
+        error_msg = f"All LLM providers failed. Last error: {last_error}"
+        logger.error(error_msg)
+        raise RuntimeError(error_msg) from last_error
+
+    def _switch_to_next_provider(self):
+        """Switch to next available provider for fallback."""
+        self.current_provider_index = (self.current_provider_index + 1) % len(self.providers)
+        next_provider = self.providers[self.current_provider_index]
+        logger.info(f"Switched to provider='{next_provider['name']}' (index={self.current_provider_index})")
+
+    def _is_recoverable_api_error(self, error: APIError) -> bool:
+        """Check if API error indicates we should switch providers."""
+        error_message = str(error).lower()
+
+        # Rate limit/quota errors should trigger provider switch
+        if any(keyword in error_message for keyword in ['rate limit', 'quota', 'limit', 'throttled', 'exceeded']):
+            return True
+
+        # Server errors may be recoverable with different provider
+        if any(keyword in error_message for keyword in ['internal server error', 'timeout', 'service unavailable']):
+            return True
+
+        return False
 
 
 async def validate_prompt_response(response: str) -> Dict[str, Any]:
