@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from openai import AsyncOpenAI, RateLimitError, APIError, APIConnectionError, AuthenticationError
 from src.core.config import settings
+from src.mcp.base_server import BaseMCPServer
 
 logger = logging.getLogger(__name__)
 
@@ -1198,3 +1199,426 @@ class GenerateProcessTool:
             Generated BPMN result
         """
         return await generate_process(tenant_id, description, org_context)
+
+
+class BPMN_MCP(BaseMCPServer):
+    """
+    MCP Server for BPMN process generation and validation.
+
+    Provides tools for:
+    - Generating BPMN 2.0 process definitions from natural language
+    - Validating BPMN XML and executor patterns
+    - Suggesting executor patterns for tasks
+    - Analyzing process semantics with KB integration
+    """
+
+    def __init__(
+        self,
+        membership_base_url: str = None,
+        use_real_llm: bool = False,
+        kb_base_url: str = None
+    ):
+        """
+        Initialize BPMN-MCP server.
+
+        Args:
+            membership_base_url: Base URL of Membership service
+            use_real_llm: Whether to use real LLM or mock
+            kb_base_url: Base URL of Knowledge Base service (optional)
+        """
+        super().__init__(name="bpmn_mcp", version="1.0.0")
+
+        # Initialize clients
+        self.membership_base_url = membership_base_url or settings.membership_service_url
+        self.kb_base_url = kb_base_url or settings.kb_base_url
+        self.use_real_llm = use_real_llm
+
+        # Initialize BPMN components
+        self.validator = BPMNValidator()
+        self.membership_client = None  # Lazy initialization per tenant
+
+        logger.info(f"BPMN-MCP initialized: membership_url={self.membership_base_url}, "
+                   f"use_real_llm={use_real_llm}, kb_url={self.kb_base_url}")
+
+    async def list_tools(self, tenant_id: str) -> List[Dict[str, Any]]:
+        """
+        List available BPMN tools.
+
+        Args:
+            tenant_id: Tenant ID
+
+        Returns:
+            List of tool specifications
+        """
+        return [
+            {
+                "name": "generate_process",
+                "description": "Generate BPMN 2.0 process definitions from natural language requirements",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "process_name": {
+                            "type": "string",
+                            "description": "Name of the process (e.g., 'Drug Approval Process')"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Natural language process description (minimum 20 characters)"
+                        },
+                        "context": {
+                            "type": "object",
+                            "description": "Optional context for generation",
+                            "properties": {
+                                "process_type": {
+                                    "type": "string",
+                                    "enum": ["approval", "workflow", "notification", "automation"]
+                                }
+                            }
+                        }
+                    },
+                    "required": ["process_name", "description"]
+                }
+            },
+            {
+                "name": "validate_process",
+                "description": "Validate BPMN XML and check executor patterns",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "bpmn_xml": {
+                            "type": "string",
+                            "description": "BPMN 2.0 XML to validate"
+                        },
+                        "strict_mode": {
+                            "type": "boolean",
+                            "description": "Whether to apply strict validation",
+                            "default": False
+                        }
+                    },
+                    "required": ["bpmn_xml"]
+                }
+            },
+            {
+                "name": "suggest_executors",
+                "description": "Recommend executor patterns based on task description",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "task_description": {
+                            "type": "string",
+                            "description": "Description of the task to execute"
+                        },
+                        "context": {
+                            "type": "object",
+                            "description": "Optional organizational context"
+                        }
+                    },
+                    "required": ["task_description"]
+                }
+            },
+            {
+                "name": "analyze_process_semantics",
+                "description": "Analyze process intent and suggest improvements",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "bpmn_xml": {
+                            "type": "string",
+                            "description": "BPMN XML to analyze"
+                        },
+                        "knowledge_base_enabled": {
+                            "type": "boolean",
+                            "description": "Whether to use KB for policy analysis",
+                            "default": True
+                        }
+                    },
+                    "required": ["bpmn_xml"]
+                }
+            }
+        ]
+
+    async def execute_tool(
+        self,
+        tool_name: str,
+        params: Dict[str, Any],
+        tenant_id: str
+    ) -> Dict[str, Any]:
+        """
+        Execute a BPMN tool.
+
+        Args:
+            tool_name: Name of tool to execute
+            params: Tool parameters
+            tenant_id: Tenant ID
+
+        Returns:
+            Tool execution result
+        """
+        try:
+            if tool_name == "generate_process":
+                return await self._handle_generate_process(params, tenant_id)
+            elif tool_name == "validate_process":
+                return await self._handle_validate_process(params, tenant_id)
+            elif tool_name == "suggest_executors":
+                return await self._handle_suggest_executors(params, tenant_id)
+            elif tool_name == "analyze_process_semantics":
+                return await self._handle_analyze_semantics(params, tenant_id)
+            else:
+                return {
+                    "success": False,
+                    "error": f"Unknown tool: {tool_name}"
+                }
+        except Exception as e:
+            logger.error(f"Error executing tool '{tool_name}': {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
+    async def _handle_generate_process(
+        self,
+        params: Dict[str, Any],
+        tenant_id: str
+    ) -> Dict[str, Any]:
+        """Handle generate_process tool execution."""
+        process_name = params.get("process_name", "")
+        description = params.get("description", "")
+        context = params.get("context", {})
+
+        if not process_name:
+            return {"success": False, "error": "process_name is required"}
+        if not description or len(description) < 20:
+            return {"success": False, "error": "description must be at least 20 characters"}
+
+        try:
+            # Get organization context
+            if not self.membership_client:
+                self.membership_client = MembershipClient(
+                    self.membership_base_url,
+                    tenant_id
+                )
+
+            org_context = await self.membership_client.get_org_context()
+
+            # Generate BPMN
+            input_context = {
+                "org_context": org_context,
+                "process_type": context.get("process_type", "workflow")
+            }
+
+            result = await generate_process(
+                tenant_id=tenant_id,
+                description=description,
+                org_context=input_context,
+                use_real_llm=self.use_real_llm
+            )
+
+            return {
+                "success": True,
+                **result
+            }
+        except Exception as e:
+            logger.error(f"BPMN generation failed: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
+    async def _handle_validate_process(
+        self,
+        params: Dict[str, Any],
+        tenant_id: str
+    ) -> Dict[str, Any]:
+        """Handle validate_process tool execution."""
+        bpmn_xml = params.get("bpmn_xml", "")
+        strict_mode = params.get("strict_mode", False)
+
+        if not bpmn_xml:
+            return {"success": False, "error": "bpmn_xml is required"}
+
+        try:
+            result = await self.validator.validate_bpmn(
+                tenant_id=tenant_id,
+                bpmn_xml=bpmn_xml,
+                strict_mode=strict_mode
+            )
+
+            return {
+                "success": True,
+                **result
+            }
+        except Exception as e:
+            logger.error(f"BPMN validation failed: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
+    async def _handle_suggest_executors(
+        self,
+        params: Dict[str, Any],
+        tenant_id: str
+    ) -> Dict[str, Any]:
+        """Handle suggest_executors tool execution."""
+        task_description = params.get("task_description", "")
+        context = params.get("context", {})
+
+        if not task_description:
+            return {"success": False, "error": "task_description is required"}
+
+        try:
+            # Simple executor pattern recommendation logic
+            # This would normally use LLM or rules-based engine
+            recommendations = await self._suggest_executor_patterns(
+                task_description,
+                context,
+                tenant_id
+            )
+
+            return {
+                "success": True,
+                "recommended_executors": recommendations
+            }
+        except Exception as e:
+            logger.error(f"Executor suggestion failed: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
+    async def _handle_analyze_semantics(
+        self,
+        params: Dict[str, Any],
+        tenant_id: str
+    ) -> Dict[str, Any]:
+        """Handle analyze_process_semantics tool execution."""
+        bpmn_xml = params.get("bpmn_xml", "")
+        kb_enabled = params.get("knowledge_base_enabled", True)
+
+        if not bpmn_xml:
+            return {"success": False, "error": "bpmn_xml is required"}
+
+        try:
+            analysis = await self._analyze_bpmn_semantics(
+                bpmn_xml,
+                kb_enabled,
+                tenant_id
+            )
+
+            return {
+                "success": True,
+                **analysis
+            }
+        except Exception as e:
+            logger.error(f"Semantic analysis failed: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
+    async def _suggest_executor_patterns(
+        self,
+        task_description: str,
+        context: Dict[str, Any],
+        tenant_id: str
+    ) -> List[Dict[str, Any]]:
+        """Suggest executor patterns for a task."""
+        # Simple heuristic-based recommendation
+        # In production, this would use LLM or ML model
+
+        description_lower = task_description.lower()
+        recommendations = []
+
+        # Heuristics for pattern detection
+        if any(word in description_lower for word in ["select", "choose", "user", "decide"]):
+            recommendations.append({
+                "executor_mode": "form_driven",
+                "confidence": 0.8,
+                "rationale": "Task requires user input/selection",
+                "examples": ["Select approver", "Choose reviewer"]
+            })
+
+        if any(word in description_lower for word in ["route", "based on", "if", "condition"]):
+            recommendations.append({
+                "executor_mode": "dynamic",
+                "confidence": 0.85,
+                "rationale": "Task involves conditional routing",
+                "examples": ["Route by amount", "Route by department"]
+            })
+
+        if any(word in description_lower for word in ["team", "any", "available", "first"]):
+            recommendations.append({
+                "executor_mode": "queue_claim",
+                "confidence": 0.75,
+                "rationale": "Task can be claimed by any team member",
+                "examples": ["Process by any sales rep", "Any available reviewer"]
+            })
+
+        if any(word in description_lower for word in ["automatic", "check", "validate", "compute"]):
+            recommendations.append({
+                "executor_mode": "automation",
+                "confidence": 0.7,
+                "rationale": "Task can be automated",
+                "examples": ["Validate format", "Calculate total"]
+            })
+
+        # Default: static pattern
+        recommendations.append({
+            "executor_mode": "static",
+            "confidence": 0.5,
+            "rationale": "Default pattern for fixed department/role",
+            "examples": ["Finance approval", "HR review"]
+        })
+
+        return recommendations
+
+    async def _analyze_bpmn_semantics(
+        self,
+        bpmn_xml: str,
+        kb_enabled: bool,
+        tenant_id: str
+    ) -> Dict[str, Any]:
+        """Analyze BPMN process semantics."""
+        # Parse BPMN
+        try:
+            root = ET.fromstring(bpmn_xml)
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Invalid BPMN XML: {e}"
+            }
+
+        # Extract process information
+        process_intent = "Multi-step process with approval steps"
+        identified_patterns = []
+        optimization_opportunities = []
+        kb_suggestions = []
+
+        # Parse elements
+        ns = {"bpmn": "http://www.omg.org/spec/BPMN/20100524/MODEL"}
+        processes = root.findall(".//bpmn:process", ns)
+
+        for process in processes:
+            tasks = process.findall(".//bpmn:userTask", ns)
+            if len(tasks) > 3:
+                identified_patterns.append("Multi-level approval")
+
+            gateways = process.findall(".//bpmn:exclusiveGateway", ns)
+            if gateways:
+                identified_patterns.append("Conditional routing")
+
+        # Add optimization suggestions
+        if len(tasks) > 5:
+            optimization_opportunities.append({
+                "type": "simplification",
+                "description": "Consider consolidating approval steps",
+                "impact": "Faster process execution",
+                "effort": "medium"
+            })
+
+        return {
+            "process_intent": process_intent,
+            "identified_patterns": identified_patterns,
+            "optimization_opportunities": optimization_opportunities,
+            "kb_suggestions": kb_suggestions
+        }
