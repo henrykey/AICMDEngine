@@ -320,7 +320,81 @@ result = await validate_prompt_response(response)
 
 ---
 
-**Status**: Phase 2.1 Week 1 Day 2 ✅ COMPLETE
-**Next Checkpoint**: Phase 2.1 Week 1 Day 3 (generate_process Tool Integration)
-**Test Summary**: 36/36 tests passing (Tasks 1-4)
+---
+
+## Task 5: generate_process Tool Implementation ✅
+
+**Status**: COMPLETED (Day 3)
+**Tests**: 10 passing (100%)
+
+**Implemented**:
+- `generate_process()` - Main entry point for NL → BPMN generation workflow
+  - Integrates all Task 1-4 components
+  - Builds prompts with few-shot examples
+  - Calls Mock LLM for testing, Real LLM ready for Task 6
+  - Validates with BPMNValidator
+  - Returns confidence score and metadata
+
+- `GenerateProcessTool` - MCP tool wrapper
+  - Tool registration and schema definition
+  - execute() method for MCP framework integration
+
+**Files**:
+- [src/mcp_servers/bpmn_mcp.py:883-1020](src/mcp_servers/bpmn_mcp.py#L883-L1020) - Task 5 implementation (~160 lines)
+- [tests/test_generate_process_tool.py](tests/test_generate_process_tool.py) - 10 integration tests
+
+**Test Coverage**:
+- Accepts requirements and returns BPMN
+- Validates response structure and metadata
+- Complex multi-task process handling
+- Error handling for edge cases
+- Integration verification (MembershipClient, BPMNValidator)
+- MCP tool registration and schema compliance
+
+**Key Method**:
+```python
+result = await generate_process(
+    tenant_id="tenant_123",
+    description="Create approval process for POs over $5000",
+    org_context={
+        "departments": [...],
+        "roles": [...],
+        "members": [...]
+    }
+)
+# Returns: {
+#   "bpmn_xml": "<?xml...",
+#   "valid": True,
+#   "confidence_score": 0.85,
+#   "errors": [],
+#   "metadata": {...}
+# }
+```
+
+**Pipeline Architecture**:
+```
+User Input (NL description)
+    ↓
+generate_process()
+    ├─ System Prompt (Task 4)
+    ├─ Few-shot Examples (Task 4)
+    ├─ Input Context (Task 4)
+    ├─ Mock LLM (Task 4)
+    ├─ BPMN Validator (Task 2)
+    └─ Output: {bpmn_xml, valid, confidence_score}
+```
+
+**Summary**:
+- TDD: All 10 tests written before implementation
+- Minimal implementation combining Tasks 1-4
+- Mock LLM ensures fast feedback for testing
+- Ready for Task 6: replace Mock with Real Claude LLM API
+- Infrastructure complete for full BPMN generation
+
+---
+
+**Status**: Phase 2.1 Week 1 Day 3 ✅ COMPLETE
+**Next Checkpoint**: Phase 2.1 Week 1 Day 4 (Integration Testing & Real LLM)
+**Test Summary**: 46/46 tests passing (Tasks 1-5)
+**Coverage**: bpmn_mcp.py 34%, 155 lines of code tested
 **Estimated Timeline**: Week 1 (4 days) for MVP, Phase 2.1-2.2 (4-8 weeks) for full implementation
