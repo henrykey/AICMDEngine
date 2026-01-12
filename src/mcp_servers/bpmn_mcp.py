@@ -607,3 +607,270 @@ class ExecutorPatternValidator:
                 "valid": False,
                 "error": f"Unknown automation type: {automation_type}. Must be: mcp_tool or virtual_member"
             }
+
+
+# ============================================================================
+# Task 4: LLM Prompt Engineering
+# ============================================================================
+
+async def build_system_prompt() -> str:
+    """
+    Build system prompt for BPMN generation using Claude LLM.
+
+    Returns:
+        System prompt string containing BPMN guidance and executor patterns
+    """
+    prompt = """You are an expert BPMN (Business Process Model and Notation) 2.0 XML generator.
+
+Your task is to generate valid BPMN 2.0 XML process definitions based on natural language requirements.
+
+EXECUTOR PATTERNS:
+You must understand and apply these 5 executor assignment patterns:
+
+1. **Static**: Fixed assignment to a role, department, or specific member
+   - Example: "Always route to Finance Department"
+   - Use for processes with predetermined handlers
+
+2. **Form-Driven**: User selects executor at process start
+   - Example: "User selects approver from dropdown"
+   - Use for flexible processes where human input drives routing
+
+3. **Dynamic**: Data-driven routing based on organizational context
+   - Example: "Route to department based on amount"
+   - Use for intelligent, context-aware routing
+
+4. **Queue-Claim**: First-available from a role or department queue
+   - Example: "Assign to next available sales person"
+   - Use for load-balanced task distribution
+
+5. **Automation**: MCP tool or virtual AI member handles the task
+   - Example: "Use AI Auditor for financial review"
+   - Use for automated workflows
+
+BPMN STRUCTURE:
+- Generate valid XML with proper BPMN namespaces
+- Include startEvent, endEvent, and task elements
+- Use sequenceFlow for connections
+- Add bpmn:documentation elements with executor pattern JSON
+
+OUTPUT FORMAT:
+Return ONLY the XML, nothing else. No explanation, no markdown, just raw BPMN XML.
+
+Each user task must include documentation with executor pattern configuration:
+```json
+{
+  "executor_pattern": "static|form_driven|dynamic|queue_claim|automation",
+  "executor_config": {...pattern-specific config...}
+}
+```
+
+Guidelines:
+- Process ID should describe the business process
+- Use clear, descriptive names for tasks and events
+- Ensure all references are connected (no broken flows)
+- Include proper attributes for all elements"""
+
+    return prompt
+
+
+async def get_few_shot_examples() -> List[Dict[str, str]]:
+    """
+    Get few-shot examples for BPMN generation using Mock LLM.
+
+    Returns:
+        List of examples with 'input' (requirements) and 'output' (BPMN XML)
+    """
+    examples = [
+        {
+            "input": "Create an approval process where all purchase orders over $5000 must be approved by the Finance Manager.",
+            "output": """<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" id="Definitions_1">
+  <bpmn:process id="PurchaseApproval" isExecutable="true">
+    <bpmn:startEvent id="Start" name="PO Submitted"/>
+    <bpmn:userTask id="ApproveTask" name="Approve Purchase Order">
+      <bpmn:incoming>Flow1</bpmn:incoming>
+      <bpmn:outgoing>Flow2</bpmn:outgoing>
+      <bpmn:documentation>{"executor_pattern": "static", "executor_config": {"type": "role", "value": "finance_manager"}}</bpmn:documentation>
+    </bpmn:userTask>
+    <bpmn:endEvent id="End" name="Process Complete"/>
+    <bpmn:sequenceFlow id="Flow1" sourceRef="Start" targetRef="ApproveTask"/>
+    <bpmn:sequenceFlow id="Flow2" sourceRef="ApproveTask" targetRef="End"/>
+  </bpmn:process>
+</bpmn:definitions>"""
+        },
+        {
+            "input": "Create a claim review process where a user submits a claim and selects which reviewer should handle it.",
+            "output": """<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" id="Definitions_1">
+  <bpmn:process id="ClaimReview" isExecutable="true">
+    <bpmn:startEvent id="Start" name="Claim Submitted"/>
+    <bpmn:userTask id="ReviewTask" name="Review Claim">
+      <bpmn:incoming>Flow1</bpmn:incoming>
+      <bpmn:outgoing>Flow2</bpmn:outgoing>
+      <bpmn:documentation>{"executor_pattern": "form_driven", "executor_config": {"form_field": "reviewer_selection"}}</bpmn:documentation>
+    </bpmn:userTask>
+    <bpmn:endEvent id="End" name="Review Complete"/>
+    <bpmn:sequenceFlow id="Flow1" sourceRef="Start" targetRef="ReviewTask"/>
+    <bpmn:sequenceFlow id="Flow2" sourceRef="ReviewTask" targetRef="End"/>
+  </bpmn:process>
+</bpmn:definitions>"""
+        },
+        {
+            "input": "Create an invoice routing process where invoices are automatically routed to the appropriate department based on the vendor code.",
+            "output": """<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" id="Definitions_1">
+  <bpmn:process id="InvoiceRouting" isExecutable="true">
+    <bpmn:startEvent id="Start" name="Invoice Received"/>
+    <bpmn:userTask id="ApproveTask" name="Approve Invoice">
+      <bpmn:incoming>Flow1</bpmn:incoming>
+      <bpmn:outgoing>Flow2</bpmn:outgoing>
+      <bpmn:documentation>{"executor_pattern": "dynamic", "executor_config": {"mcp_tool": "route_by_vendor", "kb_query": "Find department for vendor: ${vendor_code}"}}</bpmn:documentation>
+    </bpmn:userTask>
+    <bpmn:endEvent id="End" name="Approved"/>
+    <bpmn:sequenceFlow id="Flow1" sourceRef="Start" targetRef="ApproveTask"/>
+    <bpmn:sequenceFlow id="Flow2" sourceRef="ApproveTask" targetRef="End"/>
+  </bpmn:process>
+</bpmn:definitions>"""
+        }
+    ]
+
+    return examples
+
+
+async def build_input_context(
+    tenant_id: str,
+    description: str,
+    org_context: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Build input context for LLM BPMN generation.
+
+    Args:
+        tenant_id: Tenant ID for process ownership
+        description: Natural language process description
+        org_context: Organizational context with departments, roles, members
+
+    Returns:
+        Formatted context dict for LLM prompt
+    """
+    context = {
+        "description": description,
+        "org_context": {
+            "departments": org_context.get("departments", []),
+            "roles": org_context.get("roles", []),
+            "members": org_context.get("members", [])
+        },
+        "available_executor_patterns": [
+            "static",
+            "form_driven",
+            "dynamic",
+            "queue_claim",
+            "automation"
+        ]
+    }
+
+    return context
+
+
+class MockLLMClient:
+    """
+    Mock LLM client for testing prompt engineering without API calls.
+    Returns predetermined BPMN responses based on input.
+    """
+
+    def __init__(self):
+        """Initialize Mock LLM client."""
+        self._response_cache = {}
+
+    async def send_prompt(self, system_prompt: str, user_prompt: str) -> str:
+        """
+        Send prompt to Mock LLM and return predetermined response.
+
+        Args:
+            system_prompt: System context prompt
+            user_prompt: User's process description
+
+        Returns:
+            Mock BPMN XML response
+        """
+        # Create cache key from prompts
+        cache_key = f"{system_prompt}:::{user_prompt}"
+
+        # Return cached response if available
+        if cache_key in self._response_cache:
+            return self._response_cache[cache_key]
+
+        # Generate mock BPMN response
+        response = """<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" id="Definitions_Mock">
+  <bpmn:process id="MockProcess" isExecutable="true">
+    <bpmn:startEvent id="MockStart" name="Start"/>
+    <bpmn:userTask id="MockTask" name="Task">
+      <bpmn:incoming>MockFlow1</bpmn:incoming>
+      <bpmn:outgoing>MockFlow2</bpmn:outgoing>
+      <bpmn:documentation>{"executor_pattern": "static", "executor_config": {"type": "role", "value": "approver"}}</bpmn:documentation>
+    </bpmn:userTask>
+    <bpmn:endEvent id="MockEnd" name="End"/>
+    <bpmn:sequenceFlow id="MockFlow1" sourceRef="MockStart" targetRef="MockTask"/>
+    <bpmn:sequenceFlow id="MockFlow2" sourceRef="MockTask" targetRef="MockEnd"/>
+  </bpmn:process>
+</bpmn:definitions>"""
+
+        # Cache and return response
+        self._response_cache[cache_key] = response
+        return response
+
+
+async def validate_prompt_response(response: str) -> Dict[str, Any]:
+    """
+    Validate LLM response for BPMN correctness.
+
+    Args:
+        response: Response string from LLM
+
+    Returns:
+        Validation result with valid flag, errors, and confidence score
+    """
+    errors = []
+    warnings = []
+
+    # Try to parse XML
+    try:
+        root = ET.fromstring(response)
+    except ET.ParseError as e:
+        return {
+            "valid": False,
+            "errors": [f"XML parse error: {str(e)}"],
+            "confidence": 0.0
+        }
+
+    # Check for required BPMN elements
+    ns = {"bpmn": "http://www.omg.org/spec/BPMN/20100524/MODEL"}
+
+    # Check for process element
+    processes = root.findall(".//bpmn:process", ns)
+    if not processes:
+        errors.append("Missing bpmn:process element")
+
+    # Check for startEvent
+    start_events = root.findall(".//bpmn:startEvent", ns)
+    if not start_events:
+        errors.append("Missing bpmn:startEvent element")
+
+    # Check for endEvent
+    end_events = root.findall(".//bpmn:endEvent", ns)
+    if not end_events:
+        errors.append("Missing bpmn:endEvent element")
+
+    # Calculate confidence
+    if errors:
+        confidence = 0.5
+    else:
+        confidence = 0.9
+
+    return {
+        "valid": len(errors) == 0,
+        "errors": errors,
+        "warnings": warnings,
+        "confidence": confidence
+    }
