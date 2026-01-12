@@ -820,5 +820,241 @@ The MCP Management Interface provides a complete solution for managing MCP serve
 
 ---
 
-**Document Status**: Ready for team review and discussion
-**Last Updated**: 2026-01-09
+## 🆕 PHASE 2: Workflow Generation Platform (新的功能阶段)
+
+**Status**: Planning Phase - Ready to Start
+**Started**: 2026-01-11
+**Duration**: 12 weeks (Phase 2.1-2.3)
+**Branch**: feature/plan2-phase1 (will create feature/plan2-phase2 for implementation)
+
+### Overview
+
+Building a complete THREE-LAYER workflow generation platform that integrates with Membership's execution engine:
+
+**Layer 1**: BPMN 2.0 Process Generation (BPMN-MCP) - AI-assisted process modeling
+**Layer 2**: Form Generation (FORM-MCP) + ProcessEditor + FormEditor - Design-time tools
+**Layer 3**: Executor Binding - Map 5 executor patterns to BPMN tasks
+
+**Key Insight**: AICMDEngine is DESIGN-TIME ONLY. Execution happens in Membership (Flowable). WebApp shows user tasks.
+
+### Architecture Context
+
+```
+┌─────────────────────────────────────────────────┐
+│  AICMDEngine (Design-Time AI Helper)            │
+├─────────────────────────────────────────────────┤
+│  - BPMN-MCP: Generate BPMN 2.0 from NL         │
+│  - FORM-MCP: Generate forms with permissions   │
+│  - ProcessEditor: Visual BPMN editing          │
+│  - FormEditor: Drag-drop form builder          │
+│  - Knowledge Base Integration: Runtime policy  │
+└────────────────────┬────────────────────────────┘
+                     │
+                ┌────▼─────────────────┐
+                │  Membership Platform  │
+                ├───────────────────────┤
+                │ - Flowable: Executor  │
+                │ - KB: MongoDB+ES+Mv  │
+                │ - Audit: Complete log│
+                │ - Org/Role/Member    │
+                └────┬────────────────┘
+                     │
+            ┌────────▼────────────┐
+            │  WebApp             │
+            ├─────────────────────┤
+            │ - Show tasks        │
+            │ - FormRenderer      │
+            │ - Real-time updates │
+            └─────────────────────┘
+```
+
+### Phase 2 Sub-Phases
+
+#### Phase 2.1: Core Generation & Editors (Weeks 1-4)
+**Objective**: Build BPMN-MCP, FORM-MCP, and editing interfaces
+
+**Deliverables**:
+- BPMN-MCP with 5 executor modes (static, form-driven, dynamic, queue, automation)
+- FORM-MCP with Membership permission binding
+- ProcessEditor component (bpmn-js based)
+- FormEditor component (drag-drop builder)
+- Quality validation engine
+- Integration with Membership save APIs
+
+**Key Decisions Made**:
+- Executor modes handled via BPMN documentation tags + Flowable TaskListener
+- Form permissions derived from Membership RBAC
+- All backend validation against actual org/role/member data
+- Use BPM project's DATA_MODEL_DESIGN for storage patterns
+
+#### Phase 2.2: Runtime Execution & WebApp (Weeks 5-8)
+**Objective**: Integrate with Membership KB and build WebApp foundation
+
+**Deliverables**:
+- Knowledge base query APIs (search, semantic, RAG)
+- MCP runtime KB client with caching
+- WebApp basic framework (flows, task list, form detail)
+- FormRenderer with field-level permissions
+- WebSocket real-time task notifications
+- Complete end-to-end workflow
+
+**Critical Integration**: MCP queries KB at runtime → policies update without code changes
+
+#### Phase 2.3: Performance & Deployment (Weeks 9-12)
+**Objective**: Optimize, test comprehensively, and prepare for production
+
+**Deliverables**:
+- Performance optimization (caching, async logging)
+- Comprehensive test suite (unit, integration, concurrent, security)
+- K8s containerization with Docker
+- Multi-tenant isolation verification
+- Complete documentation and operational playbooks
+- Team training and handoff
+
+### Task Breakdown (Detailed in PHASE2-TASK-BREAKDOWN.md)
+
+**Phase 2.1 (Weeks 1-4)**:
+- Week 1: Detailed design + environment setup
+- Week 2: BPMN-MCP + FORM-MCP implementation
+- Week 3: ProcessEditor + FormEditor components
+- Week 4: Quality checks + integration testing
+
+**Phase 2.2 (Weeks 5-8)**:
+- Week 5: KB integration + MCP client
+- Week 6: WebApp framework + FormRenderer
+- Week 7: WebSocket integration + real-time sync
+- Week 8: End-to-end testing
+
+**Phase 2.3 (Weeks 9-12)**:
+- Week 9: Performance tuning
+- Week 10: Security & isolation testing
+- Week 11: K8s deployment
+- Week 12: Documentation + handoff
+
+### Five Executor Modes
+
+1. **Static Executor** (部门/角色配置)
+   - BPMN task → Documentation tag specifies `dept:finance` or `role:approver`
+   - Flowable creates task for all matching members
+   - Executed by Membership's task assignment
+
+2. **Form-Driven Executor** (用户选择)
+   - Process startup form includes "Select Next Approver" field
+   - Form binding stores selection in process variable
+   - Flowable reads variable for task assignment
+
+3. **Dynamic Multi-Route** (数据分析驱动)
+   - MCP analyzes data at runtime (KB semantic search)
+   - Routes to appropriate dept/role based on analysis
+   - Example: Routing approval based on budget amount, document type, urgency
+
+4. **Role-Queue Claim** (竞争认领)
+   - Task assigned to role (e.g., `role:sales`)
+   - First available member claims it
+   - Flowable handles pessimistic/optimistic locking
+
+5. **MCP Automation** (虚拟成员/AI驱动)
+   - Task can be fully automated via MCP
+   - Example: Financial audit by AI, compliance check by KB query
+   - Membership creates virtual member for audit trail
+
+### Implementation Status
+
+**Phase 2.1 Week 1 (2026-01-11) - DAY 1 ✅ COMPLETE**
+
+**Completed**:
+- [x] BPMN-MCP Foundation Implementation (100% - TDD approach)
+  - [x] MembershipClient class (4 tests passing)
+    - [x] get_org_context() - fetch departments, roles, members
+    - [x] validate_executor() - validate executor patterns
+  - [x] BPMNValidator class (7 tests passing)
+    - [x] XML parsing and structure validation
+    - [x] Sequence flow connection validation
+    - [x] Executor pattern documentation validation
+    - [x] Confidence score calculation (0.0-1.0)
+  - [x] ExecutorPatternValidator class (13 tests passing)
+    - [x] Static pattern validation (role/dept/member)
+    - [x] Form-driven pattern validation
+    - [x] Dynamic pattern validation (MCP tools)
+    - [x] Queue-claim pattern validation
+    - [x] Automation pattern validation
+- [x] Comprehensive Test Suite (24 tests, 100% passing, 0.45s)
+- [x] Code committed with 4 commits
+- [x] Phase 2.1 Week 1 Day 1 progress document
+
+**Test Results**: ✅ 24/24 passing (MembershipClient: 4, BPMNValidator: 7, ExecutorPatternValidator: 13)
+
+**Next Tasks** (Week 1 Day 2-4):
+- [ ] LLM Prompt Engineering (Task 4)
+  - [ ] System prompt for BPMN generation
+  - [ ] Few-shot examples (3-5 examples)
+  - [ ] Input context template
+  - [ ] Prompt validation tests
+- [ ] generate_process Tool Implementation (Task 5)
+  - [ ] MCP tool schema definition
+  - [ ] LLM integration with Claude API
+  - [ ] Combine MembershipClient + BPMNValidator + LLM
+  - [ ] E2E tests (generate → validate → return)
+- [ ] Integration Testing (Task 6)
+  - [ ] End-to-end workflow tests
+  - [ ] Error handling and fallback strategies
+  - [ ] Performance benchmarking
+  - [ ] Documentation
+
+**Phase 2.1 Design** (Parallel with implementation):
+- [x] BPMN-MCP PRD (executor modes, validation, LLM strategy) - ✅ COMPLETE
+- [x] KB-Query-API-Proposal (v2.0 based on Membership v2.4) - ✅ COMPLETE
+- [ ] FORM-MCP PRD (field permissions, BPMN binding) - In Progress
+- [ ] ProcessEditor architecture design - Pending
+- [ ] FormEditor architecture design - Pending
+
+**Phase 2.2-2.3**: To be executed per PHASE2-TASK-BREAKDOWN.md
+
+### Key Technical Decisions
+
+| Decision | Impact | Rationale |
+|----------|--------|-----------|
+| Executor config via BPMN tags | Easy visual editing, no code | Standard BPMN extension mechanism |
+| Form permissions from Membership | Automatic sync with org changes | Single source of truth |
+| MCP queries KB at runtime | Policies change without deploy | Decouples policy from code |
+| K8s for scaling | Handles concurrent processes | Enterprise requirement |
+| Shared components (ProcessEditor, FormRenderer) | Code reuse | Same component in design + execution |
+
+### Success Criteria (Phase 2.1)
+
+- [x] Architecture validated by customer
+- [x] All 12 architecture questions addressed
+- [x] BPMN-MCP PRD complete with examples - ✅ DONE (2026-01-11)
+- [x] MembershipClient foundation implemented - ✅ DONE (2026-01-11)
+- [x] BPMN Validator implemented - ✅ DONE (2026-01-11)
+- [x] Executor Pattern Validator (all 5 patterns) - ✅ DONE (2026-01-11)
+- [ ] FORM-MCP PRD complete with permission rules
+- [ ] LLM BPMN generation tool implemented
+- [ ] ProcessEditor accepts/edits valid BPMN
+- [ ] FormEditor generates executable forms
+- [ ] Can generate → edit → save → preview workflow
+- [ ] All executor modes fully implemented and tested
+
+### Dependencies & Coordination
+
+**Membership Team**:
+- KB query APIs (search, semantic search, RAG)
+- Flow/form save endpoints
+- X-Tenant-ID header support
+- RLS verification in PostgreSQL
+
+**BPM Team**:
+- Review DATA_MODEL_DESIGN patterns
+- Share ProcessEditor + FormEditor component patterns
+- Establish shared component library standards
+
+**DevOps**:
+- Test Membership instance setup
+- K8s cluster preparation for Phase 2.3
+- Docker image templates
+
+---
+
+**Document Status**: Phase 2 planning complete, ready for implementation
+**Last Updated**: 2026-01-11
+**Previous Phases**: Phase 1 MCP Infrastructure (100% complete, 2026-01-09)
