@@ -8,8 +8,8 @@ import { validateBpmn } from '../../services/bpmnValidator';
 const ProcessEditor: React.FC<ProcessEditorProps> = ({
   bpmnXml = '',
   onBpmnChange,
-  onValidationChange,
-  readOnly = false,
+  onValidationChange: _onValidationChange,
+  readOnly: _readOnly = false,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const modelerRef = useRef<BpmnModeler | null>(null);
@@ -19,8 +19,8 @@ const ProcessEditor: React.FC<ProcessEditorProps> = ({
   useEffect(() => {
     if (!modelerRef.current) return;
 
-    const canvas = modelerRef.current.get('canvas');
-    const eventBus = modelerRef.current.get('eventBus');
+    const canvas = modelerRef.current.get('canvas') as any;
+    const eventBus = modelerRef.current.get('eventBus') as any;
 
     eventBus.on('element.click', (event: any) => {
       setSelectedElement(event.element);
@@ -31,7 +31,7 @@ const ProcessEditor: React.FC<ProcessEditorProps> = ({
         setSelectedElement(null);
       }
     });
-  }, []);
+  }, [selectedElement]);
 
   useEffect(() => {
     if (bpmnXml) {
@@ -53,8 +53,8 @@ const ProcessEditor: React.FC<ProcessEditorProps> = ({
     // Handle diagram changes
     modeler.on('commandStack.changed', async () => {
       try {
-        const { xml } = await modeler.saveXML({ format: true });
-        onBpmnChange(xml);
+        const result = await modeler.saveXML({ format: true }) as { xml: string };
+        onBpmnChange(result.xml);
       } catch (err) {
         console.error('Failed to save BPMN:', err);
       }
@@ -65,7 +65,7 @@ const ProcessEditor: React.FC<ProcessEditorProps> = ({
       modeler
         .importXML(bpmnXml)
         .then(() => {
-          modeler.get('canvas').zoom('fit-viewport');
+          (modeler.get('canvas') as any).zoom('fit-viewport');
         })
         .catch((err) => {
           console.error('Failed to import BPMN:', err);
@@ -103,7 +103,7 @@ const ProcessEditor: React.FC<ProcessEditorProps> = ({
           element={selectedElement}
           onPropertyChange={(prop, value) => {
             if (selectedElement && modelerRef.current) {
-              const modeling = modelerRef.current.get('modeling');
+              const modeling = modelerRef.current.get('modeling') as any;
               if (prop === 'name') {
                 modeling.updateProperties(selectedElement, { name: value });
               }

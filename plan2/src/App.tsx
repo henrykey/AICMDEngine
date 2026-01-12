@@ -2,6 +2,7 @@ import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
+import WorkflowDesigner from './pages/WorkflowDesigner';
 import { TaskProvider } from './contexts/TaskContext';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -25,6 +26,8 @@ function App() {
             </TaskProvider>
           </ProtectedRoute>
         } />
+
+        <Route path="/designer" element={<WorkflowDesigner />} />
 
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
