@@ -135,11 +135,58 @@ class FormValidator:
     """
 
     def __init__(self):
-        """Initialize FormValidator."""
-        self.field_types = {
-            "text", "textarea", "number", "select", "checkbox", "date", "file"
+        """Initialize FormValidator with 37 BPM-aligned control types."""
+        # 基础输入 (8)
+        self.basic_input_types = {
+            "text", "textarea", "number", "date", "time",
+            "datetime", "password", "email"
         }
+
+        # 选择控件 (6)
+        self.select_types = {
+            "radio", "checkbox", "select", "cascader",
+            "tree-select", "switch"
+        }
+
+        # 高级输入 (7)
+        self.advanced_types = {
+            "richtext", "file-upload", "image-upload", "signature",
+            "rating", "color", "slider"
+        }
+
+        # 布局容器 (4)
+        self.layout_types = {
+            "grid", "tabs", "collapse", "flex-container"
+        }
+
+        # 特殊控件 (5)
+        self.special_types = {
+            "subform", "address", "relation", "data-table", "computed-field"
+        }
+
+        # 业务控件 (4)
+        self.business_types = {
+            "member-selector", "role-selector", "org-selector", "process-selector"
+        }
+
+        # 展示控件 (4)
+        self.display_types = {
+            "title", "description", "divider", "html"
+        }
+
+        # 所有支持的类型 (37)
+        self.all_field_types = (
+            self.basic_input_types |
+            self.select_types |
+            self.advanced_types |
+            self.layout_types |
+            self.special_types |
+            self.business_types |
+            self.display_types
+        )
+
         self.form_types = {"startup", "task_specific", "standalone"}
+        self.width_types = {"100%", "50%", "33%", "25%", "auto"}
 
     async def validate_form(
         self,
@@ -209,27 +256,80 @@ class FormValidator:
     async def _validate_field(
         self,
         field: Dict[str, Any],
-        bpmn_variables: Optional[List[str]],
-        strict_mode: bool
-    ) -> List[Dict[str, Any]]:
-        """Validate individual field."""
-        issues = []
+        bpmn_variables: Optional[List[str]] = None,
+        strict_mode: bool = False
+    ) -> List[Dict[str, str]]:
+        """Validate a single field with BPM-aligned structure"""
+        errors = []
 
-        if not field.get("field_name"):
-            issues.append({
-                "field_id": field.get("field_id", "unknown"),
-                "issue_type": "missing_label",
-                "message": "Field name is required"
+        # Support both old (field_id, field_type, field_name) and new (id, type, label) formats
+        field_id = field.get("id") or field.get("field_id", "unknown")
+        field_type = field.get("type") or field.get("field_type", "")
+        field_label = field.get("label") or field.get("field_name", "")
+
+        # 验证 ID
+        if not field_id or field_id == "unknown":
+            errors.append({
+                "field_id": "root",
+                "issue_type": "missing_id",
+                "message": "Field must have an 'id' property"
             })
 
-        if field.get("field_type") not in self.field_types:
-            issues.append({
-                "field_id": field.get("field_id", "unknown"),
+        # 验证类型 (37 种之一)
+        if field_type not in self.all_field_types:
+            errors.append({
+                "field_id": field_id,
                 "issue_type": "invalid_type",
-                "message": f"Invalid field type: {field.get('field_type')}"
+                "message": f"Invalid field type '{field_type}'. Must be one of: {self.all_field_types}"
+            })
+            return errors
+
+        # 验证标签
+        if not field_label:
+            errors.append({
+                "field_id": field_id,
+                "issue_type": "missing_label",
+                "message": f"Field '{field_id}' must have a 'label' property"
             })
 
-        return issues
+        # 验证宽度属性 (如果存在)
+        width = field.get("width")
+        if width and width not in self.width_types:
+            errors.append({
+                "field_id": field_id,
+                "issue_type": "invalid_width",
+                "message": f"Invalid width '{width}'. Must be one of: {self.width_types}"
+            })
+
+        # 验证嵌套控件 (容器类型应该有 children)
+        if field_type in self.layout_types:
+            children = field.get("children", [])
+            if not children and strict_mode:
+                errors.append({
+                    "field_id": field_id,
+                    "issue_type": "empty_container",
+                    "message": f"Layout control '{field_type}' should contain children in strict mode"
+                })
+
+            # 递归验证子控件
+            for child in children:
+                child_errors = await self._validate_field(child, bpmn_variables, strict_mode)
+                errors.extend(child_errors)
+
+        # 验证 props 中的验证规则
+        props = field.get("props", {})
+        if "validation" in props:
+            validation = props["validation"]
+            if isinstance(validation, list):
+                for rule in validation:
+                    if not isinstance(rule, dict) or "type" not in rule:
+                        errors.append({
+                            "field_id": field_id,
+                            "issue_type": "invalid_validation_rule",
+                            "message": "Validation rule must have a 'type' property"
+                        })
+
+        return errors
 
     def _validate_field_permissions(self, field: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Validate field permission rules."""
