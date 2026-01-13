@@ -598,9 +598,9 @@ class FORM_MCP(BaseMCPServer):
             elif tool_name == "validate_form":
                 return await self._handle_validate_form(params, tenant_id)
             elif tool_name == "bind_form_to_process":
-                return await self._handle_bind_form(params, tenant_id)
+                return await self._handle_bind_form_to_process(params, tenant_id)
             elif tool_name == "suggest_form_fields":
-                return await self._handle_suggest_fields(params, tenant_id)
+                return await self._handle_suggest_form_fields(params, tenant_id)
             else:
                 return {"success": False, "error": f"Unknown tool: {tool_name}"}
         except Exception as e:
@@ -849,12 +849,12 @@ Do NOT include markdown, explanations, or comments.
                 "error": f"Validation failed: {str(e)}"
             }
 
-    async def _handle_bind_form(
+    async def _handle_bind_form_to_process(
         self,
         params: Dict[str, Any],
         tenant_id: str
     ) -> Dict[str, Any]:
-        """Handle bind_form_to_process tool execution."""
+        """Bind form controls to BPMN process variables"""
         form_definition = params.get("form_definition")
         process_variables = params.get("process_variables", [])
 
@@ -862,85 +862,104 @@ Do NOT include markdown, explanations, or comments.
             return {"success": False, "error": "form_definition is required"}
 
         try:
-            # Validate bindings
-            unmapped = []
-            mapped = []
+            # Get controls (support both old "fields" and new "controls" format)
+            controls = form_definition.get("controls") or form_definition.get("fields", [])
 
-            for field in form_definition.get("fields", []):
-                bpmn_var = field.get("data_binding", {}).get("bpmn_variable")
-                if bpmn_var:
-                    if bpmn_var in process_variables:
-                        mapped.append(bpmn_var)
-                    else:
-                        unmapped.append(bpmn_var)
+            # Perform binding
+            mapped_variables = []
+            unmapped_variables = list(process_variables)
+
+            for control in controls:
+                if "data_binding" in control:
+                    bpmn_var = control["data_binding"].get("bpmn_variable")
+                    if bpmn_var in unmapped_variables:
+                        mapped_variables.append(bpmn_var)
+                        unmapped_variables.remove(bpmn_var)
 
             return {
                 "success": True,
-                "process_variables_mapped": mapped,
-                "unmapped_variables": unmapped,
-                "binding_complete": len(unmapped) == 0
+                "process_variables_mapped": mapped_variables,
+                "unmapped_variables": unmapped_variables,
+                "binding_coverage": len(mapped_variables) / len(process_variables) if process_variables else 0
             }
+
         except Exception as e:
-            logger.error(f"Form binding failed: {e}", exc_info=True)
+            logger.error(f"Error binding form: {str(e)}")
             return {"success": False, "error": str(e)}
 
-    async def _handle_suggest_fields(
+    async def _handle_suggest_form_fields(
         self,
         params: Dict[str, Any],
         tenant_id: str
     ) -> Dict[str, Any]:
-        """Handle suggest_form_fields tool execution."""
+        """Suggest form fields based on description"""
         form_description = params.get("form_description", "")
 
         if not form_description:
             return {"success": False, "error": "form_description is required"}
 
         try:
-            # Simple heuristic-based field suggestion
-            suggestions = []
-
-            desc_lower = form_description.lower()
-
-            if any(word in desc_lower for word in ["name", "applicant", "user"]):
-                suggestions.append({
-                    "field_name": "applicant_name",
-                    "field_type": "text",
-                    "rationale": "Required for identifying applicant"
-                })
-
-            if any(word in desc_lower for word in ["amount", "budget", "cost", "price"]):
-                suggestions.append({
-                    "field_name": "amount",
-                    "field_type": "number",
-                    "rationale": "Needed for financial information"
-                })
-
-            if any(word in desc_lower for word in ["date", "time", "when", "schedule"]):
-                suggestions.append({
-                    "field_name": "request_date",
-                    "field_type": "date",
-                    "rationale": "Important for timeline tracking"
-                })
-
-            if any(word in desc_lower for word in ["reason", "explanation", "description", "detail"]):
-                suggestions.append({
-                    "field_name": "description",
-                    "field_type": "textarea",
-                    "rationale": "Allows detailed explanation"
-                })
-
-            if any(word in desc_lower for word in ["approve", "reject", "status"]):
-                suggestions.append({
-                    "field_name": "approval_status",
-                    "field_type": "select",
-                    "options": ["pending", "approved", "rejected"],
-                    "rationale": "Tracks approval status"
-                })
+            # Analyze description and suggest fields
+            suggestions = self._analyze_form_description(form_description)
 
             return {
                 "success": True,
-                "suggestions": suggestions
+                "suggestions": suggestions,
+                "recommended_control_types": self._recommend_control_types(form_description)
             }
+
         except Exception as e:
-            logger.error(f"Field suggestion failed: {e}", exc_info=True)
+            logger.error(f"Error suggesting fields: {str(e)}")
             return {"success": False, "error": str(e)}
+
+    def _analyze_form_description(self, description: str) -> List[Dict]:
+        """Analyze form description and suggest field configurations"""
+        suggestions = []
+
+        keywords = {
+            "name": ("text", "姓名"),
+            "email": ("email", "邮箱"),
+            "phone": ("text", "电话"),
+            "date": ("date", "日期"),
+            "amount": ("number", "金额"),
+            "select": ("select", "选择"),
+            "approve": ("radio", "批准"),
+            "upload": ("file-upload", "上传"),
+            "signature": ("signature", "签名"),
+        }
+
+        for keyword, (field_type, label) in keywords.items():
+            if keyword.lower() in description.lower():
+                suggestions.append({
+                    "field_type": field_type,
+                    "suggested_label": label,
+                    "recommended_width": "50%" if field_type in ["text", "email"] else "100%"
+                })
+
+        return suggestions
+
+    def _recommend_control_types(self, description: str) -> List[str]:
+        """Recommend control types based on form description"""
+        recommendations = []
+
+        # Check if containers are needed
+        if any(word in description.lower() for word in ["section", "group", "layout", "grid"]):
+            recommendations.extend(["grid", "tabs", "collapse"])
+
+        # Check if business controls are needed
+        if any(word in description.lower() for word in ["member", "user", "department", "role"]):
+            recommendations.extend(["member-selector", "org-selector"])
+
+        # Check if advanced controls are needed
+        if any(word in description.lower() for word in ["rich", "editor", "signature", "upload"]):
+            recommendations.extend(["richtext", "signature", "file-upload"])
+
+        return recommendations
+
+    async def _handle_suggest_fields(
+        self,
+        params: Dict[str, Any],
+        tenant_id: str
+    ) -> Dict[str, Any]:
+        """Handle suggest_form_fields tool execution (legacy name)."""
+        return await self._handle_suggest_form_fields(params, tenant_id)
