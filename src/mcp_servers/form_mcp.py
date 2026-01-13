@@ -18,11 +18,13 @@ import logging
 import aiohttp
 import json
 import uuid
+import re
 from datetime import datetime
 from openai import AsyncOpenAI, RateLimitError, APIError, APIConnectionError, AuthenticationError
 
 from src.core.config import settings
 from src.mcp.base_server import BaseMCPServer
+from src.services.llm_client import llm_client
 
 logger = logging.getLogger(__name__)
 
@@ -216,15 +218,19 @@ class FormValidator:
             "org_mismatches": []
         }
 
-        # Check form structure
-        if not form_definition.get("form_name"):
-            errors.append("Form name is required")
+        # Check form structure (support both old and new format)
+        form_name = form_definition.get("form_name") or form_definition.get("title")
+        if not form_name:
+            errors.append("Form name or title is required")
 
         if form_definition.get("form_type") not in self.form_types:
             errors.append(f"Invalid form_type. Must be one of: {self.form_types}")
 
-        # Validate fields
-        for field in form_definition.get("fields", []):
+        # Support both old format (fields) and new format (controls)
+        fields = form_definition.get("controls") or form_definition.get("fields", [])
+
+        # Validate fields/controls
+        for field in fields:
             field_errors = await self._validate_field(field, bpmn_variables, strict_mode)
             issues["field_issues"].extend(field_errors)
             # Add field errors to main errors list if they're critical
@@ -372,36 +378,54 @@ class MockLLMClient:
         self._response_cache = {}
 
     async def send_prompt(self, system_prompt: str, user_prompt: str) -> str:
-        """Generate mock form definition."""
+        """Generate mock form definition in BPM FormSchema format."""
         cache_key = f"{system_prompt}:::{user_prompt}"
 
         if cache_key in self._response_cache:
             return self._response_cache[cache_key]
 
-        # Return mock form definition
+        # Return BPM-aligned FormSchema mock definition
         mock_form = {
-            "form_id": str(uuid.uuid4()),
-            "form_name": "Generated Form",
-            "form_type": "standalone",
-            "fields": [
+            "formId": "form-" + str(uuid.uuid4())[:8],
+            "version": "1.0.0",
+            "title": "Generated Form",
+            "description": "Form generated from requirements",
+            "controls": [
                 {
-                    "field_id": "field_001",
-                    "field_name": "applicant_name",
-                    "field_type": "text",
+                    "id": "field-001",
+                    "type": "text",
                     "label": "Applicant Name",
-                    "required": True,
+                    "props": {"required": True, "maxLength": 100},
+                    "width": "100%",
                     "permissions": {
                         "view": {"condition": "*", "applies_to": ["*"]},
                         "edit": {"condition": "*", "applies_to": ["*"]},
                         "required": {"condition": "True", "applies_to": ["*"]}
+                    },
+                    "data_binding": {
+                        "bpmn_variable": "applicant_name",
+                        "source_type": "user_input"
                     }
                 }
-            ]
+            ],
+            "validation": {
+                "rules": {
+                    "field-001": [
+                        {"type": "required", "message": "Applicant name is required"}
+                    ]
+                }
+            },
+            "form_type": "standalone",
+            "confidence_score": 0.85
         }
 
         response = json.dumps(mock_form)
         self._response_cache[cache_key] = response
         return response
+
+    async def generate_form(self, prompt: str) -> str:
+        """Generate form from prompt (compatibility method)."""
+        return await self.send_prompt("", prompt)
 
 
 async def generate_form(
@@ -605,23 +629,137 @@ class FORM_MCP(BaseMCPServer):
             logger.error(f"Error executing tool '{tool_name}': {e}", exc_info=True)
             return {"success": False, "error": str(e)}
 
+    def _get_form_generation_prompt(self, org_context: Dict, form_requirements: Dict) -> str:
+        """Generate LLM prompt for BPM-aligned form schema"""
+
+        return """You are a form design expert that generates form definitions aligned with BPM FormSchema specification.
+
+## CRITICAL REQUIREMENTS
+
+1. **Form Structure (BPM Aligned)**:
+   - Return ONLY valid JSON FormSchema
+   - Use 'controls' array (not 'fields')
+   - Each control must have: id, type, label, props
+   - Support 37 control types (see list below)
+   - Support nested controls with 'children' array for layout types
+
+2. **37 Control Types**:
+
+   Basic Input (8):
+   - text, textarea, number, date, time, datetime, password, email
+
+   Select Controls (6):
+   - radio, checkbox, select, cascader, tree-select, switch
+
+   Advanced Input (7):
+   - richtext, file-upload, image-upload, signature, rating, color, slider
+
+   Layout Containers (4):
+   - grid, tabs, collapse, flex-container
+
+   Special Controls (5):
+   - subform, address, relation, data-table, computed-field
+
+   Business Controls (4):
+   - member-selector, role-selector, org-selector, process-selector
+
+   Display Controls (4):
+   - title, description, divider, html
+
+3. **Validation Rules (Complete Format)**:
+   - Use 'validation' field with array of ValidationRule objects
+   - Each rule: { "type": "required|email|pattern|min|max|minLength|maxLength|custom", "message": "..." }
+   - Example:
+     ```json
+     "validation": [
+       { "type": "required", "message": "This field is required" },
+       { "type": "email", "message": "Invalid email format" },
+       { "type": "minLength", "value": 6, "message": "At least 6 characters" }
+     ]
+     ```
+
+4. **Width and Layout**:
+   - width: "100%" | "50%" | "33%" | "25%" | "auto"
+   - For grid containers: use children with cellIndex
+   - Support flexProps for flex-container layouts
+
+5. **Field-Level Permissions (FORM-MCP Enhancement)**:
+   - Include permissions object for each control
+   - Structure:
+     ```json
+     "permissions": {
+       "view": { "condition": "role:approver", "applies_to": ["role:approver"] },
+       "edit": { "condition": "role:approver", "applies_to": ["role:approver"] },
+       "required": { "condition": "role:approver", "applies_to": ["role:approver"] }
+     }
+     ```
+
+6. **BPMN Binding (FORM-MCP Enhancement)**:
+   - Map form controls to BPMN process variables
+   - Include data_binding for applicable controls:
+     ```json
+     "data_binding": {
+       "bpmn_variable": "applicant_name",
+       "source_type": "user_input|calculated|from_membership|from_kb"
+     }
+     ```
+
+## OUTPUT FORMAT
+
+Return ONLY valid JSON with this structure:
+```json
+{
+  "formId": "form-001",
+  "version": "1.0.0",
+  "title": "Form Title",
+  "description": "Form description",
+  "controls": [
+    {
+      "id": "field-1",
+      "type": "text",
+      "label": "Name",
+      "props": { "required": true, "maxLength": 50 },
+      "width": "100%",
+      "permissions": { ... },
+      "data_binding": { ... }
+    }
+  ],
+  "validation": {
+    "rules": {
+      "field-1": [
+        { "type": "required", "message": "Name is required" }
+      ]
+    }
+  },
+  "form_type": "startup|task_specific|standalone",
+  "confidence_score": 0.95
+}
+```
+
+Do NOT include markdown, explanations, or comments.
+
+## ORGANIZATION CONTEXT
+""" + json.dumps(org_context, indent=2) + """
+
+## FORM REQUIREMENTS
+""" + json.dumps(form_requirements, indent=2)
+
     async def _handle_generate_form(
         self,
         params: Dict[str, Any],
         tenant_id: str
     ) -> Dict[str, Any]:
-        """Handle generate_form tool execution."""
+        """Generate form returning BPM-aligned FormSchema"""
         form_name = params.get("form_name", "")
         form_type = params.get("form_type", "standalone")
         description = params.get("description", "")
-        context = params.get("context", {})
 
+        # Validate parameters
         if not form_name:
             return {"success": False, "error": "form_name is required"}
-        if not description:
-            return {"success": False, "error": "description is required"}
 
         try:
+            # Get organizational context
             if not self.membership_client:
                 self.membership_client = FormMCPClient(
                     self.membership_base_url,
@@ -630,19 +768,66 @@ class FORM_MCP(BaseMCPServer):
 
             org_context = await self.membership_client.get_org_context()
 
-            result = await generate_form(
-                tenant_id=tenant_id,
-                form_name=form_name,
-                form_type=form_type,
-                description=description,
-                org_context={"org_context": org_context},
-                use_real_llm=self.use_real_llm
-            )
+            # Prepare form requirements
+            form_requirements = {
+                "form_name": form_name,
+                "form_type": form_type,
+                "description": description,
+                "organization": org_context
+            }
 
-            return {"success": True, **result}
+            # Generate prompt
+            prompt = self._get_form_generation_prompt(org_context, form_requirements)
+
+            # Call LLM
+            if self.use_real_llm:
+                llm_response = await llm_client.generate_response(
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.1
+                )
+            else:
+                mock_client = MockLLMClient()
+                llm_response = await mock_client.generate_form(prompt)
+
+            # Parse JSON response
+            try:
+                form_schema = json.loads(llm_response)
+            except json.JSONDecodeError:
+                # Extract JSON if LLM returned markdown
+                json_match = re.search(r'\{[\s\S]*\}', llm_response)
+                if not json_match:
+                    return {
+                        "success": False,
+                        "error": "Failed to parse LLM response as JSON",
+                        "raw_response": llm_response[:200]
+                    }
+                form_schema = json.loads(json_match.group())
+
+            # Validate generated form
+            validator = FormValidator()
+            validation_result = await validator.validate_form(tenant_id, form_schema)
+
+            if not validation_result["valid"] and validation_result.get("errors"):
+                return {
+                    "success": False,
+                    "error": "Generated form failed validation",
+                    "validation_errors": validation_result["errors"]
+                }
+
+            # Return success result
+            return {
+                "success": True,
+                "form_definition": form_schema,
+                "validation_warnings": validation_result.get("warnings", []),
+                "confidence_score": form_schema.get("confidence_score", 0.85)
+            }
+
         except Exception as e:
-            logger.error(f"Form generation failed: {e}", exc_info=True)
-            return {"success": False, "error": str(e)}
+            logger.error(f"Error generating form: {str(e)}")
+            return {
+                "success": False,
+                "error": f"Form generation failed: {str(e)}"
+            }
 
     async def _handle_validate_form(
         self,
