@@ -29,6 +29,36 @@ from src.services.llm_client import llm_client
 logger = logging.getLogger(__name__)
 
 
+class FormSchemaConverter:
+    """
+    Convert between FORM-MCP internal format and BPM FormSchema
+    Provides backward compatibility
+    """
+
+    @staticmethod
+    def fields_to_controls(form_def: Dict) -> Dict:
+        """Convert old 'fields' format to BPM 'controls' format"""
+        if "fields" in form_def and "controls" not in form_def:
+            form_def["controls"] = form_def.pop("fields")
+        return form_def
+
+    @staticmethod
+    def ensure_bpm_format(form_def: Dict) -> Dict:
+        """Ensure form definition is in BPM FormSchema format"""
+        # 转换字段名
+        form_def = FormSchemaConverter.fields_to_controls(form_def)
+
+        # 确保必要字段
+        if "formId" not in form_def:
+            form_def["formId"] = str(uuid.uuid4())
+        if "version" not in form_def:
+            form_def["version"] = "1.0.0"
+        if "title" not in form_def:
+            form_def["title"] = form_def.get("form_name", "Untitled")
+
+        return form_def
+
+
 @dataclass
 class OrgContext:
     """Organizational context: departments, roles, members"""
