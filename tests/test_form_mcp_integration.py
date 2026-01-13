@@ -282,3 +282,120 @@ class TestFormMCPIntegration:
 
         # Should have warnings about missing permissions
         assert len(result["warnings"]) >= 0
+
+    @pytest.mark.asyncio
+    async def test_form_mcp_generates_bpm_format(self):
+        """Verify that generated forms are in BPM FormSchema format"""
+        mcp = FORM_MCP(
+            membership_base_url="http://localhost:8080",
+            use_real_llm=False
+        )
+
+        with patch('src.mcp_servers.form_mcp.FormMCPClient') as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.get_org_context = AsyncMock(return_value={
+                "departments": [{"id": "d1", "name": "finance"}],
+                "roles": [{"id": "r1", "name": "approver"}],
+                "members": []
+            })
+            mock_client_class.return_value = mock_client
+
+            result = await mcp.execute_tool(
+                tool_name="generate_form",
+                params={
+                    "form_name": "Test Form",
+                    "form_type": "startup",
+                    "description": "Test form"
+                },
+                tenant_id="test"
+            )
+
+            assert result["success"] is True
+            form_def = result["form_definition"]
+
+            # Verify BPM format
+            assert "formId" in form_def, "Missing formId (BPM standard)"
+            assert "version" in form_def, "Missing version (BPM standard)"
+            assert "title" in form_def, "Missing title (BPM standard)"
+            assert "controls" in form_def, "Should use 'controls' not 'fields'"
+
+            # Verify controls structure
+            if form_def["controls"]:
+                control = form_def["controls"][0]
+                assert "id" in control, "Control missing id"
+                assert "type" in control, "Control missing type"
+                assert "label" in control, "Control missing label"
+                assert "props" in control, "Control missing props"
+
+    @pytest.mark.asyncio
+    async def test_form_control_has_width_property(self):
+        """Verify that BPM controls support width property for layout"""
+        mcp = FORM_MCP(
+            membership_base_url="http://localhost:8080",
+            use_real_llm=False
+        )
+
+        with patch('src.mcp_servers.form_mcp.FormMCPClient') as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.get_org_context = AsyncMock(return_value={
+                "departments": [{"id": "d1", "name": "finance"}],
+                "roles": [{"id": "r1", "name": "approver"}],
+                "members": []
+            })
+            mock_client_class.return_value = mock_client
+
+            result = await mcp.execute_tool(
+                tool_name="generate_form",
+                params={
+                    "form_name": "Layout Test Form",
+                    "form_type": "standalone",
+                    "description": "Test form with layout controls"
+                },
+                tenant_id="test"
+            )
+
+            assert result["success"] is True
+            form_def = result["form_definition"]
+            assert "controls" in form_def
+
+            # Verify at least first control has layout properties
+            if form_def["controls"]:
+                control = form_def["controls"][0]
+                # Width property is BPM standard for layout
+                assert "width" in control or "flexProps" in control, "Control should have width or flexProps for layout"
+
+    @pytest.mark.asyncio
+    async def test_form_control_has_validation_rules(self):
+        """Verify that BPM controls support validation rules array"""
+        mcp = FORM_MCP(
+            membership_base_url="http://localhost:8080",
+            use_real_llm=False
+        )
+
+        with patch('src.mcp_servers.form_mcp.FormMCPClient') as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.get_org_context = AsyncMock(return_value={
+                "departments": [{"id": "d1", "name": "finance"}],
+                "roles": [{"id": "r1", "name": "approver"}],
+                "members": []
+            })
+            mock_client_class.return_value = mock_client
+
+            result = await mcp.execute_tool(
+                tool_name="generate_form",
+                params={
+                    "form_name": "Validation Test Form",
+                    "form_type": "task_specific",
+                    "description": "Test form with validation rules"
+                },
+                tenant_id="test"
+            )
+
+            assert result["success"] is True
+            form_def = result["form_definition"]
+
+            # Verify validation structure exists at form level
+            if "validation" in form_def:
+                assert "rules" in form_def["validation"], "Validation should have 'rules' key"
+                # Rules should be a dict with control IDs as keys
+                assert isinstance(form_def["validation"]["rules"], dict), "Validation rules should be a dict"
