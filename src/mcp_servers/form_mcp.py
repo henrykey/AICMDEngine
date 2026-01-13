@@ -197,66 +197,44 @@ class FormValidator:
         strict_mode: bool = False,
         bpmn_variables: Optional[List[str]] = None
     ) -> Dict[str, Any]:
-        """
-        Validate form definition structure and constraints.
-
-        Args:
-            tenant_id: Tenant ID
-            form_definition: Complete form definition
-            strict_mode: Apply strict validation
-            bpmn_variables: List of available BPMN process variables
-
-        Returns:
-            Validation result with errors, warnings, and confidence score
-        """
+        """Validate form with BPM FormSchema structure"""
         errors = []
         warnings = []
         issues = {
             "field_issues": [],
             "permission_issues": [],
-            "binding_issues": [],
-            "org_mismatches": []
+            "binding_issues": []
         }
 
-        # Check form structure (support both old and new format)
-        form_name = form_definition.get("form_name") or form_definition.get("title")
-        if not form_name:
-            errors.append("Form name or title is required")
+        # Get controls (support backward compatible fields)
+        controls = form_definition.get("controls") or form_definition.get("fields", [])
 
-        if form_definition.get("form_type") not in self.form_types:
-            errors.append(f"Invalid form_type. Must be one of: {self.form_types}")
+        if not controls:
+            warnings.append("Form has no controls/fields")
 
-        # Support both old format (fields) and new format (controls)
-        fields = form_definition.get("controls") or form_definition.get("fields", [])
-
-        # Validate fields/controls
-        for field in fields:
-            field_errors = await self._validate_field(field, bpmn_variables, strict_mode)
+        # Validate each control (including nested)
+        for control in controls:
+            field_errors = await self._validate_field(control, bpmn_variables, strict_mode)
             issues["field_issues"].extend(field_errors)
-            # Add field errors to main errors list if they're critical
             for error in field_errors:
-                if error["issue_type"] in ["invalid_type", "missing_label"]:
+                if error["issue_type"] in ["invalid_type", "missing_label", "missing_id"]:
                     errors.append(error["message"])
 
             # Validate permissions
-            perm_errors = self._validate_field_permissions(field)
+            perm_errors = self._validate_field_permissions(control)
             issues["permission_issues"].extend(perm_errors)
 
-            # Validate BPMN bindings
-            if bpmn_variables:
-                binding_errors = self._validate_field_binding(field, bpmn_variables)
+            # Validate BPMN binding
+            if bpmn_variables and "data_binding" in control:
+                binding_errors = self._validate_field_binding(control, bpmn_variables)
                 issues["binding_issues"].extend(binding_errors)
-
-        # Compute confidence score
-        total_issues = len(errors) + len(warnings) + len(issues["field_issues"])
-        confidence_score = max(0.0, 1.0 - (total_issues * 0.1))
 
         return {
             "valid": len(errors) == 0,
             "errors": errors,
             "warnings": warnings,
             "issues": issues,
-            "confidence_score": confidence_score
+            "confidence_score": 1.0 if len(errors) == 0 else 0.5
         }
 
     async def _validate_field(
@@ -834,7 +812,7 @@ Do NOT include markdown, explanations, or comments.
         params: Dict[str, Any],
         tenant_id: str
     ) -> Dict[str, Any]:
-        """Handle validate_form tool execution."""
+        """Validate form in BPM FormSchema format"""
         form_definition = params.get("form_definition")
         strict_mode = params.get("strict_mode", False)
 
@@ -842,16 +820,34 @@ Do NOT include markdown, explanations, or comments.
             return {"success": False, "error": "form_definition is required"}
 
         try:
-            result = await self.validator.validate_form(
-                tenant_id=tenant_id,
-                form_definition=form_definition,
+            validator = FormValidator()
+
+            # Convert fields -> controls (backward compatibility)
+            if "fields" in form_definition and "controls" not in form_definition:
+                form_definition["controls"] = form_definition.pop("fields")
+
+            # Validate form
+            validation_result = await validator.validate_form(
+                tenant_id,
+                form_definition,
                 strict_mode=strict_mode
             )
 
-            return {"success": True, **result}
+            return {
+                "success": validation_result["valid"],
+                "valid": validation_result["valid"],
+                "errors": validation_result.get("errors", []),
+                "warnings": validation_result.get("warnings", []),
+                "issues": validation_result.get("issues", {}),
+                "confidence_score": validation_result.get("confidence_score", 0.85)
+            }
+
         except Exception as e:
-            logger.error(f"Form validation failed: {e}", exc_info=True)
-            return {"success": False, "error": str(e)}
+            logger.error(f"Error validating form: {str(e)}")
+            return {
+                "success": False,
+                "error": f"Validation failed: {str(e)}"
+            }
 
     async def _handle_bind_form(
         self,
