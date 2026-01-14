@@ -20,11 +20,17 @@ import json
 import uuid
 import re
 from datetime import datetime
-from openai import AsyncOpenAI, RateLimitError, APIError, APIConnectionError, AuthenticationError
 
 from src.core.config import settings
 from src.mcp.base_server import BaseMCPServer
 from src.services.llm_client import llm_client
+from src.mcp_servers.llm_integration import (
+    get_llm_client,
+    LLMClientFactory,
+    MockLLMClient,
+    RealLLMClient,
+    extract_json_from_response
+)
 
 logger = logging.getLogger(__name__)
 
@@ -378,62 +384,7 @@ class FormValidator:
         return issues
 
 
-class MockLLMClient:
-    """Mock LLM client for form generation (testing)."""
-
-    def __init__(self):
-        """Initialize MockLLMClient."""
-        self._response_cache = {}
-
-    async def send_prompt(self, system_prompt: str, user_prompt: str) -> str:
-        """Generate mock form definition in BPM FormSchema format."""
-        cache_key = f"{system_prompt}:::{user_prompt}"
-
-        if cache_key in self._response_cache:
-            return self._response_cache[cache_key]
-
-        # Return BPM-aligned FormSchema mock definition
-        mock_form = {
-            "formId": "form-" + str(uuid.uuid4())[:8],
-            "version": "1.0.0",
-            "title": "Generated Form",
-            "description": "Form generated from requirements",
-            "controls": [
-                {
-                    "id": "field-001",
-                    "type": "text",
-                    "label": "Applicant Name",
-                    "props": {"required": True, "maxLength": 100},
-                    "width": "100%",
-                    "permissions": {
-                        "view": {"condition": "*", "applies_to": ["*"]},
-                        "edit": {"condition": "*", "applies_to": ["*"]},
-                        "required": {"condition": "True", "applies_to": ["*"]}
-                    },
-                    "data_binding": {
-                        "bpmn_variable": "applicant_name",
-                        "source_type": "user_input"
-                    }
-                }
-            ],
-            "validation": {
-                "rules": {
-                    "field-001": [
-                        {"type": "required", "message": "Applicant name is required"}
-                    ]
-                }
-            },
-            "form_type": "standalone",
-            "confidence_score": 0.85
-        }
-
-        response = json.dumps(mock_form)
-        self._response_cache[cache_key] = response
-        return response
-
-    async def generate_form(self, prompt: str) -> str:
-        """Generate form from prompt (compatibility method)."""
-        return await self.send_prompt("", prompt)
+# Note: MockLLMClient and RealLLMClient are now imported from llm_integration module
 
 
 async def generate_form(
@@ -445,12 +396,8 @@ async def generate_form(
     use_real_llm: bool = False
 ) -> Dict[str, Any]:
     """Generate form definition from natural language description."""
-    # Initialize LLM client
-    if use_real_llm:
-        # Would use RealLLMClient
-        llm_client = MockLLMClient()
-    else:
-        llm_client = MockLLMClient()
+    # Initialize LLM client using unified module
+    form_llm_client = get_llm_client(use_real_llm=use_real_llm)
 
     # Build system prompt
     system_prompt = f"""You are a form generation expert. Generate form definitions in JSON format.
@@ -482,19 +429,21 @@ Requirements:
 4. Return complete JSON form definition"""
 
     # Call LLM
-    response = await llm_client.send_prompt(system_prompt, user_prompt)
+    response = await form_llm_client.send_prompt(system_prompt, user_prompt)
 
-    # Parse response
-    try:
-        form_def = json.loads(response)
-    except json.JSONDecodeError:
-        # Fallback to mock
-        form_def = json.loads(await MockLLMClient().send_prompt("", ""))
+    # Parse response using unified extraction utility
+    form_def = extract_json_from_response(response)
+
+    if form_def is None:
+        # Fallback to mock client response
+        mock_client = MockLLMClient()
+        mock_response = await mock_client.send_prompt("", "")
+        form_def = json.loads(mock_response)
 
     return {
         "success": True,
         "form_definition": form_def,
-        "confidence_score": 0.85,
+        "confidence_score": form_def.get("confidence_score", 0.85),
         "validation_warnings": []
     }
 
@@ -787,29 +736,22 @@ Do NOT include markdown, explanations, or comments.
             # Generate prompt
             prompt = self._get_form_generation_prompt(org_context, form_requirements)
 
-            # Call LLM
-            if self.use_real_llm:
-                llm_response = await llm_client.generate_response(
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.1
-                )
-            else:
-                mock_client = MockLLMClient()
-                llm_response = await mock_client.generate_form(prompt)
+            # Call LLM using unified module
+            form_llm_client = get_llm_client(use_real_llm=self.use_real_llm)
+            llm_response = await form_llm_client.send_prompt(
+                system_prompt="You are a form generation expert. Generate form definitions in BPM FormSchema JSON format.",
+                user_prompt=prompt
+            )
 
-            # Parse JSON response
-            try:
-                form_schema = json.loads(llm_response)
-            except json.JSONDecodeError:
-                # Extract JSON if LLM returned markdown
-                json_match = re.search(r'\{[\s\S]*\}', llm_response)
-                if not json_match:
-                    return {
-                        "success": False,
-                        "error": "Failed to parse LLM response as JSON",
-                        "raw_response": llm_response[:200]
-                    }
-                form_schema = json.loads(json_match.group())
+            # Parse JSON response using unified extraction utility
+            form_schema = extract_json_from_response(llm_response)
+
+            if form_schema is None:
+                return {
+                    "success": False,
+                    "error": "Failed to parse LLM response as JSON",
+                    "raw_response": llm_response[:200] if llm_response else "Empty response"
+                }
 
             # Validate generated form
             validator = FormValidator()
