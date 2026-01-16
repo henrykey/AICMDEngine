@@ -323,8 +323,9 @@ async function generateAIResponse(
         if (generatedContent.type === 'bpmn') {
           generatedContent.preview = 'Generated workflow process';
         } else if (generatedContent.type === 'form') {
-          const controlCount = generatedContent.formDefinition?.controls?.length || 0;
-          generatedContent.preview = `Form with ${controlCount} fields`;
+          // Handle both 'controls' (legacy) and 'fields' (current) property names
+          const fieldCount = generatedContent.formDefinition?.fields?.length || generatedContent.formDefinition?.controls?.length || 0;
+          generatedContent.preview = `Form with ${fieldCount} fields`;
         }
       }
     }

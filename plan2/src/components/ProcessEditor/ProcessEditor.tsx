@@ -62,7 +62,6 @@ const ProcessEditor: React.FC<ProcessEditorProps> = ({
     // Initialize BPMN modeler
     const modeler = new BpmnModeler({
       container: containerRef.current,
-      keyboard: { bindTo: document },
     });
 
     modelerRef.current = modeler;
