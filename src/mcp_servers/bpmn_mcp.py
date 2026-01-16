@@ -265,30 +265,16 @@ class BPMNValidator:
 
         # Preprocess: Ensure XML has required namespaces
         if 'xmlns:bpmndi' not in bpmn_xml:
-            # Check if diagram elements are present but namespaces are missing
-            has_diagram_elements = '<bpmndi:' in bpmn_xml or '<dc:' in bpmn_xml or '<di:' in bpmn_xml
-
-            if has_diagram_elements:
-                # Use regex to be more flexible with existing attributes
-                import re
-                original_xml = bpmn_xml
-                bpmn_xml = re.sub(
-                    r'<bpmn:definitions\s+',
-                    '<bpmn:definitions xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" '
-                    'xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" '
-                    'xmlns:di="http://www.omg.org/spec/DD/20100524/DI" ',
-                    bpmn_xml,
-                    count=1
-                )
-                # If nothing changed, try simple string replacement
-                if bpmn_xml == original_xml:
-                    bpmn_xml = bpmn_xml.replace(
-                        '<bpmn:definitions ',
-                        '<bpmn:definitions xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" '
-                        'xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" '
-                        'xmlns:di="http://www.omg.org/spec/DD/20100524/DI" ',
-                        1
-                    )
+            import re
+            # Add namespaces to the definitions element
+            bpmn_xml = re.sub(
+                r'<bpmn:definitions([^>]*)>',
+                lambda m: (f'<bpmn:definitions xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" '
+                          f'xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" '
+                          f'xmlns:di="http://www.omg.org/spec/DD/20100524/DI"{m.group(1)}>'),
+                bpmn_xml,
+                count=1
+            )
 
         # Step 1: Parse XML
         try:
@@ -684,18 +670,15 @@ You must understand and apply these 5 executor assignment patterns:
    - Use for automated workflows
 
 BPMN STRUCTURE:
-- Generate valid XML with ALL required BPMN namespaces:
+- Generate valid XML with required BPMN namespace only:
   xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
-  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
-  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
-  xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
 - Include startEvent, endEvent, and task elements
 - Use sequenceFlow for connections
 - Add bpmn:documentation elements with executor pattern JSON
+- Do NOT include bpmndi or diagram interchange elements - they will be auto-generated
 
 OUTPUT FORMAT:
 Return ONLY the XML, nothing else. No explanation, no markdown, just raw BPMN XML.
-CRITICAL: Always include all namespace declarations on the <bpmn:definitions> root element.
 
 Each user task must include documentation with executor pattern configuration:
 ```json
