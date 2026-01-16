@@ -95,8 +95,20 @@ class BaseMCPServer(ABC):
 
         tool = self.tools[tool_name]
         try:
-            logger.debug(f"Executing tool '{tool_name}' in MCP '{self.name}' with params: {kwargs}")
-            result = await tool.handler(**kwargs)
+            # Filter out non-tool parameters (headers, etc.)
+            # Only pass parameters that are in the tool's input schema
+            filtered_kwargs = {}
+            if tool.input_schema and "properties" in tool.input_schema:
+                valid_params = set(tool.input_schema["properties"].keys())
+                for key, value in kwargs.items():
+                    if key in valid_params:
+                        filtered_kwargs[key] = value
+            else:
+                # If no input schema, pass all kwargs
+                filtered_kwargs = kwargs
+
+            logger.debug(f"Executing tool '{tool_name}' in MCP '{self.name}' with params: {filtered_kwargs}")
+            result = await tool.handler(**filtered_kwargs)
             return result
         except TypeError as e:
             error_msg = f"Invalid parameters for tool '{tool_name}': {str(e)}"
