@@ -22,7 +22,7 @@ class TestMembershipMCPServer:
         assert self.mcp.name == "membership"
         assert self.mcp.version == "2.0"
         assert self.mcp.tenant_id == 1
-        assert len(self.mcp.get_tools()) == 7
+        assert len(self.mcp.get_tools()) == 15
 
     async def test_list_members_tool_registered(self):
         """Test that list_members tool is registered."""
@@ -216,7 +216,7 @@ class TestMembershipMCPServer:
         info = self.mcp.get_info()
         assert info["name"] == "membership"
         assert info["version"] == "2.0"
-        assert len(info["tools"]) == 7
+        assert len(info["tools"]) == 15
 
     async def test_auth_token_in_headers(self):
         """Test that auth token is included in headers."""
@@ -230,6 +230,59 @@ class TestMembershipMCPServer:
         """Test that tenant ID is included in headers."""
         headers = self.mcp._get_headers()
         assert headers["X-Tenant-ID"] == "1"
+
+    @patch('src.services.http_client.HTTPClient.execute')
+    async def test_auth_token_passed_as_parameter(self, mock_execute):
+        """Test that auth_token passed as parameter overrides instance default (simulates frontend flow)."""
+        mock_execute.return_value = {"members": []}
+
+        # Create MCP with default token
+        mcp_with_default = MembershipMCPServer(tenant_id=1, auth_token="default-token")
+
+        # Execute with different token passed as parameter (simulating frontend Playground execution)
+        result = await mcp_with_default.execute_tool(
+            "list_members",
+            page=1,
+            limit=10,
+            auth_token="frontend-token",  # Passed from frontend
+            tenant_id=2  # Passed from frontend
+        )
+
+        # Verify the passed parameters were used, not the defaults
+        assert result.is_error is False
+        mock_execute.assert_called_once()
+        call_kwargs = mock_execute.call_args.kwargs
+
+        # The passed auth_token should override the default
+        assert call_kwargs.get('auth_token') == "frontend-token"
+        assert call_kwargs.get('tenant_id') == 2
+
+    @patch('src.services.http_client.HTTPClient.execute')
+    async def test_list_members_with_frontend_token_flow(self, mock_execute):
+        """Test complete frontend flow: execute_tool with passed auth_token and tenant_id."""
+        mock_execute.return_value = {
+            "members": [
+                {"id": "1", "username": "user1", "email": "user1@example.com"},
+                {"id": "2", "username": "user2", "email": "user2@example.com"}
+            ]
+        }
+
+        # Simulate frontend sending token via execute_tool parameters
+        result = await self.mcp.execute_tool(
+            "list_members",
+            page=1,
+            limit=10,
+            auth_token="frontend-access-token",
+            tenant_id=2
+        )
+
+        assert result.is_error is False
+        assert "2 members" in result.content
+
+        # Verify token was actually used
+        call_kwargs = mock_execute.call_args.kwargs
+        assert call_kwargs.get('auth_token') == "frontend-access-token"
+        assert call_kwargs.get('tenant_id') == 2
 
 
 if __name__ == "__main__":

@@ -32,80 +32,45 @@ class GenerateResponse(BaseModel):
 
 async def get_org_context(mcp_registry: Optional[MCPRegistry] = None) -> Dict[str, Any]:
     """
-    Get organizational context from Membership MCP service.
+    Get organizational context for form/workflow generation.
 
-    Fetches real organizational structure (departments, roles, members) from Membership service.
-    Falls back to mock data if Membership MCP is not available.
+    Returns mock organizational data for use in form and workflow generation.
+    This provides default departments, roles, and members for selection in the UI.
 
     Args:
-        mcp_registry: Optional MCPRegistry instance. If not provided, uses mock data.
+        mcp_registry: Optional MCPRegistry instance (currently unused, reserved for future real integration)
 
     Returns:
         Dictionary with departments, roles, and members
     """
-    # Mock fallback data - used when Membership MCP is not available
-    mock_org_context = {
+    # Default organizational context data for form/workflow generation
+    org_context = {
         "departments": [
             {"id": "dept_001", "name": "Finance"},
             {"id": "dept_002", "name": "HR"},
             {"id": "dept_003", "name": "Engineering"},
+            {"id": "dept_004", "name": "Sales"},
+            {"id": "dept_005", "name": "Marketing"},
         ],
         "roles": [
             {"id": "role_001", "name": "employee"},
             {"id": "role_002", "name": "manager"},
             {"id": "role_003", "name": "approver"},
             {"id": "role_004", "name": "finance_approver"},
+            {"id": "role_005", "name": "hr_admin"},
+            {"id": "role_006", "name": "admin"},
         ],
         "members": [
-            {"id": "user_001", "name": "Alice", "roles": ["employee"]},
-            {"id": "user_002", "name": "Bob", "roles": ["manager"]},
-            {"id": "user_003", "name": "Charlie", "roles": ["approver"]},
+            {"id": "user_001", "name": "Alice Johnson", "email": "alice@company.com", "roles": ["employee"]},
+            {"id": "user_002", "name": "Bob Smith", "email": "bob@company.com", "roles": ["manager"]},
+            {"id": "user_003", "name": "Charlie Brown", "email": "charlie@company.com", "roles": ["approver"]},
+            {"id": "user_004", "name": "Diana Prince", "email": "diana@company.com", "roles": ["finance_approver"]},
+            {"id": "user_005", "name": "Eve Wilson", "email": "eve@company.com", "roles": ["hr_admin"]},
         ],
     }
 
-    if not mcp_registry:
-        logger.debug("No MCP registry provided, using mock org context")
-        return mock_org_context
-
-    try:
-        # Try to get real org data from Membership MCP
-        org_context = {"departments": [], "roles": [], "members": []}
-
-        # Get organizations (departments)
-        orgs_result = await mcp_registry.execute_command("membership", "list_orgs", limit=100)
-        if orgs_result.success:
-            orgs_data = orgs_result.data.get("data", [])
-            org_context["departments"] = [
-                {"id": org.get("id"), "name": org.get("name"), "type": org.get("type")}
-                for org in orgs_data
-            ]
-            logger.debug(f"Fetched {len(org_context['departments'])} departments from Membership")
-
-        # Get roles
-        roles_result = await mcp_registry.execute_command("membership", "list_roles", limit=100)
-        if roles_result.success:
-            roles_data = roles_result.data.get("roles", [])
-            org_context["roles"] = [
-                {"id": role.get("id"), "name": role.get("name")}
-                for role in roles_data
-            ]
-            logger.debug(f"Fetched {len(org_context['roles'])} roles from Membership")
-
-        # Get members
-        members_result = await mcp_registry.execute_command("membership", "list_members", limit=100)
-        if members_result.success:
-            members_data = members_result.data.get("members", [])
-            org_context["members"] = [
-                {"id": member.get("id"), "name": member.get("username"), "email": member.get("email")}
-                for member in members_data
-            ]
-            logger.debug(f"Fetched {len(org_context['members'])} members from Membership")
-
-        return org_context
-
-    except Exception as e:
-        logger.warning(f"Failed to fetch org context from Membership MCP: {e}, using mock data")
-        return mock_org_context
+    logger.debug("Returning default organizational context for form/workflow generation")
+    return org_context
 
 
 def normalize_form_definition(form_def: Dict[str, Any]) -> Dict[str, Any]:

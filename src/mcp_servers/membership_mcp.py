@@ -60,6 +60,14 @@ class MembershipMCPServer(BaseMCPServer):
                     "search": {
                         "type": "string",
                         "description": "Search query (optional)"
+                    },
+                    "auth_token": {
+                        "type": "string",
+                        "description": "Authentication token (optional, will use default if not provided)"
+                    },
+                    "tenant_id": {
+                        "type": "integer",
+                        "description": "Tenant ID (optional, will use default if not provided)"
                     }
                 }
             },
@@ -76,6 +84,14 @@ class MembershipMCPServer(BaseMCPServer):
                     "member_id": {
                         "type": "string",
                         "description": "Member ID"
+                    },
+                    "auth_token": {
+                        "type": "string",
+                        "description": "Authentication token (optional, will use default if not provided)"
+                    },
+                    "tenant_id": {
+                        "type": "integer",
+                        "description": "Tenant ID (optional, will use default if not provided)"
                     }
                 },
                 "required": ["member_id"]
@@ -106,6 +122,14 @@ class MembershipMCPServer(BaseMCPServer):
                         "type": "boolean",
                         "description": "Whether this is a virtual user",
                         "default": True
+                    },
+                    "auth_token": {
+                        "type": "string",
+                        "description": "Authentication token (optional, will use default if not provided)"
+                    },
+                    "tenant_id": {
+                        "type": "integer",
+                        "description": "Tenant ID (optional, will use default if not provided)"
                     }
                 },
                 "required": ["username", "email"]
@@ -135,6 +159,14 @@ class MembershipMCPServer(BaseMCPServer):
                     "is_virtual": {
                         "type": "boolean",
                         "description": "Update virtual status (optional)"
+                    },
+                    "auth_token": {
+                        "type": "string",
+                        "description": "Authentication token (optional, will use default if not provided)"
+                    },
+                    "tenant_id": {
+                        "type": "integer",
+                        "description": "Tenant ID (optional, will use default if not provided)"
                     }
                 },
                 "required": ["member_id"]
@@ -152,6 +184,14 @@ class MembershipMCPServer(BaseMCPServer):
                     "member_id": {
                         "type": "string",
                         "description": "Member ID"
+                    },
+                    "auth_token": {
+                        "type": "string",
+                        "description": "Authentication token (optional, will use default if not provided)"
+                    },
+                    "tenant_id": {
+                        "type": "integer",
+                        "description": "Tenant ID (optional, will use default if not provided)"
                     }
                 },
                 "required": ["member_id"]
@@ -175,6 +215,14 @@ class MembershipMCPServer(BaseMCPServer):
                         "type": "integer",
                         "description": "Items per page",
                         "default": 10
+                    },
+                    "auth_token": {
+                        "type": "string",
+                        "description": "Authentication token (optional, will use default if not provided)"
+                    },
+                    "tenant_id": {
+                        "type": "integer",
+                        "description": "Tenant ID (optional, will use default if not provided)"
                     }
                 }
             },
@@ -195,6 +243,14 @@ class MembershipMCPServer(BaseMCPServer):
                     "role_id": {
                         "type": "string",
                         "description": "Role ID"
+                    },
+                    "auth_token": {
+                        "type": "string",
+                        "description": "Authentication token (optional, will use default if not provided)"
+                    },
+                    "tenant_id": {
+                        "type": "integer",
+                        "description": "Tenant ID (optional, will use default if not provided)"
                     }
                 },
                 "required": ["member_id", "role_id"]
@@ -218,6 +274,14 @@ class MembershipMCPServer(BaseMCPServer):
                         "type": "integer",
                         "description": "Number of items per page",
                         "default": 10
+                    },
+                    "auth_token": {
+                        "type": "string",
+                        "description": "Authentication token (optional, will use default if not provided)"
+                    },
+                    "tenant_id": {
+                        "type": "integer",
+                        "description": "Tenant ID (optional, will use default if not provided)"
                     }
                 }
             },
@@ -234,6 +298,14 @@ class MembershipMCPServer(BaseMCPServer):
                     "org_id": {
                         "type": "string",
                         "description": "Organization unit ID"
+                    },
+                    "auth_token": {
+                        "type": "string",
+                        "description": "Authentication token (optional, will use default if not provided)"
+                    },
+                    "tenant_id": {
+                        "type": "integer",
+                        "description": "Tenant ID (optional, will use default if not provided)"
                     }
                 },
                 "required": ["org_id"]
@@ -270,6 +342,14 @@ class MembershipMCPServer(BaseMCPServer):
                         "type": "string",
                         "format": "date-time",
                         "description": "Expiration date for temporary units (optional)"
+                    },
+                    "auth_token": {
+                        "type": "string",
+                        "description": "Authentication token (optional, will use default if not provided)"
+                    },
+                    "tenant_id": {
+                        "type": "integer",
+                        "description": "Tenant ID (optional, will use default if not provided)"
                     }
                 },
                 "required": ["name", "type"]
@@ -304,6 +384,14 @@ class MembershipMCPServer(BaseMCPServer):
                         "type": "string",
                         "format": "date-time",
                         "description": "Update expiration date (optional)"
+                    },
+                    "auth_token": {
+                        "type": "string",
+                        "description": "Authentication token (optional, will use default if not provided)"
+                    },
+                    "tenant_id": {
+                        "type": "integer",
+                        "description": "Tenant ID (optional, will use default if not provided)"
                     }
                 },
                 "required": ["org_id"]
@@ -321,6 +409,14 @@ class MembershipMCPServer(BaseMCPServer):
                     "org_id": {
                         "type": "string",
                         "description": "Organization unit ID"
+                    },
+                    "auth_token": {
+                        "type": "string",
+                        "description": "Authentication token (optional, will use default if not provided)"
+                    },
+                    "tenant_id": {
+                        "type": "integer",
+                        "description": "Tenant ID (optional, will use default if not provided)"
                     }
                 },
                 "required": ["org_id"]
@@ -342,6 +438,14 @@ class MembershipMCPServer(BaseMCPServer):
                     "org_id": {
                         "type": "string",
                         "description": "Organization unit ID"
+                    },
+                    "auth_token": {
+                        "type": "string",
+                        "description": "Authentication token (optional, will use default if not provided)"
+                    },
+                    "tenant_id": {
+                        "type": "integer",
+                        "description": "Tenant ID (optional, will use default if not provided)"
                     }
                 },
                 "required": ["member_id", "org_id"]
@@ -359,6 +463,14 @@ class MembershipMCPServer(BaseMCPServer):
                     "member_id": {
                         "type": "string",
                         "description": "Member ID"
+                    },
+                    "auth_token": {
+                        "type": "string",
+                        "description": "Authentication token (optional, will use default if not provided)"
+                    },
+                    "tenant_id": {
+                        "type": "integer",
+                        "description": "Tenant ID (optional, will use default if not provided)"
                     }
                 },
                 "required": ["member_id"]
@@ -380,6 +492,14 @@ class MembershipMCPServer(BaseMCPServer):
                     "org_id": {
                         "type": "string",
                         "description": "Organization unit ID"
+                    },
+                    "auth_token": {
+                        "type": "string",
+                        "description": "Authentication token (optional, will use default if not provided)"
+                    },
+                    "tenant_id": {
+                        "type": "integer",
+                        "description": "Tenant ID (optional, will use default if not provided)"
                     }
                 },
                 "required": ["member_id", "org_id"]
@@ -391,23 +511,26 @@ class MembershipMCPServer(BaseMCPServer):
         self,
         page: int = 1,
         limit: int = 10,
-        search: Optional[str] = None
+        search: Optional[str] = None,
+        auth_token: Optional[str] = None,
+        tenant_id: Optional[int] = None
     ) -> ToolResult:
         """List members."""
         try:
             params = {
-                "page": max(1, page),
-                "limit": max(1, min(100, limit))
+                "query": {
+                    "page": max(1, page),
+                    "limit": max(1, min(100, limit))
+                }
             }
             if search:
-                params["search"] = search
+                params["query"]["search"] = search
 
-            headers = self._get_headers()
             response = await self.http_client.execute(
-                method="GET",
-                url="/v2/members",
+                command="GET /v2/members",
                 params=params,
-                headers=headers
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id
             )
 
             count = len(response.get("members", []))
@@ -422,14 +545,19 @@ class MembershipMCPServer(BaseMCPServer):
                 error_code="LIST_MEMBERS_FAILED"
             )
 
-    async def get_member(self, member_id: str) -> ToolResult:
+    async def get_member(self, member_id: str, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
         """Get member details."""
         try:
-            headers = self._get_headers()
+            params = {
+                "path": {
+                    "member_id": member_id
+                }
+            }
             response = await self.http_client.execute(
-                method="GET",
-                url=f"/v2/members/{member_id}",
-                headers=headers
+                command="GET /v2/members/{member_id}",
+                params=params,
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id
             )
 
             return ToolResult.success(
@@ -448,7 +576,9 @@ class MembershipMCPServer(BaseMCPServer):
         username: str,
         email: str,
         password: Optional[str] = None,
-        is_virtual: bool = True
+        is_virtual: bool = True,
+        auth_token: Optional[str] = None,
+        tenant_id: Optional[int] = None
     ) -> ToolResult:
         """Create a new member."""
         try:
@@ -460,12 +590,14 @@ class MembershipMCPServer(BaseMCPServer):
             if password:
                 payload["password"] = password
 
-            headers = self._get_headers()
+            params = {
+                "body": payload
+            }
             response = await self.http_client.execute(
-                method="POST",
-                url="/v2/members",
-                json=payload,
-                headers=headers
+                command="POST /v2/members",
+                params=params,
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id
             )
 
             return ToolResult.success(
@@ -484,7 +616,9 @@ class MembershipMCPServer(BaseMCPServer):
         member_id: str,
         username: Optional[str] = None,
         email: Optional[str] = None,
-        is_virtual: Optional[bool] = None
+        is_virtual: Optional[bool] = None,
+        auth_token: Optional[str] = None,
+        tenant_id: Optional[int] = None
     ) -> ToolResult:
         """Update member information."""
         try:
@@ -502,12 +636,17 @@ class MembershipMCPServer(BaseMCPServer):
                     error_code="INVALID_UPDATE"
                 )
 
-            headers = self._get_headers()
+            params = {
+                "path": {
+                    "member_id": member_id
+                },
+                "body": payload
+            }
             response = await self.http_client.execute(
-                method="PUT",
-                url=f"/v2/members/{member_id}",
-                json=payload,
-                headers=headers
+                command="PUT /v2/members/{member_id}",
+                params=params,
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id
             )
 
             return ToolResult.success(
@@ -521,14 +660,19 @@ class MembershipMCPServer(BaseMCPServer):
                 error_code="UPDATE_MEMBER_FAILED"
             )
 
-    async def delete_member(self, member_id: str) -> ToolResult:
+    async def delete_member(self, member_id: str, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
         """Delete a member."""
         try:
-            headers = self._get_headers()
+            params = {
+                "path": {
+                    "member_id": member_id
+                }
+            }
             response = await self.http_client.execute(
-                method="DELETE",
-                url=f"/v2/members/{member_id}",
-                headers=headers
+                command="DELETE /v2/members/{member_id}",
+                params=params,
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id
             )
 
             return ToolResult.success(
@@ -542,19 +686,20 @@ class MembershipMCPServer(BaseMCPServer):
                 error_code="DELETE_MEMBER_FAILED"
             )
 
-    async def list_roles(self, page: int = 1, limit: int = 10) -> ToolResult:
+    async def list_roles(self, page: int = 1, limit: int = 10, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
         """List available roles."""
         try:
             params = {
-                "page": max(1, page),
-                "limit": max(1, min(100, limit))
+                "query": {
+                    "page": max(1, page),
+                    "limit": max(1, min(100, limit))
+                }
             }
-            headers = self._get_headers()
             response = await self.http_client.execute(
-                method="GET",
-                url="/v2/roles",
+                command="GET /v2/roles",
                 params=params,
-                headers=headers
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id
             )
 
             count = len(response.get("roles", []))
@@ -569,16 +714,21 @@ class MembershipMCPServer(BaseMCPServer):
                 error_code="LIST_ROLES_FAILED"
             )
 
-    async def assign_role(self, member_id: str, role_id: str) -> ToolResult:
+    async def assign_role(self, member_id: str, role_id: str, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
         """Assign a role to a member."""
         try:
             payload = {"role_id": role_id}
-            headers = self._get_headers()
+            params = {
+                "path": {
+                    "member_id": member_id
+                },
+                "body": payload
+            }
             response = await self.http_client.execute(
-                method="POST",
-                url=f"/v2/members/{member_id}/roles",
-                json=payload,
-                headers=headers
+                command="POST /v2/members/{member_id}/roles",
+                params=params,
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id
             )
 
             return ToolResult.success(
@@ -592,19 +742,20 @@ class MembershipMCPServer(BaseMCPServer):
                 error_code="ASSIGN_ROLE_FAILED"
             )
 
-    async def list_orgs(self, page: int = 1, limit: int = 10) -> ToolResult:
+    async def list_orgs(self, page: int = 1, limit: int = 10, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
         """List all organization units."""
         try:
             params = {
-                "page": max(1, page),
-                "limit": max(1, min(100, limit))
+                "query": {
+                    "page": max(1, page),
+                    "limit": max(1, min(100, limit))
+                }
             }
-            headers = self._get_headers()
             response = await self.http_client.execute(
-                method="GET",
-                url="/v2/orgs",
+                command="GET /v2/orgs",
                 params=params,
-                headers=headers
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id
             )
 
             count = len(response.get("data", []))
@@ -619,14 +770,19 @@ class MembershipMCPServer(BaseMCPServer):
                 error_code="LIST_ORGS_FAILED"
             )
 
-    async def get_org(self, org_id: str) -> ToolResult:
+    async def get_org(self, org_id: str, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
         """Get organization unit details."""
         try:
-            headers = self._get_headers()
+            params = {
+                "path": {
+                    "org_id": org_id
+                }
+            }
             response = await self.http_client.execute(
-                method="GET",
-                url=f"/v2/orgs/{org_id}",
-                headers=headers
+                command="GET /v2/orgs/{org_id}",
+                params=params,
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id
             )
 
             return ToolResult.success(
@@ -646,7 +802,9 @@ class MembershipMCPServer(BaseMCPServer):
         type: str,
         description: Optional[str] = None,
         is_temporary: bool = False,
-        valid_until: Optional[str] = None
+        valid_until: Optional[str] = None,
+        auth_token: Optional[str] = None,
+        tenant_id: Optional[int] = None
     ) -> ToolResult:
         """Create a new organization unit."""
         try:
@@ -660,12 +818,14 @@ class MembershipMCPServer(BaseMCPServer):
             if valid_until:
                 payload["validUntil"] = valid_until
 
-            headers = self._get_headers()
+            params = {
+                "body": payload
+            }
             response = await self.http_client.execute(
-                method="POST",
-                url="/v2/orgs",
-                json=payload,
-                headers=headers
+                command="POST /v2/orgs",
+                params=params,
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id
             )
 
             return ToolResult.success(
@@ -685,7 +845,9 @@ class MembershipMCPServer(BaseMCPServer):
         name: Optional[str] = None,
         description: Optional[str] = None,
         is_temporary: Optional[bool] = None,
-        valid_until: Optional[str] = None
+        valid_until: Optional[str] = None,
+        auth_token: Optional[str] = None,
+        tenant_id: Optional[int] = None
     ) -> ToolResult:
         """Update an organization unit."""
         try:
@@ -705,12 +867,17 @@ class MembershipMCPServer(BaseMCPServer):
                     error_code="INVALID_UPDATE"
                 )
 
-            headers = self._get_headers()
+            params = {
+                "path": {
+                    "org_id": org_id
+                },
+                "body": payload
+            }
             response = await self.http_client.execute(
-                method="PATCH",
-                url=f"/v2/orgs/{org_id}",
-                json=payload,
-                headers=headers
+                command="PATCH /v2/orgs/{org_id}",
+                params=params,
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id
             )
 
             return ToolResult.success(
@@ -724,14 +891,19 @@ class MembershipMCPServer(BaseMCPServer):
                 error_code="UPDATE_ORG_FAILED"
             )
 
-    async def delete_org(self, org_id: str) -> ToolResult:
+    async def delete_org(self, org_id: str, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
         """Delete/archive an organization unit."""
         try:
-            headers = self._get_headers()
+            params = {
+                "path": {
+                    "org_id": org_id
+                }
+            }
             response = await self.http_client.execute(
-                method="DELETE",
-                url=f"/v2/orgs/{org_id}",
-                headers=headers
+                command="DELETE /v2/orgs/{org_id}",
+                params=params,
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id
             )
 
             return ToolResult.success(
@@ -745,16 +917,21 @@ class MembershipMCPServer(BaseMCPServer):
                 error_code="DELETE_ORG_FAILED"
             )
 
-    async def assign_member_to_org(self, member_id: str, org_id: str) -> ToolResult:
+    async def assign_member_to_org(self, member_id: str, org_id: str, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
         """Assign a member to an organization unit."""
         try:
             payload = {"org_id": org_id}
-            headers = self._get_headers()
+            params = {
+                "path": {
+                    "member_id": member_id
+                },
+                "body": payload
+            }
             response = await self.http_client.execute(
-                method="POST",
-                url=f"/v2/members/{member_id}/orgs",
-                json=payload,
-                headers=headers
+                command="POST /v2/members/{member_id}/orgs",
+                params=params,
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id
             )
 
             return ToolResult.success(
@@ -768,14 +945,19 @@ class MembershipMCPServer(BaseMCPServer):
                 error_code="ASSIGN_MEMBER_TO_ORG_FAILED"
             )
 
-    async def get_member_orgs(self, member_id: str) -> ToolResult:
+    async def get_member_orgs(self, member_id: str, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
         """Get all organizations a member belongs to."""
         try:
-            headers = self._get_headers()
+            params = {
+                "path": {
+                    "member_id": member_id
+                }
+            }
             response = await self.http_client.execute(
-                method="GET",
-                url=f"/v2/members/{member_id}/orgs",
-                headers=headers
+                command="GET /v2/members/{member_id}/orgs",
+                params=params,
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id
             )
 
             count = len(response.get("data", []))
@@ -790,14 +972,20 @@ class MembershipMCPServer(BaseMCPServer):
                 error_code="GET_MEMBER_ORGS_FAILED"
             )
 
-    async def remove_member_from_org(self, member_id: str, org_id: str) -> ToolResult:
+    async def remove_member_from_org(self, member_id: str, org_id: str, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
         """Remove a member from an organization unit."""
         try:
-            headers = self._get_headers()
+            params = {
+                "path": {
+                    "member_id": member_id,
+                    "org_id": org_id
+                }
+            }
             response = await self.http_client.execute(
-                method="DELETE",
-                url=f"/v2/members/{member_id}/orgs/{org_id}",
-                headers=headers
+                command="DELETE /v2/members/{member_id}/orgs/{org_id}",
+                params=params,
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id
             )
 
             return ToolResult.success(

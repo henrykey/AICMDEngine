@@ -382,10 +382,16 @@ class ExecutionEngine:
                 if mcp_name and tool_name:
                     # 使用 MCP 执行命令
                     logger.info(f"Executing MCP command: {mcp_name}.{tool_name}")
+                    # Add auth_token and tenant_id to MCP command execution
+                    mcp_params = {
+                        **resolved_params,
+                        "auth_token": auth_token,
+                        "tenant_id": tenant_id
+                    }
                     result = await self.mcp_registry.execute_command(
                         mcp_name=mcp_name,
                         tool_name=tool_name,
-                        **resolved_params
+                        **mcp_params
                     )
 
                     if result.is_error:
@@ -393,7 +399,7 @@ class ExecutionEngine:
                         logger.error(error_msg)
                         raise ValueError(error_msg)
 
-                    response_data = result.content if result.content else result.data
+                    response_data = result.data if result.data else result.content
                     if response_data is None:
                         response_data = {"success": True}
 
