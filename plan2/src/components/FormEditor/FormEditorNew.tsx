@@ -41,6 +41,13 @@ const FormEditorNew: React.FC<FormEditorNewProps> = ({
   const [paletteCollapsed, setPaletteCollapsed] = useState(false);
   const [activeCategory, setActiveCategory] = useState<ControlCategory>('basic');
 
+  // Normalize form definition to use 'controls' property
+  // Handle both 'controls' and 'fields' for backward compatibility
+  const normalizedFormDef = {
+    ...formDefinition,
+    controls: formDefinition.controls || (formDefinition as any).fields || [],
+  };
+
   // Add control to form
   const handleAddControl = (type: ControlType) => {
     if (readOnly) return;
@@ -57,8 +64,8 @@ const FormEditorNew: React.FC<FormEditorNewProps> = ({
     };
 
     onFormChange({
-      ...formDefinition,
-      controls: [...formDefinition.controls, newControl],
+      ...normalizedFormDef,
+      controls: [...normalizedFormDef.controls, newControl],
     });
   };
 
@@ -67,8 +74,8 @@ const FormEditorNew: React.FC<FormEditorNewProps> = ({
     if (readOnly) return;
 
     onFormChange({
-      ...formDefinition,
-      controls: formDefinition.controls.filter(c => c.id !== controlId),
+      ...normalizedFormDef,
+      controls: normalizedFormDef.controls.filter(c => c.id !== controlId),
     });
 
     if (selectedControl?.id === controlId) {
@@ -80,17 +87,17 @@ const FormEditorNew: React.FC<FormEditorNewProps> = ({
   const handleMoveControl = (controlId: string, direction: 'up' | 'down') => {
     if (readOnly) return;
 
-    const index = formDefinition.controls.findIndex(c => c.id === controlId);
+    const index = normalizedFormDef.controls.findIndex(c => c.id === controlId);
     if (index === -1) return;
 
     const newIndex = direction === 'up' ? index - 1 : index + 1;
-    if (newIndex < 0 || newIndex >= formDefinition.controls.length) return;
+    if (newIndex < 0 || newIndex >= normalizedFormDef.controls.length) return;
 
-    const newControls = [...formDefinition.controls];
+    const newControls = [...normalizedFormDef.controls];
     [newControls[index], newControls[newIndex]] = [newControls[newIndex], newControls[index]];
 
     onFormChange({
-      ...formDefinition,
+      ...normalizedFormDef,
       controls: newControls,
     });
   };
@@ -98,7 +105,7 @@ const FormEditorNew: React.FC<FormEditorNewProps> = ({
   // Update form title
   const handleTitleChange = (title: string) => {
     onFormChange({
-      ...formDefinition,
+      ...normalizedFormDef,
       title,
     });
   };
@@ -193,20 +200,20 @@ const FormEditorNew: React.FC<FormEditorNewProps> = ({
         <div className="p-4 bg-white border-b border-gray-200">
           <input
             type="text"
-            value={formDefinition.title}
+            value={normalizedFormDef.title}
             onChange={(e) => handleTitleChange(e.target.value)}
             className="text-xl font-semibold text-gray-800 bg-transparent border-none outline-none focus:ring-0 w-full"
             placeholder="Form Title"
             disabled={readOnly}
           />
-          {formDefinition.description && (
-            <p className="text-sm text-gray-500 mt-1">{formDefinition.description}</p>
+          {normalizedFormDef.description && (
+            <p className="text-sm text-gray-500 mt-1">{normalizedFormDef.description}</p>
           )}
         </div>
 
         {/* Canvas Area */}
         <div className="flex-1 overflow-y-auto p-4">
-          {formDefinition.controls.length === 0 ? (
+          {normalizedFormDef.controls.length === 0 ? (
             <div className="h-full flex items-center justify-center">
               <div className="text-center text-gray-500">
                 <svg className="w-16 h-16 mx-auto mb-4 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -218,7 +225,7 @@ const FormEditorNew: React.FC<FormEditorNewProps> = ({
             </div>
           ) : (
             <div className="max-w-3xl mx-auto space-y-3">
-              {formDefinition.controls.map((control, index) => (
+              {normalizedFormDef.controls.map((control, index) => (
                 <ControlItem
                   key={control.id}
                   control={control}
@@ -228,7 +235,7 @@ const FormEditorNew: React.FC<FormEditorNewProps> = ({
                   onMoveUp={() => handleMoveControl(control.id, 'up')}
                   onMoveDown={() => handleMoveControl(control.id, 'down')}
                   isFirst={index === 0}
-                  isLast={index === formDefinition.controls.length - 1}
+                  isLast={index === normalizedFormDef.controls.length - 1}
                   readOnly={readOnly}
                 />
               ))}
@@ -238,8 +245,8 @@ const FormEditorNew: React.FC<FormEditorNewProps> = ({
 
         {/* Canvas Footer */}
         <div className="p-3 bg-white border-t border-gray-200 text-sm text-gray-500 flex items-center justify-between">
-          <span>{formDefinition.controls.length} controls</span>
-          <span>Form Type: {formDefinition.formType}</span>
+          <span>{normalizedFormDef.controls.length} controls</span>
+          <span>Form Type: {normalizedFormDef.formType}</span>
         </div>
       </div>
     </div>

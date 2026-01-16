@@ -5,8 +5,9 @@
  * Integrates with Membership MCP
  */
 
-import React, { useState, useEffect } from 'react';
-import { MembershipEntity, Department, Role, Member } from '../../types/workflow';
+import React, { useState } from 'react';
+import { MembershipEntity } from '../../types/workflow';
+import { useMembershipMCP } from '../../hooks/useMembershipMCP';
 
 interface MembershipSelectorModalProps {
   open: boolean;
@@ -32,53 +33,31 @@ const MembershipSelectorModal: React.FC<MembershipSelectorModalProps> = ({
   const [activeTab, setActiveTab] = useState<TabType>(allowedTypes[0]);
   const [searchQuery, setSearchQuery] = useState('');
   const [selected, setSelected] = useState<MembershipEntity[]>(initialSelection);
-  const [loading, setLoading] = useState(false);
 
-  // Mock data (will be replaced with MCP calls)
-  const [departments, setDepartments] = useState<Department[]>([]);
-  const [roles, setRoles] = useState<Role[]>([]);
-  const [members, setMembers] = useState<Member[]>([]);
+  // Use the real Membership MCP hook to fetch org data
+  const { orgContext, loading, error } = useMembershipMCP();
 
-  // Load data on open
-  useEffect(() => {
-    if (open) {
-      loadData();
-    }
-  }, [open]);
+  // Map real org context data to component types
+  const departments = orgContext?.departments.map(dept => ({
+    ...dept,
+    type: 'department' as const,
+    memberCount: 0,
+  })) || [];
 
-  // Load membership data
-  const loadData = async () => {
-    setLoading(true);
-    try {
-      // Mock data - replace with actual MCP calls
-      setDepartments([
-        { id: 'dept-1', type: 'department', name: '技术部', memberCount: 15 },
-        { id: 'dept-2', type: 'department', name: '财务部', memberCount: 8 },
-        { id: 'dept-3', type: 'department', name: '人事部', memberCount: 5 },
-        { id: 'dept-4', type: 'department', name: '市场部', memberCount: 12 },
-        { id: 'dept-5', type: 'department', name: '运营部', memberCount: 10 },
-      ]);
+  const roles = orgContext?.roles.map(role => ({
+    ...role,
+    type: 'role' as const,
+    description: '',
+  })) || [];
 
-      setRoles([
-        { id: 'role-1', type: 'role', name: '员工', description: '普通员工' },
-        { id: 'role-2', type: 'role', name: '经理', description: '部门经理' },
-        { id: 'role-3', type: 'role', name: '总监', description: '部门总监' },
-        { id: 'role-4', type: 'role', name: '审批人', description: '审批人员' },
-        { id: 'role-5', type: 'role', name: '管理员', description: '系统管理员' },
-      ]);
-
-      setMembers([
-        { id: 'member-1', type: 'member', name: '张三', email: 'zhangsan@example.com', departmentId: 'dept-1', departmentName: '技术部', roles: ['员工'] },
-        { id: 'member-2', type: 'member', name: '李四', email: 'lisi@example.com', departmentId: 'dept-1', departmentName: '技术部', roles: ['经理'] },
-        { id: 'member-3', type: 'member', name: '王五', email: 'wangwu@example.com', departmentId: 'dept-2', departmentName: '财务部', roles: ['员工'] },
-        { id: 'member-4', type: 'member', name: '赵六', email: 'zhaoliu@example.com', departmentId: 'dept-2', departmentName: '财务部', roles: ['经理', '审批人'] },
-      ]);
-    } catch (error) {
-      console.error('Failed to load membership data:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const members = orgContext?.members.map(member => ({
+    ...member,
+    type: 'member' as const,
+    email: (member as any).email || '',
+    departmentId: '',
+    departmentName: '',
+    roles: [],
+  })) || [];
 
   // Handle selection toggle
   const toggleSelection = (entity: MembershipEntity) => {
@@ -191,6 +170,16 @@ const MembershipSelectorModal: React.FC<MembershipSelectorModalProps> = ({
             {loading ? (
               <div className="flex items-center justify-center py-8">
                 <div className="animate-spin w-6 h-6 border-2 border-blue-600 border-t-transparent rounded-full" />
+              </div>
+            ) : error ? (
+              <div className="flex items-center justify-center py-8">
+                <div className="text-center">
+                  <svg className="w-12 h-12 text-red-500 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4v2m0 6v2m0-6a6 6 0 11-12 0 6 6 0 0112 0z" />
+                  </svg>
+                  <p className="text-sm text-red-600 font-medium">Failed to load data</p>
+                  <p className="text-xs text-gray-500 mt-1">{error}</p>
+                </div>
               </div>
             ) : (
               <>

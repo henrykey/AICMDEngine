@@ -5,11 +5,13 @@ Provides endpoints for BPMN and Form generation using real MCP services.
 Routes requests to BPMN-MCP and FORM-MCP services.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
 import logging
 import asyncio
+import time
+from src.mcp.registry import MCPRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +30,21 @@ class GenerateResponse(BaseModel):
     generatedContent: Optional[Dict[str, Any]] = None
 
 
-def get_org_context() -> Dict[str, Any]:
-    """Get organizational context for MCP services"""
-    # Default org context - in production this would come from Membership service
-    return {
+async def get_org_context(mcp_registry: Optional[MCPRegistry] = None) -> Dict[str, Any]:
+    """
+    Get organizational context from Membership MCP service.
+
+    Fetches real organizational structure (departments, roles, members) from Membership service.
+    Falls back to mock data if Membership MCP is not available.
+
+    Args:
+        mcp_registry: Optional MCPRegistry instance. If not provided, uses mock data.
+
+    Returns:
+        Dictionary with departments, roles, and members
+    """
+    # Mock fallback data - used when Membership MCP is not available
+    mock_org_context = {
         "departments": [
             {"id": "dept_001", "name": "Finance"},
             {"id": "dept_002", "name": "HR"},
@@ -49,6 +62,96 @@ def get_org_context() -> Dict[str, Any]:
             {"id": "user_003", "name": "Charlie", "roles": ["approver"]},
         ],
     }
+
+    if not mcp_registry:
+        logger.debug("No MCP registry provided, using mock org context")
+        return mock_org_context
+
+    try:
+        # Try to get real org data from Membership MCP
+        org_context = {"departments": [], "roles": [], "members": []}
+
+        # Get organizations (departments)
+        orgs_result = await mcp_registry.execute_command("membership", "list_orgs", limit=100)
+        if orgs_result.success:
+            orgs_data = orgs_result.data.get("data", [])
+            org_context["departments"] = [
+                {"id": org.get("id"), "name": org.get("name"), "type": org.get("type")}
+                for org in orgs_data
+            ]
+            logger.debug(f"Fetched {len(org_context['departments'])} departments from Membership")
+
+        # Get roles
+        roles_result = await mcp_registry.execute_command("membership", "list_roles", limit=100)
+        if roles_result.success:
+            roles_data = roles_result.data.get("roles", [])
+            org_context["roles"] = [
+                {"id": role.get("id"), "name": role.get("name")}
+                for role in roles_data
+            ]
+            logger.debug(f"Fetched {len(org_context['roles'])} roles from Membership")
+
+        # Get members
+        members_result = await mcp_registry.execute_command("membership", "list_members", limit=100)
+        if members_result.success:
+            members_data = members_result.data.get("members", [])
+            org_context["members"] = [
+                {"id": member.get("id"), "name": member.get("username"), "email": member.get("email")}
+                for member in members_data
+            ]
+            logger.debug(f"Fetched {len(org_context['members'])} members from Membership")
+
+        return org_context
+
+    except Exception as e:
+        logger.warning(f"Failed to fetch org context from Membership MCP: {e}, using mock data")
+        return mock_org_context
+
+
+def normalize_form_definition(form_def: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize form definition to use 'controls' property (BPM standard).
+    Converts 'fields' to 'controls' and normalizes field properties.
+    """
+    if 'fields' in form_def and 'controls' not in form_def:
+        # Convert fields to controls and normalize field structure
+        fields = form_def.pop('fields', [])
+        controls = []
+
+        for i, field in enumerate(fields):
+            # Normalize field properties to FormControl format
+            control = {
+                'id': field.get('field_id', f"control_{i}"),
+                'type': field.get('field_type', 'text'),
+                'label': field.get('field_label', field.get('field_id', f'Field {i+1}')),
+                'props': {
+                    'placeholder': field.get('placeholder', ''),
+                    'required': field.get('required', False),
+                    'validation': field.get('validation', {}),
+                    'options': field.get('options', []),
+                },
+                'width': '100%',
+            }
+            controls.append(control)
+
+        form_def['controls'] = controls
+
+    # Ensure required fields
+    if 'formId' not in form_def:
+        form_def['formId'] = f"form_{int(time.time() * 1000)}"
+    if 'version' not in form_def:
+        form_def['version'] = "1.0.0"
+    if 'title' not in form_def:
+        form_def['title'] = form_def.get('form_name', 'Untitled Form')
+    if 'formType' not in form_def:
+        form_def['formType'] = form_def.get('form_type', 'task_bound')
+
+    # Remove non-standard fields
+    form_def.pop('form_name', None)
+    form_def.pop('form_type', None)
+    form_def.pop('workflow_config', None)
+
+    return form_def
 
 
 def ensure_bpmn_diagram_interchange(bpmn_xml: str) -> str:
@@ -164,7 +267,7 @@ def detect_generation_type(prompt: str) -> str:
 
 
 @router.post("/generate", response_model=GenerateResponse)
-async def generate_content(request: GenerateRequest) -> GenerateResponse:
+async def generate_content(request: GenerateRequest, http_request: Request) -> GenerateResponse:
     """
     Generate BPMN workflow or Form based on natural language prompt.
 
@@ -175,7 +278,10 @@ async def generate_content(request: GenerateRequest) -> GenerateResponse:
     try:
         prompt = request.prompt
         generation_type = detect_generation_type(prompt)
-        org_context = get_org_context()
+
+        # Get MCP registry from app context
+        mcp_registry = getattr(http_request.app, "mcp_registry", None)
+        org_context = await get_org_context(mcp_registry)
 
         logger.info(f"Generating {generation_type} from prompt: {prompt}")
 
@@ -200,12 +306,18 @@ async def generate_content(request: GenerateRequest) -> GenerateResponse:
 
             form_def = result.get('form_definition', {})
 
+            # Normalize form definition to use 'controls' property (BPM standard)
+            form_def = normalize_form_definition(form_def)
+
+            # Get field count from normalized form
+            field_count = len(form_def.get('controls', []))
+
             return GenerateResponse(
-                message=f"I've generated a form with {len(form_def.get('controls', []))} fields based on your requirements.",
+                message=f"I've generated a form with {field_count} fields based on your requirements.",
                 generatedContent={
                     "type": "form",
                     "formDefinition": form_def,
-                    "preview": f"Form with {len(form_def.get('controls', []))} fields",
+                    "preview": f"Form with {field_count} fields",
                 }
             )
 
@@ -251,3 +363,28 @@ async def generate_content(request: GenerateRequest) -> GenerateResponse:
     except Exception as e:
         logger.error(f"Error in generate_content: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
+
+
+@router.get("/org-structure")
+async def get_org_structure(http_request: Request) -> Dict[str, Any]:
+    """
+    Get organizational structure from Membership MCP.
+
+    Returns departments, roles, and members for use in form/workflow generation.
+    This endpoint is called by the frontend to populate selection modals.
+
+    Returns:
+        Dictionary with departments, roles, and members
+    """
+    try:
+        mcp_registry = getattr(http_request.app, "mcp_registry", None)
+        org_context = await get_org_context(mcp_registry)
+
+        return {
+            "success": True,
+            "data": org_context
+        }
+
+    except Exception as e:
+        logger.error(f"Error fetching org structure: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to fetch organization structure: {str(e)}")
