@@ -263,6 +263,33 @@ class BPMNValidator:
         warnings = []
         confidence_score = 1.0
 
+        # Preprocess: Ensure XML has required namespaces
+        if 'xmlns:bpmndi' not in bpmn_xml:
+            # Check if diagram elements are present but namespaces are missing
+            has_diagram_elements = '<bpmndi:' in bpmn_xml or '<dc:' in bpmn_xml or '<di:' in bpmn_xml
+
+            if has_diagram_elements:
+                # Use regex to be more flexible with existing attributes
+                import re
+                original_xml = bpmn_xml
+                bpmn_xml = re.sub(
+                    r'<bpmn:definitions\s+',
+                    '<bpmn:definitions xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" '
+                    'xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" '
+                    'xmlns:di="http://www.omg.org/spec/DD/20100524/DI" ',
+                    bpmn_xml,
+                    count=1
+                )
+                # If nothing changed, try simple string replacement
+                if bpmn_xml == original_xml:
+                    bpmn_xml = bpmn_xml.replace(
+                        '<bpmn:definitions ',
+                        '<bpmn:definitions xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" '
+                        'xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" '
+                        'xmlns:di="http://www.omg.org/spec/DD/20100524/DI" ',
+                        1
+                    )
+
         # Step 1: Parse XML
         try:
             root = ET.fromstring(bpmn_xml)
@@ -657,13 +684,18 @@ You must understand and apply these 5 executor assignment patterns:
    - Use for automated workflows
 
 BPMN STRUCTURE:
-- Generate valid XML with proper BPMN namespaces
+- Generate valid XML with ALL required BPMN namespaces:
+  xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+  xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
 - Include startEvent, endEvent, and task elements
 - Use sequenceFlow for connections
 - Add bpmn:documentation elements with executor pattern JSON
 
 OUTPUT FORMAT:
 Return ONLY the XML, nothing else. No explanation, no markdown, just raw BPMN XML.
+CRITICAL: Always include all namespace declarations on the <bpmn:definitions> root element.
 
 Each user task must include documentation with executor pattern configuration:
 ```json

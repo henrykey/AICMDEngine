@@ -3,7 +3,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from src.core.config import settings, setup_logging
-from src.routers import tasks, command_sets, executions, auth, llm, mcp
+from src.routers import tasks, command_sets, executions, auth, llm, mcp, design
 from src.llm.provider_manager import LLMProviderManager
 from src.llm.config_loader import LLMConfigLoader
 from src.mcp.registry import MCPRegistry
@@ -112,6 +112,7 @@ app.include_router(command_sets.router, prefix="/v1/command-sets", tags=["Comman
 app.include_router(executions.router, prefix="/v1/executions", tags=["Executions"])
 app.include_router(mcp.router, prefix="/v1/mcp", tags=["MCP"])
 app.include_router(llm.router)  # LLM routes at /api/llm/* (no prefix)
+app.include_router(design.router)  # Design routes at /api/design/* (no prefix)
 
 if __name__ == "__main__":
     import uvicorn

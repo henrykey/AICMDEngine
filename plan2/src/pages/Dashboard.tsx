@@ -6,6 +6,7 @@ import CommandSetSelector from '../components/CommandSetSelector';
 import CommandSets from './CommandSets';
 import Settings from './Settings';
 import MCPTools from './MCPTools';
+import WorkflowDesigner from './WorkflowDesigner';
 
 interface NavItem {
   id: string;
@@ -15,6 +16,7 @@ interface NavItem {
 
 const NAV_ITEMS: NavItem[] = [
   { id: 'planner', label: 'Task Playground', icon: '🚀' },
+  { id: 'designer', label: 'Designer', icon: '🎨' },
   { id: 'mcp-tools', label: 'MCP Tools', icon: '🔧' },
   { id: 'commands', label: 'Command Sets', icon: '📂' },
   { id: 'settings', label: 'Settings', icon: '⚙️' },
@@ -78,6 +80,7 @@ const Dashboard = () => {
             <div className="flex items-start gap-3 flex-1">
               <span className="text-xl text-blue-500 mt-0.5">
                 {activeNav === 'planner' && '🎯'}
+                {activeNav === 'designer' && '🎨'}
                 {activeNav === 'mcp-tools' && '🔧'}
                 {activeNav === 'commands' && '📂'}
                 {activeNav === 'settings' && '⚙️'}
@@ -90,6 +93,7 @@ const Dashboard = () => {
                 </div>
                 <div className="text-sm text-slate-600">
                   {activeNav === 'planner' && 'Plan and execute tasks using AI-powered orchestration'}
+                  {activeNav === 'designer' && 'Design BPMN processes and forms with AI assistance'}
                   {activeNav === 'mcp-tools' && 'Browse and explore MCP tools from available servers'}
                   {activeNav === 'commands' && 'Manage and view command sets'}
                   {activeNav === 'settings' && 'Configure system settings and preferences'}
@@ -145,6 +149,10 @@ const Dashboard = () => {
         ) : activeNav === 'settings' ? (
           <div className="flex-1 overflow-hidden">
             <Settings />
+          </div>
+        ) : activeNav === 'designer' ? (
+          <div className="flex-1 overflow-hidden">
+            <WorkflowDesigner />
           </div>
         ) : (
           <div className="flex-1 flex items-center justify-center">

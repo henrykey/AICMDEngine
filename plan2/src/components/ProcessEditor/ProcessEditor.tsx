@@ -1,20 +1,43 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import BpmnModeler from 'bpmn-js/lib/Modeler';
-import { ProcessEditorProps, ValidationResult } from '../../types/bpmn';
-import PropertiesPanel from './PropertiesPanel';
-import ValidationPanel from './ValidationPanel';
-import { validateBpmn } from '../../services/bpmnValidator';
+import { BpmnElement } from '../../types/workflow';
+
+interface ProcessEditorProps {
+  bpmnXml: string;
+  onBpmnChange: (xml: string) => void;
+  onElementSelect: (element: BpmnElement | null) => void;
+  selectedElement: BpmnElement | null;
+  validationMode: 'design' | 'production';
+  readOnly?: boolean;
+}
 
 const ProcessEditor: React.FC<ProcessEditorProps> = ({
   bpmnXml = '',
   onBpmnChange,
-  onValidationChange: _onValidationChange,
+  onElementSelect,
+  selectedElement: _selectedElement,
+  validationMode: _validationMode = 'design',
   readOnly: _readOnly = false,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const modelerRef = useRef<BpmnModeler | null>(null);
-  const [selectedElement, setSelectedElement] = useState<any>(null);
-  const [validation, setValidation] = useState<ValidationResult | null>(null);
+  const [internalSelectedElement, setInternalSelectedElement] = useState<any>(null);
+
+  // Handle element selection
+  const handleElementSelect = useCallback((element: any) => {
+    setInternalSelectedElement(element);
+    if (element) {
+      const bpmnElement: BpmnElement = {
+        id: element.id,
+        type: element.type,
+        name: element.businessObject?.name,
+        businessObject: element.businessObject,
+      };
+      onElementSelect(bpmnElement);
+    } else {
+      onElementSelect(null);
+    }
+  }, [onElementSelect]);
 
   useEffect(() => {
     if (!modelerRef.current) return;
@@ -23,21 +46,15 @@ const ProcessEditor: React.FC<ProcessEditorProps> = ({
     const eventBus = modelerRef.current.get('eventBus') as any;
 
     eventBus.on('element.click', (event: any) => {
-      setSelectedElement(event.element);
+      handleElementSelect(event.element);
     });
 
     eventBus.on('canvas.viewbox.changed', () => {
-      if (selectedElement && !canvas.getRootElement().children.includes(selectedElement)) {
-        setSelectedElement(null);
+      if (internalSelectedElement && !canvas.getRootElement().children.includes(internalSelectedElement)) {
+        handleElementSelect(null);
       }
     });
-  }, [selectedElement]);
-
-  useEffect(() => {
-    if (bpmnXml) {
-      validateBpmn(bpmnXml).then(setValidation);
-    }
-  }, [bpmnXml]);
+  }, [internalSelectedElement, handleElementSelect]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -65,7 +82,16 @@ const ProcessEditor: React.FC<ProcessEditorProps> = ({
       modeler
         .importXML(bpmnXml)
         .then(() => {
-          (modeler.get('canvas') as any).zoom('fit-viewport');
+          // Use bpmn-js' built-in canvas for auto-fitting
+          const canvas = modeler.get('canvas') as any;
+
+          try {
+            // Trigger auto-fit to arrange elements nicely
+            canvas.zoom('fit-viewport', 'auto');
+          } catch (e) {
+            // Fallback to fixed zoom
+            canvas.zoom(0.8);
+          }
         })
         .catch((err) => {
           console.error('Failed to import BPMN:', err);
@@ -90,28 +116,37 @@ const ProcessEditor: React.FC<ProcessEditorProps> = ({
     };
   }, [bpmnXml, onBpmnChange]);
 
+  // Handle property changes from parent
+  const handlePropertyChange = useCallback((property: string, value: any) => {
+    if (!modelerRef.current || !internalSelectedElement) return;
+
+    const modeling = modelerRef.current.get('modeling') as any;
+    const elementRegistry = modelerRef.current.get('elementRegistry') as any;
+    const element = elementRegistry.get(internalSelectedElement.id);
+
+    if (element) {
+      modeling.updateProperties(element, { [property]: value });
+    }
+  }, [internalSelectedElement]);
+
+  // Expose method to parent for property updates
+  useEffect(() => {
+    // Store the handler in a ref that parent can access if needed
+    (window as any).__bpmnPropertyChangeHandler = handlePropertyChange;
+    return () => {
+      delete (window as any).__bpmnPropertyChangeHandler;
+    };
+  }, [handlePropertyChange]);
+
   return (
     <div className="w-full h-full flex flex-col" data-testid="bpmn-canvas">
-      <div className="flex-1 overflow-hidden flex">
-        <div className="flex-1" data-testid="bpmn-modeler">
-          <div
-            ref={containerRef}
-            className="w-full h-full"
-          />
-        </div>
-        <PropertiesPanel
-          element={selectedElement}
-          onPropertyChange={(prop, value) => {
-            if (selectedElement && modelerRef.current) {
-              const modeling = modelerRef.current.get('modeling') as any;
-              if (prop === 'name') {
-                modeling.updateProperties(selectedElement, { name: value });
-              }
-            }
-          }}
+      <div className="flex-1 overflow-hidden">
+        <div
+          ref={containerRef}
+          className="w-full h-full"
+          data-testid="bpmn-modeler"
         />
       </div>
-      <ValidationPanel validation={validation} />
     </div>
   );
 };

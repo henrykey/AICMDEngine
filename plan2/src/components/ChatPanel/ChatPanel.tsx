@@ -286,148 +286,61 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({ message, onApply }) => {
   );
 };
 
-// Mock AI response generator (will be replaced with real MCP calls)
+// Real MCP AI response generator
 async function generateAIResponse(
   prompt: string,
   _context: { bpmnXml: string; formDefinition: FormDefinition; selectedElement?: BpmnElement }
 ): Promise<{ content: string; generatedContent?: ChatMessage['generatedContent'] }> {
-  // Simulate API delay
   console.log('🚀 generateAIResponse called with prompt:', prompt);
-  await new Promise(resolve => setTimeout(resolve, 1500));
 
-  const lowerPrompt = prompt.toLowerCase();
-  console.log('🔍 Lowercase prompt:', lowerPrompt);
+  try {
+    // Call backend API which routes to real BPMN-MCP and FORM-MCP services
+    const response = await fetch('/api/design/generate', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        prompt,
+        context: _context,
+      }),
+    });
 
-  // Detect intent - prioritize form before process to avoid conflicts
-  if (lowerPrompt.includes('表单') || lowerPrompt.includes('form')) {
-    console.log('✅ Form detected');
-    // Generate Form
-    const mockForm: FormDefinition = {
-      formId: `form-ai-${Date.now()}`,
-      version: '1.0.0',
-      title: 'AI Generated Form',
-      description: 'Auto-generated form based on your requirements',
-      controls: [
-        {
-          id: 'ctrl-1',
-          type: 'text',
-          label: 'Applicant Name',
-          props: { placeholder: 'Enter your name', maxLength: 50 },
-          width: '50%',
-          permissions: {
-            view: { condition: '*', appliesTo: ['*'] },
-            edit: { condition: '*', appliesTo: ['*'] },
-            required: { condition: 'true', appliesTo: ['*'] },
-          },
-        },
-        {
-          id: 'ctrl-2',
-          type: 'select',
-          label: 'Request Type',
-          props: {
-            options: [
-              { label: 'Annual Leave', value: 'annual' },
-              { label: 'Personal Leave', value: 'personal' },
-              { label: 'Sick Leave', value: 'sick' },
-            ],
-          },
-          width: '50%',
-        },
-        {
-          id: 'ctrl-3',
-          type: 'daterange',
-          label: 'Leave Date',
-          props: {},
-          width: '100%',
-        },
-        {
-          id: 'ctrl-4',
-          type: 'textarea',
-          label: 'Reason for Leave',
-          props: { rows: 4, placeholder: 'Please specify the reason for leave' },
-          width: '100%',
-        },
-      ],
-      formType: 'task_bound',
-      layout: { columns: 2, labelPosition: 'top' },
-      confidenceScore: 0.85,
-    };
+    if (!response.ok) {
+      throw new Error(`API error: ${response.statusText}`);
+    }
+
+    const result = await response.json();
+    console.log('📦 API Response:', result);
+
+    // Build response based on what MCP returned
+    let content = result.message || 'Content generated successfully';
+    let generatedContent = result.generatedContent;
+
+    // Ensure we have preview text
+    if (generatedContent) {
+      if (!generatedContent.preview) {
+        if (generatedContent.type === 'bpmn') {
+          generatedContent.preview = 'Generated workflow process';
+        } else if (generatedContent.type === 'form') {
+          const controlCount = generatedContent.formDefinition?.controls?.length || 0;
+          generatedContent.preview = `Form with ${controlCount} fields`;
+        }
+      }
+    }
 
     return {
-      content: 'I\'ve generated a request form for you with fields for name, type, date range, and reason.',
-      generatedContent: {
-        type: 'form',
-        formDefinition: mockForm,
-        preview: 'Request form with 4 fields',
-      },
+      content,
+      generatedContent,
     };
-  }
+  } catch (error) {
+    console.error('❌ Error calling MCP services:', error);
 
-  // Detect BPMN/process keywords
-  if (lowerPrompt.includes('流程') || lowerPrompt.includes('审批') || lowerPrompt.includes('process') || lowerPrompt.includes('workflow') || lowerPrompt.includes('approval') || lowerPrompt.includes('submit')) {
-    console.log('✅ BPMN/Process detected');
-    // Generate BPMN with diagram information
-    const mockBpmn = `<?xml version="1.0" encoding="UTF-8"?>
-<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" id="Definitions_AI" targetNamespace="http://bpmn.io/schema/bpmn">
-  <bpmn:process id="Process_AI" name="AI Generated Process" isExecutable="true">
-    <bpmn:startEvent id="Start_1" name="Start"/>
-    <bpmn:userTask id="Task_1" name="Submit Request">
-      <bpmn:documentation>{"executor_pattern": "static", "executor_config": {"type": "role", "value": "employee"}}</bpmn:documentation>
-    </bpmn:userTask>
-    <bpmn:userTask id="Task_2" name="Department Review">
-      <bpmn:documentation>{"executor_pattern": "static", "executor_config": {"type": "role", "value": "manager"}}</bpmn:documentation>
-    </bpmn:userTask>
-    <bpmn:endEvent id="End_1" name="End"/>
-    <bpmn:sequenceFlow id="Flow_1" sourceRef="Start_1" targetRef="Task_1"/>
-    <bpmn:sequenceFlow id="Flow_2" sourceRef="Task_1" targetRef="Task_2"/>
-    <bpmn:sequenceFlow id="Flow_3" sourceRef="Task_2" targetRef="End_1"/>
-  </bpmn:process>
-  <bpmndi:BPMNDiagram id="BPMNDiagram_1">
-    <bpmndi:BPMNPlane id="BPMNPlane_1" bpmnElement="Process_AI">
-      <bpmndi:BPMNShape id="Start_1_di" bpmnElement="Start_1">
-        <dc:Bounds x="100" y="100" width="36" height="36"/>
-      </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="Task_1_di" bpmnElement="Task_1">
-        <dc:Bounds x="200" y="80" width="100" height="80"/>
-      </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="Task_2_di" bpmnElement="Task_2">
-        <dc:Bounds x="380" y="80" width="100" height="80"/>
-      </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="End_1_di" bpmnElement="End_1">
-        <dc:Bounds x="560" y="100" width="36" height="36"/>
-      </bpmndi:BPMNShape>
-      <bpmndi:BPMNEdge id="Flow_1_di" bpmnElement="Flow_1">
-        <di:waypoint x="136" y="118"/>
-        <di:waypoint x="200" y="120"/>
-      </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="Flow_2_di" bpmnElement="Flow_2">
-        <di:waypoint x="300" y="120"/>
-        <di:waypoint x="380" y="120"/>
-      </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="Flow_3_di" bpmnElement="Flow_3">
-        <di:waypoint x="480" y="120"/>
-        <di:waypoint x="560" y="118"/>
-      </bpmndi:BPMNEdge>
-    </bpmndi:BPMNPlane>
-  </bpmndi:BPMNDiagram>
-</bpmn:definitions>`;
-
-    console.log('📋 Returning BPMN:', { type: 'bpmn', preview: 'Workflow with 2 approval nodes', hasBpmnXml: !!mockBpmn });
+    // Return error message
     return {
-      content: 'I\'ve generated an approval workflow for you with submit request and department review nodes.',
-      generatedContent: {
-        type: 'bpmn',
-        bpmnXml: mockBpmn,
-        preview: 'Workflow with 2 approval nodes',
-      },
+      content: `Error: ${error instanceof Error ? error.message : 'Failed to generate content'}. Please try again.`,
     };
   }
-
-  // Default response
-  console.log('⚠️ No keywords matched, returning default response');
-  return {
-    content: 'I can help you with:\n• Generate BPMN workflows (say "Generate an approval workflow")\n• Create forms (say "Create a request form")\n• Modify existing workflows or forms\n\nWhat can I help you with?',
-  };
 }
 
 export default ChatPanel;

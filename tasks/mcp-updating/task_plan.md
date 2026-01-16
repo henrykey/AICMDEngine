@@ -1112,10 +1112,62 @@ Building a complete THREE-LAYER workflow generation platform that integrates wit
 
 ---
 
-**Document Status**: Phase 2.1 COMPLETE (BPMN-MCP + FORM-MCP + LLM Integration)
-**Last Updated**: 2026-01-14
-**Previous Phases**: Phase 1 MCP Infrastructure (100% complete, 2026-01-09)
-**Current Milestone**: Phase 2.1 Complete (93/93 tests passing)
+#### Phase 2.2 Week 1 (2026-01-15) - Frontend Integration & Designer Page
+
+**Objective**: Integrate newly implemented components (ProcessEditor, FormEditorNew, BindingsView, ChatPanel, PropertiesPanel, ValidationBar) into plan2's Dashboard as a new "Designer" page.
+
+**Current Status**: Components fully implemented, passing TypeScript checks, running on http://localhost:5123/
+
+**Tasks**:
+
+**Task 2.2.1: Add Designer Menu Item to plan2 Dashboard** 🚀 IN PROGRESS
+- [x] Understand project architecture (AI command engine with MCP-based task planning)
+- [x] Identify correct integration point (plan2 is the frontend, ui/ is deprecated)
+- [ ] Add "Designer" menu item to NAV_ITEMS in Dashboard.tsx
+- [ ] Add Designer tab description in Dashboard header
+- [ ] Route Designer tab to WorkflowDesigner component
+
+**Task 2.2.2: Integrate WorkflowDesigner Page into plan2** (PENDING)
+- [ ] Import WorkflowDesigner component into Dashboard
+- [ ] Add conditional rendering for Designer tab
+- [ ] Verify all sub-components work:
+  - [ ] ProcessEditor (BPMN canvas)
+  - [ ] FormEditorNew (37 BPM control types)
+  - [ ] BindingsView (task-form bindings)
+  - [ ] ChatPanel (AI assistant)
+  - [ ] PropertiesPanel (element properties)
+  - [ ] ValidationBar (validation status)
+  - [ ] MembershipSelectorModal (org/role/member selection)
+
+**Task 2.2.3: Test & Validate Integration** (PENDING)
+- [ ] Run npm build in plan2 to verify no TypeScript errors
+- [ ] Test Designer page functionality through Dashboard navigation
+- [ ] Verify all component interactions work correctly
+- [ ] Test BPMN process design flow
+- [ ] Test form design flow
+- [ ] Test binding management flow
+
+**Files Involved**:
+- `plan2/src/pages/Dashboard.tsx` - Add Designer menu item & routing
+- `plan2/src/pages/WorkflowDesigner.tsx` - Main designer page (already exists)
+- `plan2/src/components/ProcessEditor/` - BPMN editor
+- `plan2/src/components/FormEditor/` - Form editor
+- `plan2/src/components/BindingsView/` - Bindings manager
+- `plan2/src/components/ChatPanel/` - AI panel
+- `plan2/src/components/PropertiesPanel/` - Properties panel
+- `plan2/src/components/ValidationBar/` - Validation status
+- `plan2/src/components/Modals/` - Member selection
+
+**Timeline**: Day 1 (2026-01-15)
+
+---
+
+**Document Status**: Phase 2.1 COMPLETE (BPMN-MCP + FORM-MCP + LLM Integration) | Phase 2.2 Week 1 IN PROGRESS
+**Last Updated**: 2026-01-15
+**Previous Phases**: Phase 1 MCP Infrastructure (100% complete, 2026-01-09) | Phase 2.1 (100% complete, 2026-01-14)
+**Current Milestone**: Phase 2.2 Week 1 - Frontend Integration (Components ready, integration starting)
 - BPMN-MCP: 46/46 tests ✅
 - FORM-MCP: 18/18 tests ✅
-- LLM Integration: 29/29 tests ✅ (Task 6 Complete)
+- LLM Integration: 29/29 tests ✅
+- Frontend Components: ProcessEditor, FormEditorNew, BindingsView, ChatPanel, PropertiesPanel, ValidationBar, MembershipSelectorModal ✅
+- Designer Page Integration: In Progress 🚀
