@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { api } from '../lib/api';
 import { useTask } from '../contexts/TaskContext';
 import MCPSelector from './MCPSelector';
+import ExecutionResultRenderer from './ExecutionResultRenderer';
 
 interface ExecutionStep {
     step: number;
@@ -278,10 +279,11 @@ const PlannerExecutorPanel: React.FC = () => {
 
                                 {/* Step Result or Error */}
                                 {(step.result_content || step.result || step.response_data) && (
-                                    <div className="mt-2 text-xs text-green-700 bg-green-50 p-2 rounded overflow-auto max-h-32">
-                                        <div className="whitespace-pre-wrap">
-                                            {step.result_content ? step.result_content : (step.result ? (typeof step.result === 'string' ? step.result : JSON.stringify(step.result, null, 2)) : JSON.stringify(step.response_data, null, 2))}
-                                        </div>
+                                    <div className="mt-2 text-xs bg-green-50 p-3 rounded overflow-auto max-h-64">
+                                        <ExecutionResultRenderer
+                                            data={step.response_data || step.result}
+                                            resultContent={step.result_content}
+                                        />
                                     </div>
                                 )}
 
