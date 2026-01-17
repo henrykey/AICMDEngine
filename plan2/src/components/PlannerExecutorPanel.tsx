@@ -10,6 +10,7 @@ interface ExecutionStep {
     params: Record<string, any>;
     status?: 'pending' | 'running' | 'completed' | 'failed' | 'success' | 'skipped';
     result?: any;
+    result_content?: string;
     error?: string;
     error_message?: string;
     response_data?: any;
@@ -41,6 +42,7 @@ interface ExecutionDetail {
         error?: string;
         response_data?: any;
         result?: any;
+        result_content?: string;
     }>;
 }
 
@@ -112,6 +114,7 @@ const PlannerExecutorPanel: React.FC = () => {
                             ...step,
                             status: (execStep.status as any) || step.status,
                             result: execStep.result || execStep.response_data,
+                            result_content: execStep.result_content,
                             error: execStep.error_message || execStep.error,
                             error_message: execStep.error_message,
                             response_data: execStep.response_data
@@ -274,9 +277,11 @@ const PlannerExecutorPanel: React.FC = () => {
                                 </div>
 
                                 {/* Step Result or Error */}
-                                {step.result && (
-                                    <div className="mt-2 text-xs text-green-700 bg-green-50 p-2 rounded font-mono overflow-auto max-h-32">
-                                        Result: {typeof step.result === 'string' ? step.result : JSON.stringify(step.result, null, 2)}
+                                {(step.result_content || step.result || step.response_data) && (
+                                    <div className="mt-2 text-xs text-green-700 bg-green-50 p-2 rounded overflow-auto max-h-32">
+                                        <div className="whitespace-pre-wrap">
+                                            {step.result_content ? step.result_content : (step.result ? (typeof step.result === 'string' ? step.result : JSON.stringify(step.result, null, 2)) : JSON.stringify(step.response_data, null, 2))}
+                                        </div>
                                     </div>
                                 )}
 

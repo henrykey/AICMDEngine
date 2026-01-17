@@ -533,9 +533,23 @@ class MembershipMCPServer(BaseMCPServer):
                 tenant_id=tenant_id or self.tenant_id
             )
 
-            count = len(response.get("members", []))
+            members = response.get("members", [])
+            count = len(members)
+
+            # Format human-readable summary
+            summary_lines = [f"Found {count} members"]
+            if members:
+                summary_lines.append("\nMembers:")
+                for member in members[:5]:  # Show first 5 members
+                    name = member.get("fullName", member.get("username", "Unknown"))
+                    status = member.get("status", "unknown")
+                    summary_lines.append(f"  • {name} ({status})")
+                if count > 5:
+                    summary_lines.append(f"  ... and {count - 5} more")
+
+            content = "\n".join(summary_lines)
             return ToolResult.success(
-                content=f"Found {count} members",
+                content=content,
                 data=response
             )
         except Exception as e:
@@ -560,8 +574,18 @@ class MembershipMCPServer(BaseMCPServer):
                 tenant_id=tenant_id or self.tenant_id
             )
 
+            # Format human-readable member details
+            member = response.get("member", response)
+            summary_lines = [
+                f"Member: {member.get('fullName', member.get('username', 'Unknown'))}",
+                f"ID: {member.get('id', 'N/A')}",
+                f"Email: {member.get('email', 'N/A')}",
+                f"Status: {member.get('status', 'unknown')}"
+            ]
+            content = "\n".join(summary_lines)
+
             return ToolResult.success(
-                content=f"Retrieved member {member_id}",
+                content=content,
                 data=response
             )
         except Exception as e:
@@ -702,9 +726,22 @@ class MembershipMCPServer(BaseMCPServer):
                 tenant_id=tenant_id or self.tenant_id
             )
 
-            count = len(response.get("roles", []))
+            roles = response.get("roles", [])
+            count = len(roles)
+
+            # Format human-readable summary
+            summary_lines = [f"Found {count} roles"]
+            if roles:
+                summary_lines.append("\nRoles:")
+                for role in roles[:5]:  # Show first 5 roles
+                    role_name = role.get("name", role.get("id", "Unknown"))
+                    summary_lines.append(f"  • {role_name}")
+                if count > 5:
+                    summary_lines.append(f"  ... and {count - 5} more")
+
+            content = "\n".join(summary_lines)
             return ToolResult.success(
-                content=f"Found {count} roles",
+                content=content,
                 data=response
             )
         except Exception as e:
@@ -758,9 +795,22 @@ class MembershipMCPServer(BaseMCPServer):
                 tenant_id=tenant_id or self.tenant_id
             )
 
-            count = len(response.get("data", []))
+            orgs = response.get("data", [])
+            count = len(orgs)
+
+            # Format human-readable summary
+            summary_lines = [f"Found {count} organization units"]
+            if orgs:
+                summary_lines.append("\nOrganizations:")
+                for org in orgs[:5]:  # Show first 5 orgs
+                    org_name = org.get("name", org.get("id", "Unknown"))
+                    summary_lines.append(f"  • {org_name}")
+                if count > 5:
+                    summary_lines.append(f"  ... and {count - 5} more")
+
+            content = "\n".join(summary_lines)
             return ToolResult.success(
-                content=f"Found {count} organization units",
+                content=content,
                 data=response
             )
         except Exception as e:

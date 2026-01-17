@@ -95,7 +95,7 @@ class TestMembershipMCPServer:
         result = await self.mcp.execute_tool("get_member", member_id="123")
 
         assert result.is_error is False
-        assert "Retrieved member 123" in result.content
+        assert "testuser" in result.content
         assert result.data["id"] == "123"
 
     @patch('src.services.http_client.HTTPClient.execute')

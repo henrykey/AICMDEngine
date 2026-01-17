@@ -379,6 +379,7 @@ class ExecutionEngine:
                 # 尝试从命令字符串中提取 MCP 名称和工具名称
                 mcp_name, tool_name = self._parse_command_to_mcp(step.command)
 
+                result_content = None  # Human-readable result content
                 if mcp_name and tool_name:
                     # 使用 MCP 执行命令
                     logger.info(f"Executing MCP command: {mcp_name}.{tool_name}")
@@ -402,6 +403,9 @@ class ExecutionEngine:
                     response_data = result.data if result.data else result.content
                     if response_data is None:
                         response_data = {"success": True}
+
+                    # Capture human-readable content from MCP tool result
+                    result_content = result.content
 
                     logger.info(f"MCP command executed successfully: {mcp_name}.{tool_name}")
                 else:
@@ -430,6 +434,8 @@ class ExecutionEngine:
             if response_data is not None:
                 # 更新内存中的步骤对象，这样后续步骤可以访问响应数据
                 step.response_data = response_data
+                if result_content:
+                    step.result_content = result_content
                 step.status = StepStatus.SUCCESS
                 step.completed_at = datetime.utcnow()
 
@@ -438,6 +444,7 @@ class ExecutionEngine:
                     step_id=step.id,
                     status=StepStatus.SUCCESS,
                     response_data=response_data,
+                    result_content=result_content,
                     completed_at=datetime.utcnow()
                 )
 
