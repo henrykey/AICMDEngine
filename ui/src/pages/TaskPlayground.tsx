@@ -29,6 +29,7 @@ export default function TaskPlayground() {
     const [goal, setGoal] = useState('');
     const [conversationHistory, setConversationHistory] = useState<ConversationMessage[]>([]);
     const [lastQuestion, setLastQuestion] = useState<string | null>(null);
+    const [isComposing, setIsComposing] = useState(false);
 
     const mutation = useMutation({
         mutationFn: async (payload: { goal: string; conversationHistory?: ConversationMessage[] }) => {
@@ -41,7 +42,6 @@ export default function TaskPlayground() {
                 setLastQuestion(data.question);
                 const newHistory: ConversationMessage[] = [
                     ...conversationHistory,
-                    { role: 'user', content: goal },
                     { role: 'assistant', content: data.question }
                 ];
                 setConversationHistory(newHistory);
@@ -50,10 +50,21 @@ export default function TaskPlayground() {
                 setLastQuestion(null);
                 setConversationHistory([]);
             }
+            setGoal('');
         }
     });
 
     const handlePlanTask = () => {
+        if (!goal.trim()) return;
+        
+        // 立即显示用户输入到对话历史
+        const newHistory: ConversationMessage[] = [
+            ...conversationHistory,
+            { role: 'user', content: goal }
+        ];
+        setConversationHistory(newHistory);
+        
+        // 发送请求
         mutation.mutate({
             goal,
             conversationHistory: conversationHistory.length > 0 ? conversationHistory : undefined
@@ -98,7 +109,14 @@ export default function TaskPlayground() {
                         placeholder={lastQuestion ? "Answer the AI's question..." : "e.g., Create a user named Alice in R&D"}
                         value={goal}
                         onChange={(e) => setGoal(e.target.value)}
-                        onKeyDown={(e) => e.key === 'Enter' && handlePlanTask()}
+                        onCompositionStart={() => setIsComposing(true)}
+                        onCompositionEnd={() => setIsComposing(false)}
+                        onKeyDown={(e) => {
+                            if (e.key === 'Enter' && !isComposing && !mutation.isPending) {
+                                e.preventDefault();
+                                handlePlanTask();
+                            }
+                        }}
                     />
                     <button
                         onClick={handlePlanTask}

@@ -18,82 +18,101 @@ class PlanningEngine:
     async def get_available_commands(self, tenant_id: int, command_set_names: List[str] = None) -> List[Dict[str, Any]]:
         """
         Fetch commands available for the given tenant and optional command set names.
-        Can load from both database and MCP servers.
         """
+        query = {"tenant_id": tenant_id}
+        if command_set_names:
+            # First find the command set IDs
+            cs_cursor = self.db["command_sets"].find(
+                {"tenant_id": tenant_id, "name": {"$in": command_set_names}},
+                {"_id": 1}
+            )
+            cs_ids = [str(doc["_id"]) async for doc in cs_cursor]
+            query["command_set_id"] = {"$in": cs_ids}
+
+        # Fetch commands (limit to prevent memory issues)
+        cursor = self.db["commands"].find(query).limit(1000)
         commands = []
+        async for doc in cursor:
+            # Convert ObjectId to string for JSON serialization if needed, or keep as is
+            # For the prompt, we need a clean dictionary representation
+            cmd_dict = {
+                "command": doc["command"],
+                "summary": doc["summary"],
+                "description": doc.get("description", ""),
+                "parameters": doc.get("parameters", []),
+                "riskLevel": doc.get("riskLevel", "normal")
+            }
+            commands.append(cmd_dict)
 
-        # First, load commands from database (existing behavior)
-        if self.db is not None:
-            query = {"tenant_id": tenant_id}
-            if command_set_names:
-                # First find the command set IDs
-                cs_cursor = self.db["command_sets"].find(
-                    {"tenant_id": tenant_id, "name": {"$in": command_set_names}},
-                    {"_id": 1}
-                )
-                cs_ids = [str(doc["_id"]) async for doc in cs_cursor]
-                query["command_set_id"] = {"$in": cs_ids}
-
-            # Fetch commands (limit to prevent memory issues)
-            cursor = self.db["commands"].find(query).limit(1000)
-            async for doc in cursor:
-                # Convert ObjectId to string for JSON serialization if needed, or keep as is
-                # For the prompt, we need a clean dictionary representation
-                cmd_dict = {
-                    "command": doc["command"],
-                    "summary": doc["summary"],
-                    "description": doc.get("description", ""),
-                    "parameters": doc.get("parameters", []),
-                    "riskLevel": doc.get("riskLevel", "normal")
-                }
-                # Include response schema if available - helps LLM generate correct JSONPath
-                if "response_schema" in doc and doc["response_schema"]:
-                    cmd_dict["responseSchema"] = doc["response_schema"]
-                commands.append(cmd_dict)
-
-            logger.info(f"Loaded {len(commands)} commands from database for tenant {tenant_id}")
-
-        # Then, load commands from MCP servers if available
-        if self.mcp_registry:
-            mcp_commands = await self._get_mcp_commands()
-            # Add MCP commands to the list
-            commands.extend(mcp_commands)
-            logger.info(f"Loaded {len(mcp_commands)} commands from MCP servers")
-
-        logger.info(f"Loaded {len(commands)} total commands for tenant {tenant_id}")
+        logger.info(f"Loaded {len(commands)} commands for tenant {tenant_id}")
         return commands
 
-    async def _get_mcp_commands(self) -> List[Dict[str, Any]]:
+    async def _get_system_state(self, user_goal: str, tenant_id: int) -> str:
         """
-        Get commands from all registered MCP servers.
+        Query system state (orgs, roles, members) using MCP.
+        Returns formatted string describing current system state.
         """
-        mcp_commands = []
-
         if not self.mcp_registry:
-            return mcp_commands
+            return "No system state available (MCP not configured)."
 
-        for mcp in self.mcp_registry.get_all_mcps():
+        try:
+            # Try to get membership MCP and query it
+            membership_mcp = self.mcp_registry.get_mcp("membership")
+            if not membership_mcp:
+                return "Membership MCP not available."
+
+            state_parts = []
+
+            # Query organizations
             try:
-                tools = mcp.get_tools()
-                for tool in tools:
-                    # Convert MCP tool to command format
-                    cmd_dict = {
-                        "command": f"MCP.{mcp.name}.{tool.name}",
-                        "summary": tool.description or f"{mcp.name} - {tool.name}",
-                        "description": tool.description or f"Execute {tool.name} via {mcp.name}",
-                        "parameters": tool.input_schema if hasattr(tool, 'input_schema') else {},
-                        "riskLevel": "normal",  # Default risk level for MCP commands
-                        "source": "mcp",
-                        "mcp_server": mcp.name,
-                        "mcp_tool": tool.name
-                    }
-                    mcp_commands.append(cmd_dict)
+                org_result = await self.mcp_registry.execute_command("membership", "list_organizations", tenant_id=tenant_id)
+                if org_result.success and org_result.data:
+                    orgs = org_result.data if isinstance(org_result.data, list) else [org_result.data]
+                    state_parts.append(f"**已存在的组织** ({len(orgs)} 个):")
+                    for org in orgs[:10]:  # Limit display
+                        name = org.get("name") if isinstance(org, dict) else str(org)
+                        state_parts.append(f"  • {name}")
+                    if len(orgs) > 10:
+                        state_parts.append(f"  ... 及其他 {len(orgs) - 10} 个")
             except Exception as e:
-                logger.warning(f"Error loading commands from MCP {mcp.name}: {e}")
+                logger.debug(f"Failed to query organizations: {e}")
 
-        return mcp_commands
+            # Query roles
+            try:
+                role_result = await self.mcp_registry.execute_command("membership", "list_roles", tenant_id=tenant_id)
+                if role_result.success and role_result.data:
+                    roles = role_result.data if isinstance(role_result.data, list) else [role_result.data]
+                    state_parts.append(f"\n**已存在的岗位** ({len(roles)} 个):")
+                    for role in roles[:10]:
+                        name = role.get("name") if isinstance(role, dict) else str(role)
+                        state_parts.append(f"  • {name}")
+                    if len(roles) > 10:
+                        state_parts.append(f"  ... 及其他 {len(roles) - 10} 个")
+            except Exception as e:
+                logger.debug(f"Failed to query roles: {e}")
 
-    async def plan_task(self, request: TaskRequest, tenant_id: int, user_id: str = None) -> TaskPlanResponse:
+            # Query members
+            try:
+                member_result = await self.mcp_registry.execute_command("membership", "list_members", tenant_id=tenant_id)
+                if member_result.success and member_result.data:
+                    members = member_result.data if isinstance(member_result.data, list) else [member_result.data]
+                    state_parts.append(f"\n**已存在的成员** ({len(members)} 个):")
+                    for member in members[:7]:
+                        name = member.get("full_name") or member.get("username") if isinstance(member, dict) else str(member)
+                        email = member.get("email") if isinstance(member, dict) else ""
+                        state_parts.append(f"  • {name} ({email})")
+                    if len(members) > 7:
+                        state_parts.append(f"  ... 及其他 {len(members) - 7} 个")
+            except Exception as e:
+                logger.debug(f"Failed to query members: {e}")
+
+            return "\n".join(state_parts) if state_parts else "System state: empty or unavailable."
+
+        except Exception as e:
+            logger.warning(f"Failed to get system state: {e}")
+            return "Failed to retrieve system state."
+
+    async def plan_task(self, request: TaskRequest, tenant_id: int, user_id: str = None, auth_token: str = None) -> TaskPlanResponse:
         # 1. Load Knowledge (Commands)
         command_set_names = request.context.command_set_names if request.context else None
         commands = await self.get_available_commands(tenant_id, command_set_names)
@@ -105,12 +124,16 @@ class PlanningEngine:
                 question="No available commands found for your tenant/context. Please contact support."
             )
 
+        # 1.5 Query existing data using MCP to provide context
+        system_state_info = await self._get_system_state(request.goal, tenant_id)
+
         # 2. Generate Prompt (include tenant_id and conversation history)
         prompt_messages = self._build_prompt(
             request.goal, 
             commands, 
             tenant_id,
-            request.conversation_history
+            request.conversation_history,
+            system_state_info
         )
 
         # 3. AI Planning
@@ -173,7 +196,7 @@ class PlanningEngine:
                 question=f"An internal error occurred: {str(e)}"
             )
 
-    def _build_prompt(self, user_goal: str, commands: List[Dict[str, Any]], tenant_id: int, conversation_history: List = None) -> list[Dict[str, str]]:
+    def _build_prompt(self, user_goal: str, commands: List[Dict[str, Any]], tenant_id: int, conversation_history: List = None, system_state_info: str = None) -> list[Dict[str, str]]:
         commands_json = json.dumps(commands, indent=2, ensure_ascii=False)
 
         system_prompt = f"""
@@ -182,6 +205,9 @@ You are an expert AI Task Planner (NL-TPS). Your goal is to convert a user's hig
 
 # USER CONTEXT
 Current User's Tenant ID: {tenant_id}
+
+# CURRENT SYSTEM STATE
+{system_state_info if system_state_info else "No system data available."}
 
 # COMMANDS
 Here are the available commands you can use. Each command is an API endpoint.
@@ -207,14 +233,7 @@ Here are the available commands you can use. Each command is an API endpoint.
      }}
      ```
 5. **Default Tenant ID**: Unless the user explicitly mentions a different tenant, ALWAYS use {tenant_id} (as an INTEGER) as the X-Tenant-ID header value.
-6. Dependency Identification: If a step requires information from a previous step's result, use JSONPath syntax.
-   **IMPORTANT**: Check the command's responseSchema field to understand the response structure:
-   - If responseSchema.type == "wrapped" and responseSchema.wrapper == "data":
-     * For array items: "$.steps[0].response.data[0].id"
-     * For object items: "$.steps[0].response.data.id"
-   - If responseSchema.type == "object": "$.steps[0].response.body.id"
-   - Always adjust the JSONPath based on the documented response structure, not assumptions.
-   The system will dynamically parse responses according to their documented schemas.
+6. Dependency Identification: If a step requires information from a previous step's result, use JSONPath syntax (e.g., "$.steps[0].response.body.id").
 7. Risk Assessment: Evaluate the plan. If it involves high-risk actions (like DELETE, or commands marked as 'critical'), allow it but flag it in the 'risk_assessment' field.
 8. **Clarification Protocol**:
    - If confidence < 0.8 due to missing information → Ask a specific question

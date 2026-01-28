@@ -383,12 +383,18 @@ class ExecutionEngine:
                 if mcp_name and tool_name:
                     # 使用 MCP 执行命令
                     logger.info(f"Executing MCP command: {mcp_name}.{tool_name}")
+                    
+                    # Extract and flatten parameters for MCP tools
+                    # The planning engine puts parameters in body/query/path/headers structure,
+                    # but MCP tools expect flat parameters at the top level
+                    mcp_params = self._flatten_mcp_params(resolved_params)
+                    
                     # Add auth_token and tenant_id to MCP command execution
-                    mcp_params = {
-                        **resolved_params,
-                        "auth_token": auth_token,
-                        "tenant_id": tenant_id
-                    }
+                    mcp_params["auth_token"] = auth_token
+                    mcp_params["tenant_id"] = tenant_id
+                    
+                    logger.debug(f"MCP params after flattening: {mcp_params}")
+                    
                     result = await self.mcp_registry.execute_command(
                         mcp_name=mcp_name,
                         tool_name=tool_name,
@@ -516,14 +522,80 @@ class ExecutionEngine:
             return any(self._contains_none_values(item) for item in obj)
         return False
 
+    def _apply_jsonpath_filter(self, items: List[Any], filter_expr: str) -> Optional[Any]:
+        """
+        应用 JSONPath 过滤器表达式到列表
+
+        支持格式：
+        - @.name == 'value'
+        - @.id == 123
+        - @.field != 'value'
+
+        Args:
+            items: 要过滤的项目列表
+            filter_expr: 过滤表达式，例如 "@.name == 'IBC-AI'"
+
+        Returns:
+            过滤后的第一个匹配项，或 None
+        """
+        import re
+        
+        # 解析过滤表达式
+        # 支持格式：@.field == 'string' 或 @.field == number
+        match = re.match(r"@\.(\w+)\s*(==|!=|>|<|>=|<=)\s*['\"]?([^'\"]*)['\"]?", filter_expr)
+        
+        if not match:
+            logger.warning(f"Cannot parse JSONPath filter: {filter_expr}")
+            return None
+        
+        field_name = match.group(1)
+        operator = match.group(2)
+        value = match.group(3)
+        
+        # 尝试将值转换为数字
+        try:
+            value = int(value)
+        except (ValueError, TypeError):
+            try:
+                value = float(value)
+            except (ValueError, TypeError):
+                pass  # 保持为字符串
+        
+        # 应用过滤器
+        for item in items:
+            if isinstance(item, dict):
+                item_value = item.get(field_name)
+                
+                if operator == "==":
+                    if item_value == value:
+                        return item
+                elif operator == "!=":
+                    if item_value != value:
+                        return item
+                elif operator == ">":
+                    if item_value is not None and item_value > value:
+                        return item
+                elif operator == "<":
+                    if item_value is not None and item_value < value:
+                        return item
+                elif operator == ">=":
+                    if item_value is not None and item_value >= value:
+                        return item
+                elif operator == "<=":
+                    if item_value is not None and item_value <= value:
+                        return item
+        
+        return None
+
     def _parse_jsonpath_parts(self, path_str: str) -> List[str]:
         """
-        解析 JSONPath 路径字符串，正确处理数组索引
+        解析 JSONPath 路径字符串，正确处理数组索引和过滤器
 
         Examples:
             "data[0].id" -> ["data", "[0]", "id"]
             "body.user.name" -> ["body", "user", "name"]
             "items[0].fields[1].value" -> ["items", "[0]", "fields", "[1]", "value"]
+            "data[?(@.name == 'IBC-AI')].id" -> ["data", "[?(@.name == 'IBC-AI')]", "id"]
 
         Args:
             path_str: 路径字符串
@@ -533,9 +605,9 @@ class ExecutionEngine:
         """
         import re
         parts = []
-        # 使用正则表达式分割：支持 . 分割和 [] 形式的索引
-        # 匹配模式：字段名或 [数字]
-        pattern = r'(\w+|\[\d+\])'
+        # 使用正则表达式分割：支持字段名、[数字]、和过滤器 [?(...)]
+        # 匹配模式：字段名或 [...]（包括 [0]、[?(...)] 等）
+        pattern = r'(\w+|\[[^\]]*\])'
         matches = re.findall(pattern, path_str)
         return matches
 
@@ -669,6 +741,23 @@ class ExecutionEngine:
                 if current is None:
                     logger.error(f"Cannot access path at {'.'.join(path_parts[:i])}, value is None")
                     return None
+
+                # 处理过滤器表达式 [?(...)]
+                if part.startswith("[?") and part.endswith("]"):
+                    # 提取过滤条件，例如 [?(@.name == 'IBC-AI')] -> @.name == 'IBC-AI'
+                    filter_expr = part[3:-2]  # 移除 [?( 和 )]
+                    
+                    if isinstance(current, list):
+                        # 尝试应用过滤器
+                        filtered = self._apply_jsonpath_filter(current, filter_expr)
+                        if filtered is None or (isinstance(filtered, list) and len(filtered) == 0):
+                            logger.error(f"JSONPath filter matched no items: {part}")
+                            return None
+                        current = filtered
+                    else:
+                        logger.error(f"Cannot apply filter to non-list type: {type(current).__name__}")
+                        return None
+                    continue
 
                 # 处理数组索引 [N] 格式
                 if part.startswith("[") and part.endswith("]"):
@@ -953,3 +1042,49 @@ class ExecutionEngine:
             logger.warning(f"Error parsing command '{command}': {e}")
 
         return None, None
+    def _flatten_mcp_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Flatten parameters for MCP tool execution.
+        
+        The planning engine structures parameters like:
+        {
+            "body": {"username": "alice", "email": "alice@example.com"},
+            "headers": {"X-Tenant-ID": 1},
+            "query": {"page": 1},
+            "path": {"id": "123"}
+        }
+        
+        MCP tools expect flat parameters like:
+        {
+            "username": "alice",
+            "email": "alice@example.com"
+        }
+        
+        This method extracts parameters from body, query, and path,
+        and ignores headers (those are handled separately).
+        
+        Args:
+            params: The parameters dictionary from the plan
+            
+        Returns:
+            Flattened parameters dictionary suitable for MCP tools
+        """
+        flattened = {}
+        
+        # Extract from body (most common for POST/PUT requests)
+        if "body" in params and isinstance(params["body"], dict):
+            flattened.update(params["body"])
+        
+        # Extract from query (for GET requests with query params)
+        if "query" in params and isinstance(params["query"], dict):
+            flattened.update(params["query"])
+        
+        # Extract from path (for path parameters like {id})
+        if "path" in params and isinstance(params["path"], dict):
+            flattened.update(params["path"])
+        
+        # If params doesn't have these keys, it's already flat - use as is
+        if not any(k in params for k in ["body", "query", "path", "headers"]):
+            flattened = params.copy()
+        
+        return flattened

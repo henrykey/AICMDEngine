@@ -7,6 +7,7 @@ const ChatPanel: React.FC = () => {
     const [goal, setGoal] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState('');
+    const [isComposing, setIsComposing] = useState(false);
     const messagesEndRef = useRef<HTMLDivElement>(null);
 
     // Auto-scroll to latest message
@@ -21,6 +22,16 @@ const ChatPanel: React.FC = () => {
         setError('');
 
         try {
+            // 立即显示用户输入到对话历史
+            const newHistory = [
+                ...conversationHistory,
+                { role: 'user' as const, content: goal }
+            ];
+            setConversationHistory(newHistory);
+            
+            // 立即清除输入框
+            setGoal('');
+
             const payload: any = {
                 goal,
                 conversationHistory: conversationHistory.length > 0 ? conversationHistory : undefined
@@ -30,29 +41,35 @@ const ChatPanel: React.FC = () => {
                 payload.context = { commandSetNames: selectedCommandSets };
             }
 
+            // 在对话中添加加载状态的占位符
+            const historyWithLoading = [
+                ...newHistory,
+                { role: 'assistant' as const, content: '__LOADING__' }
+            ];
+            setConversationHistory(historyWithLoading);
+
             const res = await api.post<PlanResponse>('/tasks/', payload);
             const data = res.data;
 
-            // Always add user's goal to conversation history
-            const newHistory = [
-                ...conversationHistory,
-                { role: 'user' as const, content: goal }
+            // 移除加载占位符，添加实际响应
+            const finalHistory = [
+                ...newHistory
             ];
 
             if (data.question) {
                 setLastQuestion(data.question);
-                // Add the AI's clarifying question to history
-                newHistory.push({ role: 'assistant' as const, content: data.question });
-                setConversationHistory(newHistory);
+                finalHistory.push({ role: 'assistant' as const, content: data.question });
+                setConversationHistory(finalHistory);
             } else {
                 setLastQuestion(null);
-                // For direct plans, still preserve the user's goal in history
-                setConversationHistory(newHistory);
+                setConversationHistory(finalHistory);
                 setCurrentPlanResponse(data);
             }
-
-            setGoal('');
         } catch (err: any) {
+            // 移除加载占位符，保留用户消息
+            setConversationHistory(
+                conversationHistory.filter((msg) => msg.content !== '__LOADING__')
+            );
             setError(err.response?.data?.error_message || err.message || 'Failed to plan task');
         } finally {
             setIsLoading(false);
@@ -66,6 +83,15 @@ const ChatPanel: React.FC = () => {
         setError('');
     };
 
+    // Loading animation component
+    const LoadingDots = () => (
+        <div className="flex items-center gap-1">
+            <span className="w-2 h-2 bg-slate-600 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+            <span className="w-2 h-2 bg-slate-600 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+            <span className="w-2 h-2 bg-slate-600 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+        </div>
+    );
+
     return (
         <div className="flex flex-1 flex-col overflow-hidden gap-4">
             {/* Conversation History */}
@@ -78,7 +104,11 @@ const ChatPanel: React.FC = () => {
                             : 'rounded-bl-none bg-slate-100 text-slate-800'
                             }`}
                     >
-                        {msg.content}
+                        {msg.content === '__LOADING__' ? (
+                            <LoadingDots />
+                        ) : (
+                            msg.content
+                        )}
                     </div>
                 ))}
                 <div ref={messagesEndRef} />
@@ -97,7 +127,14 @@ const ChatPanel: React.FC = () => {
                     type="text"
                     value={goal}
                     onChange={(e) => setGoal(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && !isLoading && handlePlanTask()}
+                    onCompositionStart={() => setIsComposing(true)}
+                    onCompositionEnd={() => setIsComposing(false)}
+                    onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !isComposing && !isLoading) {
+                            e.preventDefault();
+                            handlePlanTask();
+                        }
+                    }}
                     placeholder={lastQuestion ? "Answer the AI's question..." : "Describe your task..."}
                     className="flex-1 p-3 text-sm border border-slate-200 rounded-lg bg-white focus:bg-white focus:border-blue-500 focus:outline-none disabled:opacity-50"
                     disabled={isLoading}

@@ -29,8 +29,8 @@ class HTTPClient:
         self,
         command: str,
         params: Dict[str, Any],
-        auth_token: str,
-        tenant_id: int,
+        auth_token: Optional[str] = None,
+        tenant_id: Optional[int] = None,
         timeout: int = 30
     ) -> Dict[str, Any]:
         """
@@ -39,15 +39,15 @@ class HTTPClient:
         Args:
             command: API 命令，如 "POST /users"
             params: 请求参数
-            auth_token: JWT token
-            tenant_id: 租户 ID
+            auth_token: JWT token (optional, but required for authenticated endpoints)
+            tenant_id: 租户 ID (optional, but required for multi-tenant endpoints)
             timeout: 超时时间（秒）
 
         Returns:
             API 响应数据
 
         Raises:
-            ValueError: 命令格式无效
+            ValueError: 命令格式无效或缺少必要参数
             httpx.HTTPStatusError: HTTP 错误
         """
         # 解析命令
@@ -306,22 +306,30 @@ class HTTPClient:
             return urljoin(self.base_url, path)
         return path
 
-    def _build_headers(self, auth_token: str, tenant_id: int) -> Dict[str, str]:
+    def _build_headers(self, auth_token: Optional[str], tenant_id: Optional[int]) -> Dict[str, str]:
         """
         构建请求头
 
         Args:
-            auth_token: JWT token
-            tenant_id: 租户 ID
+            auth_token: JWT token (optional)
+            tenant_id: 租户 ID (optional)
 
         Returns:
             请求头字典
         """
-        return {
-            "Authorization": f"Bearer {auth_token}",
-            "X-Tenant-ID": str(tenant_id),
+        headers = {
             "Content-Type": "application/json"
         }
+
+        # Only add auth header if token is provided
+        if auth_token:
+            headers["Authorization"] = f"Bearer {auth_token}"
+
+        # Only add tenant header if tenant_id is provided
+        if tenant_id is not None:
+            headers["X-Tenant-ID"] = str(tenant_id)
+
+        return headers
 
     def _build_request_params(self, params: Dict[str, Any], path: str) -> tuple:
         """

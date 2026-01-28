@@ -517,6 +517,28 @@ class MembershipMCPServer(BaseMCPServer):
     ) -> ToolResult:
         """List members."""
         try:
+            # Determine which auth_token and tenant_id to use
+            effective_token = auth_token or self.auth_token
+            effective_tenant = tenant_id or self.tenant_id
+
+            # Validate that we have the required authentication
+            if not effective_token:
+                logger.error("list_members called without auth_token")
+                return ToolResult.error(
+                    content="Authentication required. Please provide auth_token parameter.",
+                    error_code="AUTH_REQUIRED"
+                )
+
+            if not effective_tenant:
+                logger.error("list_members called without tenant_id")
+                return ToolResult.error(
+                    content="Tenant ID required. Please provide tenant_id parameter.",
+                    error_code="TENANT_REQUIRED"
+                )
+
+            # Log for debugging
+            logger.debug(f"list_members called with token: {effective_token[:20] if effective_token else 'None'}..., tenant: {effective_tenant}")
+
             params = {
                 "query": {
                     "page": max(1, page),
@@ -529,11 +551,11 @@ class MembershipMCPServer(BaseMCPServer):
             response = await self.http_client.execute(
                 command="GET /v2/members",
                 params=params,
-                auth_token=auth_token or self.auth_token,
-                tenant_id=tenant_id or self.tenant_id
+                auth_token=effective_token,
+                tenant_id=effective_tenant
             )
 
-            members = response.get("members", [])
+            members = response.get("data", [])
             count = len(members)
 
             # Format human-readable summary

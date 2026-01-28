@@ -77,7 +77,7 @@ class TestMembershipMCPServer:
             ]
         }
 
-        result = await self.mcp.execute_tool("list_members", page=1, limit=10)
+        result = await self.mcp.execute_tool("list_members", page=1, limit=10, auth_token="test_token", tenant_id=1)
 
         assert result.is_error is False
         assert "2 members" in result.content
@@ -92,7 +92,7 @@ class TestMembershipMCPServer:
             "email": "test@example.com"
         }
 
-        result = await self.mcp.execute_tool("get_member", member_id="123")
+        result = await self.mcp.execute_tool("get_member", member_id="123", auth_token="test_token", tenant_id=1)
 
         assert result.is_error is False
         assert "testuser" in result.content
@@ -112,7 +112,7 @@ class TestMembershipMCPServer:
             username="newuser",
             email="new@example.com",
             is_virtual=True
-        )
+        , auth_token="test_token", tenant_id=1)
 
         assert result.is_error is False
         assert "Created member newuser" in result.content
@@ -131,7 +131,7 @@ class TestMembershipMCPServer:
             "update_member",
             member_id="123",
             username="updateduser"
-        )
+        , auth_token="test_token", tenant_id=1)
 
         assert result.is_error is False
         assert "Updated member 123" in result.content
@@ -141,7 +141,7 @@ class TestMembershipMCPServer:
         """Test successful delete_member call."""
         mock_execute.return_value = {"success": True}
 
-        result = await self.mcp.execute_tool("delete_member", member_id="123")
+        result = await self.mcp.execute_tool("delete_member", member_id="123", auth_token="test_token", tenant_id=1)
 
         assert result.is_error is False
         assert "Deleted member 123" in result.content
@@ -156,7 +156,7 @@ class TestMembershipMCPServer:
             ]
         }
 
-        result = await self.mcp.execute_tool("list_roles")
+        result = await self.mcp.execute_tool("list_roles", auth_token="test_token", tenant_id=1)
 
         assert result.is_error is False
         assert "2 roles" in result.content
@@ -170,14 +170,14 @@ class TestMembershipMCPServer:
             "assign_role",
             member_id="123",
             role_id="admin"
-        )
+        , auth_token="test_token", tenant_id=1)
 
         assert result.is_error is False
         assert "Assigned role admin to member 123" in result.content
 
     async def test_update_member_no_fields_provided(self):
         """Test update_member with no fields to update."""
-        result = await self.mcp.execute_tool("update_member", member_id="123")
+        result = await self.mcp.execute_tool("update_member", member_id="123", auth_token="test_token", tenant_id=1)
 
         assert result.is_error is True
         assert result.error_code == "INVALID_UPDATE"
@@ -196,7 +196,7 @@ class TestMembershipMCPServer:
             page=1,
             limit=10,
             search="search"
-        )
+        , auth_token="test_token", tenant_id=1)
 
         assert result.is_error is False
 
@@ -205,7 +205,7 @@ class TestMembershipMCPServer:
         """Test error handling when API call fails."""
         mock_execute.side_effect = Exception("API connection failed")
 
-        result = await self.mcp.execute_tool("list_members")
+        result = await self.mcp.execute_tool("list_members", auth_token="test_token", tenant_id=1)
 
         assert result.is_error is True
         assert "Failed to list members" in result.content
