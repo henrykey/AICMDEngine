@@ -507,6 +507,44 @@ class MembershipMCPServer(BaseMCPServer):
             handler=self.remove_member_from_org
         ))
 
+        # Get organization hierarchy tool
+        self.register_tool(Tool(
+            name="get_org_hierarchy",
+            description="Get the hierarchical relationships (ancestors/descendants) of an organization unit",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "org_id": {
+                        "type": "string",
+                        "description": "Organization unit ID"
+                    },
+                    "direction": {
+                        "type": "string",
+                        "enum": ["ancestors", "descendants", "both"],
+                        "description": "Query direction (ancestors=parent organizations, descendants=child organizations, both=both)",
+                        "default": "descendants"
+                    },
+                    "max_depth": {
+                        "type": "integer",
+                        "description": "Maximum hierarchy depth (1-10)",
+                        "default": 5,
+                        "minimum": 1,
+                        "maximum": 10
+                    },
+                    "auth_token": {
+                        "type": "string",
+                        "description": "Authentication token (optional, will use default if not provided)"
+                    },
+                    "tenant_id": {
+                        "type": "integer",
+                        "description": "Tenant ID (optional, will use default if not provided)"
+                    }
+                },
+                "required": ["org_id"]
+            },
+            handler=self.get_org_hierarchy
+        ))
+
     async def list_members(
         self,
         page: int = 1,
@@ -866,6 +904,74 @@ class MembershipMCPServer(BaseMCPServer):
             return ToolResult.error(
                 content=f"Failed to get organization: {str(e)}",
                 error_code="GET_ORG_FAILED"
+            )
+
+    async def get_org_hierarchy(
+        self,
+        org_id: str,
+        direction: str = "descendants",
+        max_depth: int = 5,
+        auth_token: Optional[str] = None,
+        tenant_id: Optional[int] = None
+    ) -> ToolResult:
+        """Get organization hierarchy (ancestors/descendants)."""
+        try:
+            # Validate parameters
+            if direction not in ["ancestors", "descendants", "both"]:
+                direction = "descendants"
+            if max_depth < 1 or max_depth > 10:
+                max_depth = 5
+
+            params = {
+                "path": {
+                    "org_id": org_id
+                },
+                "query": {
+                    "direction": direction,
+                    "max_depth": max_depth
+                }
+            }
+            response = await self.http_client.execute(
+                command="GET /v2/orgs/{org_id}/hierarchy",
+                params=params,
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id
+            )
+
+            # Format hierarchical data for readability
+            summary_lines = [f"Organization Hierarchy for ID {org_id}:"]
+            
+            # Process ancestors if present
+            ancestors = response.get("ancestors", [])
+            if ancestors:
+                summary_lines.append(f"\n👤 Parent Organizations ({len(ancestors)}):")
+                for ancestor in ancestors:
+                    name = ancestor.get("name", ancestor.get("id", "Unknown"))
+                    org_type = ancestor.get("type", "")
+                    summary_lines.append(f"  • {name} ({org_type})")
+            
+            # Process descendants if present
+            descendants = response.get("descendants", [])
+            if descendants:
+                summary_lines.append(f"\n👥 Child Organizations ({len(descendants)}):")
+                for descendant in descendants:
+                    name = descendant.get("name", descendant.get("id", "Unknown"))
+                    org_type = descendant.get("type", "")
+                    summary_lines.append(f"  • {name} ({org_type})")
+            
+            if not ancestors and not descendants:
+                summary_lines.append("\nNo hierarchical relationships found.")
+
+            content = "\n".join(summary_lines)
+            return ToolResult.success(
+                content=content,
+                data=response
+            )
+        except Exception as e:
+            logger.error(f"Error getting organization hierarchy for {org_id}: {e}")
+            return ToolResult.error(
+                content=f"Failed to get organization hierarchy: {str(e)}",
+                error_code="GET_ORG_HIERARCHY_FAILED"
             )
 
     async def create_org(
