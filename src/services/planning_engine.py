@@ -47,6 +47,55 @@ class PlanningEngine:
         logger.info(f"Loaded {len(commands)} commands for tenant {tenant_id}")
         return commands
 
+    def _get_mcp_commands(self) -> List[Dict[str, Any]]:
+        """
+        Extract MCP tools as commands for LLM planning.
+        Converts MCP tool definitions into command format.
+        """
+        mcp_commands = []
+        
+        try:
+            # Iterate through all registered MCPs
+            for mcp in self.mcp_registry.get_all_mcps():
+                tools_info = mcp.get_info()
+                tools_list = tools_info.get("tools", [])  # tools is a list, not dict!
+                
+                # Convert each tool into a command
+                for tool_info in tools_list:
+                    tool_name = tool_info.get("name", "")
+                    
+                    # Extract input schema parameters
+                    input_schema = tool_info.get("inputSchema", {})
+                    properties = input_schema.get("properties", {})
+                    required = input_schema.get("required", [])
+                    
+                    # Build parameters list
+                    parameters = []
+                    for param_name, param_info in properties.items():
+                        param_def = {
+                            "name": param_name,
+                            "type": param_info.get("type", "string"),
+                            "description": param_info.get("description", ""),
+                            "required": param_name in required
+                        }
+                        parameters.append(param_def)
+                    
+                    # Create command dict
+                    cmd_dict = {
+                        "command": f"MCP.{mcp.name}.{tool_name}",
+                        "summary": tool_info.get("description", ""),
+                        "description": f"MCP Tool from {mcp.name} server",
+                        "parameters": parameters,
+                        "riskLevel": "normal"
+                    }
+                    mcp_commands.append(cmd_dict)
+        
+        except Exception as e:
+            logger.warning(f"Failed to extract MCP commands: {e}")
+        
+        logger.info(f"Extracted {len(mcp_commands)} MCP tool commands")
+        return mcp_commands
+
     async def _get_system_state(self, user_goal: str, tenant_id: int) -> str:
         """
         Query system state (orgs, roles, members) using MCP.
@@ -65,7 +114,7 @@ class PlanningEngine:
 
             # Query organizations
             try:
-                org_result = await self.mcp_registry.execute_command("membership", "list_organizations", tenant_id=tenant_id)
+                org_result = await self.mcp_registry.execute_command("membership", "list_orgs", tenant_id=tenant_id)
                 if org_result.success and org_result.data:
                     orgs = org_result.data if isinstance(org_result.data, list) else [org_result.data]
                     state_parts.append(f"**已存在的组织** ({len(orgs)} 个):")
@@ -123,6 +172,11 @@ class PlanningEngine:
                 confidence=0.0,
                 question="No available commands found for your tenant/context. Please contact support."
             )
+        
+        # Add MCP tools to available commands
+        if self.mcp_registry:
+            mcp_commands = self._get_mcp_commands()
+            commands.extend(mcp_commands)
 
         # 1.5 Query existing data using MCP to provide context
         system_state_info = await self._get_system_state(request.goal, tenant_id)
@@ -210,22 +264,34 @@ Current User's Tenant ID: {tenant_id}
 {system_state_info if system_state_info else "No system data available."}
 
 # COMMANDS
-Here are the available commands you can use. Each command is an API endpoint.
+Here are the available commands you can use. Commands starting with "MCP." are preferred as they provide better functionality.
+Each command is either an API endpoint or an MCP tool.
+
+**IMPORTANT: When available, always prefer MCP commands (those starting with "MCP.") over regular API endpoints, as they provide better integration and data transformation.**
+
 {commands_json}
 
 # INSTRUCTIONS
 1. Decomposition: Break down the user's objective into a sequence of logical steps.
 2. Command Mapping: For each step, find the most appropriate command from the available COMMANDS.
+   - **PRIORITY: Always check for MCP commands first (commands starting with "MCP."), as they are preferred.**
+   - For example, if you see both "GET /v2/orgs/{id}/hierarchy" and "MCP.membership.get_org_hierarchy", always choose the MCP version.
 3. **Parameter Validation**: Check if ALL required parameters can be extracted from the user's input.
    - If ANY required parameter (like username, password, email, etc.) is MISSING or UNCLEAR, you MUST ask a clarifying question.
    - DO NOT generate a plan with incomplete parameters.
    - DO NOT assume default values for critical business parameters.
 4. **Parameter Placement**:
-   - Headers (like X-Tenant-ID): Put in "headers" object
-   - Query parameters: Put in "query" object
-   - Path parameters (like {{id}}): Put in "path" object
-   - Request body fields: Put in "body" object
-   - Example:
+   - For MCP commands: Put ALL parameters directly in the "params" object (flattened structure, NOT nested in body/query/path)
+     - Example for MCP.membership.update_member_password:
+     ```json
+     "params": {{"member_id": "$.steps[0].response.data[?(@.username == 'kehongwei')].id", "password": "khwkhw60"}}
+     ```
+   - For API endpoints:
+     - Headers (like X-Tenant-ID): Put in "headers" object
+     - Query parameters: Put in "query" object
+     - Path parameters (like {{id}}): Put in "path" object
+     - Request body fields: Put in "body" object
+   - API Example:
      ```json
      "params": {{
        "headers": {{ "X-Tenant-ID": {tenant_id} }},
@@ -233,7 +299,14 @@ Here are the available commands you can use. Each command is an API endpoint.
      }}
      ```
 5. **Default Tenant ID**: Unless the user explicitly mentions a different tenant, ALWAYS use {tenant_id} (as an INTEGER) as the X-Tenant-ID header value.
-6. Dependency Identification: If a step requires information from a previous step's result, use JSONPath syntax (e.g., "$.steps[0].response.body.id").
+6. **Dependency Identification**: If a step requires information from a previous step's result:
+   - **IMPORTANT**: Use 0-based indexing for steps. Step 1 is steps[0], Step 2 is steps[1], etc.
+   - For array results from a previous step (e.g., step 1): Use `$.steps[0].response.body.data[0].fieldName` or `$.steps[0].response.data[0].fieldName`
+   - **CRITICAL: When finding a specific item from a list**, use JSONPath filter syntax: `$.steps[0].response.data[?(@.fieldName == 'value')].id`
+     - Example: To find member with username='kehongwei' from step 1: `$.steps[0].response.data[?(@.username == 'kehongwei')].id`
+     - Example: To find org with name='Engineering' from step 0: `$.steps[0].response.data[?(@.name == 'Engineering')].id`
+   - Always use `[?(@.fieldName == 'value')]` syntax when you need to search for a specific item in a list
+   - For object results: Use `$.steps[N].response.body.fieldName` or `$.steps[N].response.fieldName`
 7. Risk Assessment: Evaluate the plan. If it involves high-risk actions (like DELETE, or commands marked as 'critical'), allow it but flag it in the 'risk_assessment' field.
 8. **Clarification Protocol**:
    - If confidence < 0.8 due to missing information → Ask a specific question

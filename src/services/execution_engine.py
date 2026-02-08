@@ -799,7 +799,100 @@ class ExecutionEngine:
 
         except Exception as e:
             logger.error(f"Failed to parse JSONPath {jsonpath}: {e}")
-            return None
+            
+            # 智能回退逻辑：尝试多种可能的响应结构
+            try:
+                start_idx = jsonpath.index("[") + 1
+                end_idx = jsonpath.index("]")
+                step_idx = int(jsonpath[start_idx:end_idx])
+                
+                if step_idx >= len(step_results):
+                    logger.error(f"Step index {step_idx} out of range (total: {len(step_results)})")
+                    return None
+                
+                step = step_results[step_idx]
+                if not step.response_data:
+                    logger.error(f"Step {step.step_number} has no response data")
+                    return None
+                
+                # 提取剩余路径和字段名
+                remaining = jsonpath[end_idx + 1:].strip(".")
+                
+                # 解析需要的字段名（最后一个点后面的内容）
+                field_name = remaining.split(".")[-1] if "." in remaining else remaining
+                if not field_name or field_name in ["response", "body", "data"]:
+                    field_name = None
+                
+                logger.debug(f"Fallback extraction for step {step_idx}: field_name={field_name}, remaining={remaining}")
+                logger.debug(f"Response data type: {type(step.response_data).__name__}")
+                if isinstance(step.response_data, dict):
+                    logger.debug(f"Response data keys: {list(step.response_data.keys())}")
+                elif isinstance(step.response_data, list):
+                    logger.debug(f"Response is list with {len(step.response_data)} items")
+                    if step.response_data and isinstance(step.response_data[0], dict):
+                        logger.debug(f"First item keys: {list(step.response_data[0].keys())}")
+                
+                # 尝试的路径优先级
+                candidates = []
+                
+                if isinstance(step.response_data, dict):
+                    # 1. response.body.data[0] 的形式
+                    if "body" in step.response_data and isinstance(step.response_data.get("body"), dict):
+                        body = step.response_data["body"]
+                        if "data" in body and isinstance(body.get("data"), list) and body["data"]:
+                            candidates.append(body["data"][0])
+                    
+                    # 2. response.data[0] 的形式
+                    if "data" in step.response_data:
+                        data = step.response_data["data"]
+                        if isinstance(data, list) and data:
+                            candidates.append(data[0])
+                        elif isinstance(data, dict):
+                            candidates.append(data)
+                    
+                    # 3. 尝试其他常见的列表字段名
+                    for key in ["members", "roles", "users", "items", "results"]:
+                        if key in step.response_data:
+                            val = step.response_data[key]
+                            if isinstance(val, list) and val:
+                                candidates.append(val[0])
+                    
+                    # 4. response 本身当作第一项
+                    candidates.append(step.response_data)
+                
+                elif isinstance(step.response_data, list) and step.response_data:
+                    # 如果响应本身就是列表
+                    candidates.append(step.response_data[0])
+                
+                # 从候选项中查找字段
+                if field_name:
+                    possible_field_names = [
+                        field_name,  # 原始字段名
+                        f"_{field_name}",  # _id 的形式
+                        f"{field_name}_id",  # member_id 的形式
+                    ]
+                    
+                    for candidate in candidates:
+                        if isinstance(candidate, dict):
+                            for possible_name in possible_field_names:
+                                if possible_name in candidate:
+                                    result = candidate[possible_name]
+                                    logger.info(f"Fallback: Successfully extracted '{possible_name}' = {result}")
+                                    return result
+                
+                # 如果没找到特定字段，尝试直接返回第一个项
+                if candidates and isinstance(candidates[0], dict) and not field_name:
+                    logger.info(f"Fallback: Returning first item from candidates")
+                    return candidates[0]
+                
+                logger.error(f"Could not find field '{field_name}' in any candidate structure")
+                # 最后的尝试：打印响应数据供调试
+                logger.error(f"Response data: {json.dumps(step.response_data, indent=2, default=str)[:500]}")
+                return None
+                
+            except Exception as fallback_e:
+                logger.error(f"Fallback JSONPath extraction failed: {fallback_e}", exc_info=True)
+                return None
 
     async def get_execution(self, execution_id: str) -> Optional[ExecutionDetailResponse]:
         """

@@ -199,6 +199,35 @@ class MembershipMCPServer(BaseMCPServer):
             handler=self.delete_member
         ))
 
+        # Update member password tool
+        self.register_tool(Tool(
+            name="update_member_password",
+            description="Update a member's password",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "member_id": {
+                        "type": "string",
+                        "description": "Member ID"
+                    },
+                    "password": {
+                        "type": "string",
+                        "description": "New password"
+                    },
+                    "auth_token": {
+                        "type": "string",
+                        "description": "Authentication token (optional, will use default if not provided)"
+                    },
+                    "tenant_id": {
+                        "type": "integer",
+                        "description": "Tenant ID (optional, will use default if not provided)"
+                    }
+                },
+                "required": ["member_id", "password"]
+            },
+            handler=self.update_member_password
+        ))
+
         # List roles tool
         self.register_tool(Tool(
             name="list_roles",
@@ -522,7 +551,7 @@ class MembershipMCPServer(BaseMCPServer):
                         "type": "string",
                         "enum": ["ancestors", "descendants", "both"],
                         "description": "Query direction (ancestors=parent organizations, descendants=child organizations, both=both)",
-                        "default": "descendants"
+                        "default": "both"
                     },
                     "max_depth": {
                         "type": "integer",
@@ -770,6 +799,47 @@ class MembershipMCPServer(BaseMCPServer):
                 error_code="DELETE_MEMBER_FAILED"
             )
 
+    async def update_member_password(
+        self,
+        member_id: str,
+        password: str,
+        auth_token: Optional[str] = None,
+        tenant_id: Optional[int] = None
+    ) -> ToolResult:
+        """Update a member's password."""
+        try:
+            if not password:
+                return ToolResult.error(
+                    content="Password cannot be empty",
+                    error_code="INVALID_PASSWORD"
+                )
+
+            params = {
+                "path": {
+                    "member_id": member_id
+                },
+                "body": {
+                    "password": password
+                }
+            }
+            response = await self.http_client.execute(
+                command="POST /v2/members/{member_id}/password",
+                params=params,
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id
+            )
+
+            return ToolResult.success(
+                content=f"Updated password for member {member_id}",
+                data=response
+            )
+        except Exception as e:
+            logger.error(f"Error updating password for member {member_id}: {e}")
+            return ToolResult.error(
+                content=f"Failed to update password: {str(e)}",
+                error_code="UPDATE_PASSWORD_FAILED"
+            )
+
     async def list_roles(self, page: int = 1, limit: int = 10, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
         """List available roles."""
         try:
@@ -786,7 +856,7 @@ class MembershipMCPServer(BaseMCPServer):
                 tenant_id=tenant_id or self.tenant_id
             )
 
-            roles = response.get("roles", [])
+            roles = response.get("data", response.get("roles", []))
             count = len(roles)
 
             # Format human-readable summary
@@ -909,64 +979,127 @@ class MembershipMCPServer(BaseMCPServer):
     async def get_org_hierarchy(
         self,
         org_id: str,
-        direction: str = "descendants",
+        direction: str = "both",
         max_depth: int = 5,
         auth_token: Optional[str] = None,
         tenant_id: Optional[int] = None
     ) -> ToolResult:
-        """Get organization hierarchy (ancestors/descendants)."""
+        """Get organization hierarchy (ancestors/descendants) by querying all orgs and building tree."""
         try:
+            # Validate and convert org_id to integer
+            try:
+                org_id_int = int(org_id)
+            except (ValueError, TypeError):
+                return ToolResult.error(
+                    content=f"Invalid org_id: {org_id}. Must be an integer.",
+                    error_code="INVALID_ORG_ID"
+                )
+            
             # Validate parameters
             if direction not in ["ancestors", "descendants", "both"]:
-                direction = "descendants"
+                direction = "both"
             if max_depth < 1 or max_depth > 10:
                 max_depth = 5
 
-            params = {
-                "path": {
-                    "org_id": org_id
-                },
-                "query": {
-                    "direction": direction,
-                    "max_depth": max_depth
+            # Query all organizations
+            try:
+                orgs_response = await self.http_client.execute(
+                    command="GET /v2/orgs",
+                    params={"query": {}},
+                    auth_token=auth_token or self.auth_token,
+                    tenant_id=tenant_id or self.tenant_id
+                )
+                
+                # Extract org list from response
+                org_list = []
+                if isinstance(orgs_response, dict):
+                    org_list = orgs_response.get("data", [])
+                
+                # Build org lookup map
+                org_map = {org.get("id"): org for org in org_list if org.get("id")}
+                
+                # Find target org
+                target_org = org_map.get(org_id_int)
+                if not target_org:
+                    return ToolResult.error(
+                        content=f"Organization {org_id} not found",
+                        error_code="ORG_NOT_FOUND"
+                    )
+                
+                # Build hierarchy
+                ancestors = []
+                descendants = []
+                
+                # Get ancestors by walking up parent_id chain
+                if direction in ["ancestors", "both"]:
+                    current = target_org
+                    depth = 0
+                    while current and depth < max_depth:
+                        parent_id = current.get("parentId")
+                        if not parent_id or parent_id == current.get("id"):
+                            break
+                        parent = org_map.get(parent_id)
+                        if not parent:
+                            break
+                        ancestors.insert(0, parent)  # Insert at beginning to maintain order
+                        current = parent
+                        depth += 1
+                
+                # Get descendants by finding all orgs with parentId pointing to org_id_int
+                if direction in ["descendants", "both"]:
+                    def find_descendants(parent_id, depth):
+                        if depth >= max_depth:
+                            return []
+                        children = [org for org in org_list if org.get("parentId") == parent_id]
+                        result = list(children)
+                        for child in children:
+                            result.extend(find_descendants(child.get("id"), depth + 1))
+                        return result
+                    
+                    descendants = find_descendants(org_id_int, 0)
+                
+                # Format response
+                summary_lines = [f"Organization Hierarchy for ID {org_id_int}: {target_org.get('name', 'Unknown')}"]
+                
+                # Process ancestors if present
+                if ancestors:
+                    summary_lines.append(f"\n👤 Parent Organizations ({len(ancestors)}):")
+                    for ancestor in ancestors:
+                        name = ancestor.get("name", ancestor.get("id", "Unknown"))
+                        org_type = ancestor.get("type", "")
+                        summary_lines.append(f"  • {name} ({org_type})")
+                
+                # Process descendants if present
+                if descendants:
+                    summary_lines.append(f"\n👥 Child Organizations ({len(descendants)}):")
+                    for descendant in descendants[:20]:  # Limit display
+                        name = descendant.get("name", descendant.get("id", "Unknown"))
+                        org_type = descendant.get("type", "")
+                        summary_lines.append(f"  • {name} ({org_type})")
+                    if len(descendants) > 20:
+                        summary_lines.append(f"  ... and {len(descendants) - 20} more")
+                
+                if not ancestors and not descendants:
+                    summary_lines.append("\nNo hierarchical relationships found.")
+                
+                content = "\n".join(summary_lines)
+                
+                # Return structured response
+                response_data = {
+                    "org_id": org_id_int,
+                    "ancestors": ancestors,
+                    "descendants": descendants
                 }
-            }
-            response = await self.http_client.execute(
-                command="GET /v2/orgs/{org_id}/hierarchy",
-                params=params,
-                auth_token=auth_token or self.auth_token,
-                tenant_id=tenant_id or self.tenant_id
-            )
-
-            # Format hierarchical data for readability
-            summary_lines = [f"Organization Hierarchy for ID {org_id}:"]
+                
+                return ToolResult.success(
+                    content=content,
+                    data=response_data
+                )
             
-            # Process ancestors if present
-            ancestors = response.get("ancestors", [])
-            if ancestors:
-                summary_lines.append(f"\n👤 Parent Organizations ({len(ancestors)}):")
-                for ancestor in ancestors:
-                    name = ancestor.get("name", ancestor.get("id", "Unknown"))
-                    org_type = ancestor.get("type", "")
-                    summary_lines.append(f"  • {name} ({org_type})")
-            
-            # Process descendants if present
-            descendants = response.get("descendants", [])
-            if descendants:
-                summary_lines.append(f"\n👥 Child Organizations ({len(descendants)}):")
-                for descendant in descendants:
-                    name = descendant.get("name", descendant.get("id", "Unknown"))
-                    org_type = descendant.get("type", "")
-                    summary_lines.append(f"  • {name} ({org_type})")
-            
-            if not ancestors and not descendants:
-                summary_lines.append("\nNo hierarchical relationships found.")
-
-            content = "\n".join(summary_lines)
-            return ToolResult.success(
-                content=content,
-                data=response
-            )
+            except Exception as e:
+                logger.error(f"Error querying organizations: {e}")
+                raise
+                
         except Exception as e:
             logger.error(f"Error getting organization hierarchy for {org_id}: {e}")
             return ToolResult.error(
