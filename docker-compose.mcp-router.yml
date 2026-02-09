@@ -1,0 +1,75 @@
+version: '3.8'
+
+services:
+  mcp-router:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp-router
+    ports:
+      - "8000:8000"
+    environment:
+      # Database
+      - MONGODB_URI=mongodb://mongodb:27017
+      - DATABASE_NAME=nl_tps
+
+      # JWT (必需 - 从环境变量设置)
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-this-in-production}
+      - JWT_ALGORITHM=HS256
+      - MCP_REQUIRED_SCOPE=mcp
+
+      # Membership
+      - MEMBERSHIP_SERVICE_URL=http://membership:8080
+
+      # Knowledge Base
+      - KB_BASE_URL=http://kb:8001
+
+      # Logging
+      - LOG_LEVEL=INFO
+
+      # Environment
+      - ENVIRONMENT=production
+    networks:
+      - internal
+    depends_on:
+      - mongodb
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+  mongodb:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - internal
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./deploy/nginx/mcp-router.conf:/etc/nginx/conf.d/mcp-router.conf:ro
+      - ./deploy/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - mcp-router
+    networks:
+      - internal
+    restart: unless-stopped
+
+volumes:
+  mongodb_data:
+
+networks:
+  internal:
+    driver: bridge

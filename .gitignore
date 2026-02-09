@@ -35,3 +35,7 @@ plan-ui/.vite/
 # Editor / OS
 .vscode/
 .DS_Store
+
+# External MCP servers (installed via EXTERNAL_MCPS config)
+/mcp/Office-Word-MCP-Server
+/mcp/mcp-pdf-extraction-server

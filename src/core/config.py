@@ -1,8 +1,9 @@
-from typing import Optional
+from typing import Optional, Dict, Any, Union
 import logging
 import sys
+import json
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, field_validator
 from dotenv import load_dotenv
 
 # Load .env file
@@ -38,6 +39,38 @@ class Settings(BaseSettings):
 
     # Logging Configuration
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
+
+    # JWT Configuration for MCP Router
+    jwt_secret_key: str = Field(default="", env="JWT_SECRET_KEY")
+    jwt_algorithm: str = Field(default="HS256", env="JWT_ALGORITHM")
+    jwt_expected_issuer: Optional[str] = Field(default=None, env="JWT_EXPECTED_ISSUER")
+    jwt_expected_audience: Optional[str] = Field(default=None, env="JWT_EXPECTED_AUDIENCE")
+
+    # WebSocket Configuration
+    ws_ping_interval: int = Field(default=20, env="WS_PING_INTERVAL")
+    ws_ping_timeout: int = Field(default=20, env="WS_PING_TIMEOUT")
+    ws_max_connections: int = Field(default=1000, env="WS_MAX_CONNECTIONS")
+
+    # MCP Configuration
+    mcp_required_scope: str = Field(default="mcp", env="MCP_REQUIRED_SCOPE")
+
+    # External MCPs Configuration
+    external_mcps: Dict[str, Dict[str, Any]] = Field(default={}, env="EXTERNAL_MCPS")
+
+    # Environment
+    environment: str = Field(default="development", env="ENVIRONMENT")
+
+    @field_validator('external_mcps', mode='before')
+    @classmethod
+    def parse_external_mcps(cls, v: Union[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        """Parse EXTERNAL_MCPS from JSON string or return dict."""
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError:
+                logger.warning(f"Failed to parse EXTERNAL_MCPS as JSON, using empty dict")
+                return {}
+        return v
 
     class Config:
         env_file = ".env"

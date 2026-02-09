@@ -4,9 +4,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from src.core.config import settings, setup_logging
 from src.routers import tasks, command_sets, executions, auth, llm, mcp, design
+from src.routers import mcp_ws  # MCP WebSocket router
 from src.llm.provider_manager import LLMProviderManager
 from src.llm.config_loader import LLMConfigLoader
 from src.mcp.registry import MCPRegistry
+from src.mcp.external_mcp import ExternalMCPServer
 from src.mcp_servers.membership_mcp import MembershipMCPServer
 from src.mcp_servers.test_mcp import TestMCPServer
 from src.mcp_servers.kb_mcp import KBMCP
@@ -91,8 +93,37 @@ async def startup_db_client():
         mcp_registry.register_mcp(bpmn_mcp)
         mcp_registry.register_mcp(form_mcp)
 
+        # Register external MCP servers from configuration
+        external_mcps_config = getattr(settings, 'external_mcps', {})
+        if external_mcps_config:
+            logger.info(f"Loading {len(external_mcps_config)} external MCP servers from configuration")
+            for mcp_name, mcp_config in external_mcps_config.items():
+                try:
+                    external_mcp = ExternalMCPServer(
+                        name=mcp_name,
+                        command=mcp_config.get("command"),
+                        args=mcp_config.get("args", []),
+                        transport=mcp_config.get("transport", "stdio"),
+                        env=mcp_config.get("env"),
+                        timeout=mcp_config.get("timeout", 30)
+                    )
+
+                    # Initialize the external MCP (connects and discovers tools)
+                    await external_mcp.initialize()
+
+                    mcp_registry.register_mcp(external_mcp)
+                    logger.info(f"Successfully registered external MCP '{mcp_name}'")
+
+                except Exception as e:
+                    logger.error(f"Failed to register external MCP '{mcp_name}': {e}")
+                    # Continue with other MCPs
+
         # Set global MCP registry for dependency injection
         app.mcp_registry = mcp_registry
+
+        # Also set in core.dependencies for WebSocket router
+        from src.core.dependencies import set_mcp_registry
+        set_mcp_registry(mcp_registry)
 
         logger.info(f"Initialized MCP Registry with {len(mcp_registry.get_all_mcps())} servers:")
         for mcp in mcp_registry.get_all_mcps():
@@ -103,6 +134,17 @@ async def startup_db_client():
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
+    # Close external MCP servers
+    if hasattr(app, 'mcp_registry'):
+        mcp_registry = app.mcp_registry
+        for mcp in mcp_registry.get_all_mcps():
+            if isinstance(mcp, ExternalMCPServer):
+                try:
+                    await mcp.close()
+                    logger.info(f"Closed external MCP '{mcp.name}'")
+                except Exception as e:
+                    logger.error(f"Error closing external MCP '{mcp.name}': {e}")
+
     app.mongodb_client.close()
     logger.info("Disconnected from MongoDB")
 
@@ -111,6 +153,7 @@ app.include_router(tasks.router, prefix="/v1/tasks", tags=["Tasks"])
 app.include_router(command_sets.router, prefix="/v1/command-sets", tags=["Command Sets"])
 app.include_router(executions.router, prefix="/v1/executions", tags=["Executions"])
 app.include_router(mcp.router, prefix="/v1/mcp", tags=["MCP"])
+app.include_router(mcp_ws.router, tags=["MCP WebSocket"])  # MCP WebSocket endpoint
 app.include_router(llm.router)  # LLM routes at /api/llm/* (no prefix)
 app.include_router(design.router)  # Design routes at /api/design/* (no prefix)
 

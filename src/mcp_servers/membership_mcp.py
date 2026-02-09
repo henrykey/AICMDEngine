@@ -574,6 +574,116 @@ class MembershipMCPServer(BaseMCPServer):
             handler=self.get_org_hierarchy
         ))
 
+        # Submit audit event tool
+        self.register_tool(Tool(
+            name="submit_audit_event",
+            description="Submit a single audit event to the membership audit service",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "category": {
+                        "type": "string",
+                        "enum": ["AUTH", "SYSTEM", "DATA", "WORKFLOW", "API"],
+                        "description": "Event category"
+                    },
+                    "action": {
+                        "type": "string",
+                        "description": "Event action (e.g., USER_LOGIN, MCP_CLIENT_CONNECT)"
+                    },
+                    "tenant_id": {
+                        "type": "integer",
+                        "description": "Tenant ID"
+                    },
+                    "actor": {
+                        "type": "object",
+                        "description": "Event actor (who performed the action)",
+                        "properties": {
+                            "memberId": {
+                                "type": "integer",
+                                "description": "Member ID (use memberId XOR systemCode)"
+                            },
+                            "systemCode": {
+                                "type": "string",
+                                "description": "System/application code (use memberId XOR systemCode)"
+                            },
+                            "ip": {
+                                "type": "string",
+                                "description": "Actor IP address"
+                            }
+                        }
+                    },
+                    "target": {
+                        "type": "object",
+                        "description": "Event target (what was acted upon)",
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "description": "Target type (e.g., user, mcp_connection, document)"
+                            },
+                            "id": {
+                                "type": "string",
+                                "description": "Target ID"
+                            }
+                        }
+                    },
+                    "metadata": {
+                        "type": "object",
+                        "description": "Additional metadata"
+                    },
+                    "occurred_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "description": "Event timestamp (optional, defaults to now)"
+                    },
+                    "auth_token": {
+                        "type": "string",
+                        "description": "Authentication token (optional, will use default if not provided)"
+                    }
+                },
+                "required": ["category", "action", "tenant_id", "actor"]
+            },
+            handler=self.submit_audit_event
+        ))
+
+        # Submit batch audit events tool
+        self.register_tool(Tool(
+            name="submit_audit_events_batch",
+            description="Submit multiple audit events to the membership audit service",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "events": {
+                        "type": "array",
+                        "description": "List of audit events",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "category": {
+                                    "type": "string",
+                                    "enum": ["AUTH", "SYSTEM", "DATA", "WORKFLOW", "API"]
+                                },
+                                "action": {"type": "string"},
+                                "tenant_id": {"type": "integer"},
+                                "actor": {"type": "object"},
+                                "target": {"type": "object"},
+                                "metadata": {"type": "object"},
+                                "occurred_at": {"type": "string", "format": "date-time"}
+                            },
+                            "required": ["category", "action", "tenant_id", "actor"]
+                        },
+                        "minItems": 1,
+                        "maxItems": 100
+                    },
+                    "auth_token": {
+                        "type": "string",
+                        "description": "Authentication token (optional, will use default if not provided)"
+                    }
+                },
+                "required": ["events"]
+            },
+            handler=self.submit_audit_events_batch
+        ))
+
     async def list_members(
         self,
         page: int = 1,
@@ -1321,3 +1431,91 @@ class MembershipMCPServer(BaseMCPServer):
             headers["Authorization"] = f"Bearer {self.auth_token}"
 
         return headers
+
+    async def submit_audit_event(
+        self,
+        category: str,
+        action: str,
+        tenant_id: int,
+        actor: Dict[str, Any],
+        target: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        occurred_at: Optional[str] = None,
+        auth_token: Optional[str] = None
+    ) -> ToolResult:
+        """Submit a single audit event."""
+        try:
+            # Build event payload according to new API spec
+            payload = {
+                "category": category.upper(),
+                "action": action,
+                "tenantId": tenant_id,
+                "actor": actor
+            }
+
+            if target:
+                payload["target"] = target
+            if metadata:
+                payload["metadata"] = metadata
+            if occurred_at:
+                payload["occurredAt"] = occurred_at
+
+            params = {
+                "body": payload
+            }
+
+            response = await self.http_client.execute(
+                command="POST /v2/audit/events",
+                params=params,
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id
+            )
+
+            return ToolResult.success(
+                content=f"Audit event accepted: {action}",
+                data=response
+            )
+        except Exception as e:
+            logger.error(f"Error submitting audit event: {e}")
+            return ToolResult.error(
+                content=f"Failed to submit audit event: {str(e)}",
+                error_code="AUDIT_SUBMIT_FAILED"
+            )
+
+    async def submit_audit_events_batch(
+        self,
+        events: list,
+        auth_token: Optional[str] = None
+    ) -> ToolResult:
+        """Submit multiple audit events."""
+        try:
+            # Build batch payload
+            payload = {
+                "events": events
+            }
+
+            params = {
+                "body": payload
+            }
+
+            # Use tenant_id from first event
+            first_event_tenant = events[0].get("tenant_id") if events else self.tenant_id
+
+            response = await self.http_client.execute(
+                command="POST /v2/audit/events/batch",
+                params=params,
+                auth_token=auth_token or self.auth_token,
+                tenant_id=first_event_tenant
+            )
+
+            count = len(events)
+            return ToolResult.success(
+                content=f"Submitted {count} audit events",
+                data=response
+            )
+        except Exception as e:
+            logger.error(f"Error submitting audit events batch: {e}")
+            return ToolResult.error(
+                content=f"Failed to submit audit events: {str(e)}",
+                error_code="AUDIT_BATCH_SUBMIT_FAILED"
+            )

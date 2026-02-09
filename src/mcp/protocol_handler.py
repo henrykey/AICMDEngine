@@ -1,0 +1,339 @@
+"""
+MCP Protocol Handler
+
+Handles JSON-RPC 2.0 messages for Model Context Protocol.
+"""
+
+from typing import Optional, Dict, Any
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class MCPMessage:
+    """MCP消息模型"""
+
+    def __init__(
+        self,
+        jsonrpc: str = "2.0",
+        id: Optional[Any] = None,
+        method: Optional[str] = None,
+        params: Optional[dict] = None,
+        result: Optional[Any] = None,
+        error: Optional[dict] = None
+    ):
+        """
+        Initialize MCP message
+
+        Args:
+            jsonrpc: JSON-RPC version (default: "2.0")
+            id: Request/Response ID
+            method: Method name for requests
+            params: Method parameters
+            result: Result for responses
+            error: Error for error responses
+        """
+        self.jsonrpc = jsonrpc
+        self.id = id
+        self.method = method
+        self.params = params or {}
+        self.result = result
+        self.error = error
+
+    def to_dict(self) -> dict:
+        """
+        转换为字典
+
+        Returns:
+            dict: Message as dictionary
+        """
+        data = {"jsonrpc": self.jsonrpc}
+
+        if self.id is not None:
+            data["id"] = self.id
+
+        if self.method:
+            data["method"] = self.method
+            if self.params:
+                data["params"] = self.params
+
+        if self.result is not None:
+            data["result"] = self.result
+
+        if self.error:
+            data["error"] = self.error
+
+        return data
+
+    @staticmethod
+    def from_dict(data: dict) -> 'MCPMessage':
+        """
+        从字典创建
+
+        Args:
+            data: Message dictionary
+
+        Returns:
+            MCPMessage: Message object
+        """
+        return MCPMessage(
+            jsonrpc=data.get("jsonrpc", "2.0"),
+            id=data.get("id"),
+            method=data.get("method"),
+            params=data.get("params"),
+            result=data.get("result"),
+            error=data.get("error")
+        )
+
+
+class MCPProtocolHandler:
+    """MCP协议处理器"""
+
+    def __init__(self):
+        """Initialize protocol handler"""
+        self.supported_methods = {
+            "initialize": self._handle_initialize,
+            "tools/list": self._handle_tools_list,
+            "tools/call": self._handle_tools_call,
+            "resources/list": self._handle_resources_list,
+            "resources/read": self._handle_resources_read,
+            "prompts/list": self._handle_prompts_list,
+            "prompts/get": self._handle_prompts_get,
+        }
+
+    async def handle_message(
+        self,
+        message: dict,
+        context: dict
+    ) -> Optional[dict]:
+        """
+        处理MCP消息
+
+        Args:
+            message: JSON-RPC message
+            context: Context info (client_info, registry, etc.)
+
+        Returns:
+            dict: JSON-RPC response
+        """
+        try:
+            mcp_msg = MCPMessage.from_dict(message)
+        except Exception as e:
+            logger.error(f"Failed to parse message: {e}")
+            return {
+                "jsonrpc": "2.0",
+                "id": message.get("id"),
+                "error": {
+                    "code": -32700,
+                    "message": "Parse error"
+                }
+            }
+
+        # 检查方法
+        if not mcp_msg.method:
+            return {
+                "jsonrpc": "2.0",
+                "id": mcp_msg.id,
+                "error": {
+                    "code": -32600,
+                    "message": "Invalid Request"
+                }
+            }
+
+        # 路由到对应的处理器
+        handler = self.supported_methods.get(mcp_msg.method)
+        if not handler:
+            return {
+                "jsonrpc": "2.0",
+                "id": mcp_msg.id,
+                "error": {
+                    "code": -32601,
+                    "message": f"Method not found: {mcp_msg.method}"
+                }
+            }
+
+        # 执行处理器
+        try:
+            result = await handler(mcp_msg, context)
+            return {
+                "jsonrpc": "2.0",
+                "id": mcp_msg.id,
+                "result": result
+            }
+        except Exception as e:
+            logger.error(f"Error handling {mcp_msg.method}: {e}")
+            return {
+                "jsonrpc": "2.0",
+                "id": mcp_msg.id,
+                "error": {
+                    "code": -32603,
+                    "message": "Internal error",
+                    "data": str(e)
+                }
+            }
+
+    async def _handle_initialize(
+        self,
+        message: MCPMessage,
+        context: dict
+    ) -> dict:
+        """
+        处理initialize请求
+
+        Args:
+            message: MCP message
+            context: Context info
+
+        Returns:
+            dict: Server info and capabilities
+        """
+        params = message.params or {}
+        client_info = context.get("client_info", {})
+
+        logger.info(
+            f"Initialize handshake from {client_info.get('client_id')}"
+        )
+
+        return {
+            "protocolVersion": "2024-11-05",
+            "serverInfo": {
+                "name": "AICMDEngine MCP Router",
+                "version": "1.0.0"
+            },
+            "capabilities": {
+                "tools": {},
+                "resources": {},
+                "prompts": {}
+            }
+        }
+
+    async def _handle_tools_list(
+        self,
+        message: MCPMessage,
+        context: dict
+    ) -> dict:
+        """
+        处理tools/list请求
+
+        Args:
+            message: MCP message
+            context: Context info
+
+        Returns:
+            dict: List of available tools
+        """
+        registry = context.get("registry")
+        if not registry:
+            raise ValueError("Registry not available")
+
+        tools = []
+        for mcp in registry.get_all_mcps():
+            mcp_info = mcp.get_info()
+            tools_list = mcp_info.get("tools", [])
+
+            # tools可能是list或dict
+            if isinstance(tools_list, dict):
+                tools_list_items = tools_list.items()
+            else:
+                tools_list_items = [(t.get("name"), t) for t in tools_list]
+
+            for tool_name, tool_info in tools_list_items:
+                tools.append({
+                    "name": f"{mcp.name}.{tool_name}",
+                    "description": tool_info.get("description", ""),
+                    "inputSchema": tool_info.get("inputSchema", {})
+                })
+
+        logger.info(f"Listed {len(tools)} tools")
+        return {"tools": tools}
+
+    async def _handle_tools_call(
+        self,
+        message: MCPMessage,
+        context: dict
+    ) -> dict:
+        """
+        处理tools/call请求
+
+        Args:
+            message: MCP message
+            context: Context info
+
+        Returns:
+            dict: Tool execution result
+        """
+        registry = context.get("registry")
+        if not registry:
+            raise ValueError("Registry not available")
+
+        params = message.params or {}
+        tool_name = params.get("name")
+        arguments = params.get("arguments", {})
+
+        if not tool_name:
+            raise ValueError("Missing tool name")
+
+        # 解析工具名称
+        parts = tool_name.split(".", 1)
+        if len(parts) != 2:
+            raise ValueError(f"Invalid tool name format: {tool_name}")
+
+        mcp_name, tool_name = parts
+
+        logger.info(f"Executing tool: {mcp_name}.{tool_name}")
+
+        # 执行工具
+        try:
+            result = await registry.execute_command(
+                mcp_name=mcp_name,
+                tool_name=tool_name,
+                **arguments
+            )
+
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": result.content
+                }],
+                "isError": not result.success
+            }
+
+        except Exception as e:
+            logger.error(f"Tool execution error: {e}")
+            raise
+
+    async def _handle_resources_list(
+        self,
+        message: MCPMessage,
+        context: dict
+    ) -> dict:
+        """处理resources/list请求"""
+        # 暂不实现resources
+        return {"resources": []}
+
+    async def _handle_resources_read(
+        self,
+        message: MCPMessage,
+        context: dict
+    ) -> dict:
+        """处理resources/read请求"""
+        # 暂不实现resources
+        raise ValueError("Resources not implemented")
+
+    async def _handle_prompts_list(
+        self,
+        message: MCPMessage,
+        context: dict
+    ) -> dict:
+        """处理prompts/list请求"""
+        # 暂不实现prompts
+        return {"prompts": []}
+
+    async def _handle_prompts_get(
+        self,
+        message: MCPMessage,
+        context: dict
+    ) -> dict:
+        """处理prompts/get请求"""
+        # 暂不实现prompts
+        raise ValueError("Prompts not implemented")
