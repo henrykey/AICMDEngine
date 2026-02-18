@@ -7,6 +7,7 @@ This MCP server exposes Membership API commands as tools.
 from typing import Optional, Dict, Any
 import logging
 import os
+import re
 from datetime import datetime
 
 from ..mcp import BaseMCPServer, Tool, ToolResult
@@ -35,7 +36,8 @@ class MembershipMCPServer(BaseMCPServer):
         self.tenant_id = tenant_id or settings.fixed_tenant_id
         self.auth_token = auth_token
         self.base_url = settings.membership_service_url
-        self.http_client = HTTPClient(base_url=self.base_url)
+        # Pass membership_url as well so token refresh can work on 401
+        self.http_client = HTTPClient(base_url=self.base_url, membership_url=self.base_url)
         self._register_tools()
 
     def _register_tools(self) -> None:
@@ -258,6 +260,53 @@ class MembershipMCPServer(BaseMCPServer):
             handler=self.list_roles
         ))
 
+        # Create role tool
+        self.register_tool(Tool(
+            name="create_role",
+            description="Create a new role/position in an organization",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Role name"
+                    },
+                    "code": {
+                        "type": "string",
+                        "description": "Role code (optional, auto-generated when omitted)"
+                    },
+                    "org_id": {
+                        "type": "integer",
+                        "description": "Organization ID this role belongs to"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Role description (optional)"
+                    },
+                    "is_position": {
+                        "type": "boolean",
+                        "description": "Whether this is a position role",
+                        "default": False
+                    },
+                    "active": {
+                        "type": "boolean",
+                        "description": "Whether role is active",
+                        "default": True
+                    },
+                    "auth_token": {
+                        "type": "string",
+                        "description": "Authentication token (optional, will use default if not provided)"
+                    },
+                    "tenant_id": {
+                        "type": "integer",
+                        "description": "Tenant ID (optional, will use default if not provided)"
+                    }
+                },
+                "required": ["name", "org_id"]
+            },
+            handler=self.create_role
+        ))
+
         # Assign role tool
         self.register_tool(Tool(
             name="assign_role",
@@ -356,7 +405,11 @@ class MembershipMCPServer(BaseMCPServer):
                     "type": {
                         "type": "string",
                         "enum": ["company", "dept", "team", "committee", "project", "taskforce"],
-                        "description": "Type of organization unit"
+                        "description": "Type of organization unit (optional, auto-inferred if omitted)"
+                    },
+                    "parent_id": {
+                        "type": "integer",
+                        "description": "Parent organization ID (optional)"
                     },
                     "description": {
                         "type": "string",
@@ -372,6 +425,11 @@ class MembershipMCPServer(BaseMCPServer):
                         "format": "date-time",
                         "description": "Expiration date for temporary units (optional)"
                     },
+                    "force_create": {
+                        "type": "boolean",
+                        "description": "Force create even when similar organization names already exist",
+                        "default": False
+                    },
                     "auth_token": {
                         "type": "string",
                         "description": "Authentication token (optional, will use default if not provided)"
@@ -381,7 +439,7 @@ class MembershipMCPServer(BaseMCPServer):
                         "description": "Tenant ID (optional, will use default if not provided)"
                     }
                 },
-                "required": ["name", "type"]
+                "required": ["name"]
             },
             handler=self.create_org
         ))
@@ -991,6 +1049,88 @@ class MembershipMCPServer(BaseMCPServer):
                 error_code="LIST_ROLES_FAILED"
             )
 
+    async def create_role(
+        self,
+        name: str,
+        org_id: int,
+        code: Optional[str] = None,
+        description: Optional[str] = None,
+        is_position: bool = False,
+        active: bool = True,
+        auth_token: Optional[str] = None,
+        tenant_id: Optional[int] = None
+    ) -> ToolResult:
+        """Create a role in an organization."""
+        try:
+            effective_token = auth_token or self.auth_token
+            effective_tenant = tenant_id or self.tenant_id
+            org_id_int = int(org_id)
+
+            # Pre-check existing roles in this org:
+            # - same name => reuse directly
+            # - collect existing codes for uniqueness
+            roles_resp = await self.http_client.execute(
+                command="GET /v2/roles",
+                params={"query": {"page": 1, "limit": 200, "org_id": org_id_int}},
+                auth_token=effective_token,
+                tenant_id=effective_tenant
+            )
+            existing_roles = roles_resp.get("data", []) if isinstance(roles_resp, dict) else []
+
+            existing_codes = set()
+            for role in existing_roles:
+                role_name = str(role.get("name", "")).strip().lower()
+                role_org = role.get("org_id", role.get("orgId"))
+                role_code = role.get("code")
+
+                if role_code:
+                    existing_codes.add(str(role_code).upper())
+
+                if role_name == name.strip().lower() and (
+                    role_org is None or str(role_org) == str(org_id_int)
+                ):
+                    return ToolResult.success(
+                        content=f"Role already exists. Reused existing: {name}",
+                        data=role
+                    )
+
+            final_code = self._build_unique_role_code(
+                base_code=code or self._role_code_from_name(name),
+                org_id=org_id_int,
+                existing_codes=existing_codes
+            )
+
+            payload = {
+                "name": name,
+                "code": final_code,
+                "org_id": org_id_int,
+                "is_position": is_position,
+                "active": active
+            }
+            if description:
+                payload["description"] = description
+
+            params = {
+                "body": payload
+            }
+            response = await self.http_client.execute(
+                command="POST /v2/roles",
+                params=params,
+                auth_token=effective_token,
+                tenant_id=effective_tenant
+            )
+
+            return ToolResult.success(
+                content=f"Created role {name} (code: {final_code})",
+                data=response
+            )
+        except Exception as e:
+            logger.error(f"Error creating role {name}: {e}")
+            return ToolResult.error(
+                content=f"Failed to create role: {str(e)}",
+                error_code="CREATE_ROLE_FAILED"
+            )
+
     async def assign_role(self, member_id: str, role_id: str, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
         """Assign a role to a member."""
         try:
@@ -1220,33 +1360,92 @@ class MembershipMCPServer(BaseMCPServer):
     async def create_org(
         self,
         name: str,
-        type: str,
+        type: Optional[str] = None,
+        parent_id: Optional[int] = None,
         description: Optional[str] = None,
         is_temporary: bool = False,
         valid_until: Optional[str] = None,
+        force_create: bool = False,
         auth_token: Optional[str] = None,
         tenant_id: Optional[int] = None
     ) -> ToolResult:
-        """Create a new organization unit."""
+        """Create a new organization unit with semantic dedup safeguards."""
         try:
+            effective_token = auth_token or self.auth_token
+            effective_tenant = tenant_id or self.tenant_id
+
+            # Infer org type when omitted: root defaults to company, child defaults to dept
+            inferred_type = type or ("company" if parent_id is None else "dept")
+
+            # Pre-check existing orgs to avoid semantic duplicates
+            orgs_resp = await self.http_client.execute(
+                command="GET /v2/orgs",
+                params={"query": {"page": 1, "limit": 200}},
+                auth_token=effective_token,
+                tenant_id=effective_tenant
+            )
+            existing_orgs = orgs_resp.get("data", []) if isinstance(orgs_resp, dict) else []
+
+            target_key = self._org_name_semantic_key(name)
+            target_parent = parent_id
+
+            # 1) Exact semantic match under same parent -> reuse
+            for org in existing_orgs:
+                org_name = str(org.get("name", ""))
+                org_parent = org.get("parentId")
+                if org_parent != target_parent:
+                    continue
+                if self._org_name_semantic_key(org_name) == target_key:
+                    return ToolResult.success(
+                        content=f"Organization already exists. Reused existing: {org_name}",
+                        data=org
+                    )
+
+            # 2) Ambiguous similar names -> require explicit confirmation
+            if not force_create:
+                similar = []
+                for org in existing_orgs:
+                    org_name = str(org.get("name", ""))
+                    org_parent = org.get("parentId")
+                    if org_parent != target_parent:
+                        continue
+                    score = self._org_name_similarity(name, org_name)
+                    if score >= 0.75:
+                        similar.append({
+                            "id": org.get("id"),
+                            "name": org_name,
+                            "similarity": round(score, 3)
+                        })
+
+                if similar:
+                    similar_sorted = sorted(similar, key=lambda x: x["similarity"], reverse=True)[:5]
+                    return ToolResult.error(
+                        content=(
+                            "Found similar existing organization names. "
+                            "Please confirm reuse vs force create. Candidates: "
+                            f"{similar_sorted}"
+                        ),
+                        error_code="AMBIGUOUS_ORG_MATCH"
+                    )
+
             payload = {
                 "name": name,
-                "type": type,
+                "type": inferred_type,
                 "isTemporary": is_temporary
             }
+            if parent_id is not None:
+                payload["parentId"] = parent_id
             if description:
                 payload["description"] = description
             if valid_until:
                 payload["validUntil"] = valid_until
 
-            params = {
-                "body": payload
-            }
+            params = {"body": payload}
             response = await self.http_client.execute(
                 command="POST /v2/orgs",
                 params=params,
-                auth_token=auth_token or self.auth_token,
-                tenant_id=tenant_id or self.tenant_id
+                auth_token=effective_token,
+                tenant_id=effective_tenant
             )
 
             return ToolResult.success(
@@ -1259,6 +1458,7 @@ class MembershipMCPServer(BaseMCPServer):
                 content=f"Failed to create organization: {str(e)}",
                 error_code="CREATE_ORG_FAILED"
             )
+
 
     async def update_org(
         self,
@@ -1419,6 +1619,56 @@ class MembershipMCPServer(BaseMCPServer):
                 content=f"Failed to remove member from organization: {str(e)}",
                 error_code="REMOVE_MEMBER_FROM_ORG_FAILED"
             )
+
+    def _org_name_semantic_key(self, name: str) -> str:
+        """Build a normalized semantic key for organization names."""
+        if not name:
+            return ""
+        normalized = re.sub(r"[^a-z0-9\s]", " ", name.lower()).strip()
+        normalized = re.sub(r"\s+", " ", normalized)
+        stopwords = {"company", "co", "corp", "corporation", "inc", "llc", "ltd", "limited", "the"}
+        tokens = [t for t in normalized.split(" ") if t and t not in stopwords]
+        return " ".join(tokens)
+
+    def _org_name_similarity(self, a: str, b: str) -> float:
+        """Token-set similarity for organization names (0~1)."""
+        a_tokens = set(self._org_name_semantic_key(a).split())
+        b_tokens = set(self._org_name_semantic_key(b).split())
+        if not a_tokens or not b_tokens:
+            return 0.0
+        inter = len(a_tokens & b_tokens)
+        union = len(a_tokens | b_tokens)
+        return inter / union if union else 0.0
+
+    def _role_code_from_name(self, name: str) -> str:
+        """Generate a normalized role code from role name."""
+        raw = re.sub(r"[^A-Za-z0-9]+", "_", (name or "").strip().upper()).strip("_")
+        return raw or "ROLE"
+
+    def _build_unique_role_code(self, base_code: str, org_id: int, existing_codes: set) -> str:
+        """
+        Build unique role code under global-unique constraints.
+        Tries BASE -> BASE_{org_id} -> BASE_{org_id}_{n}.
+        """
+        def shrink(code: str) -> str:
+            return code[:64]
+
+        normalized_base = shrink(re.sub(r"[^A-Za-z0-9_]+", "_", (base_code or "ROLE").upper()).strip("_") or "ROLE")
+        if normalized_base not in existing_codes:
+            return normalized_base
+
+        by_org = shrink(f"{normalized_base}_{org_id}")
+        if by_org not in existing_codes:
+            return by_org
+
+        for i in range(2, 1000):
+            candidate = shrink(f"{normalized_base}_{org_id}_{i}")
+            if candidate not in existing_codes:
+                return candidate
+
+        # Last resort: timestamp suffix
+        suffix = datetime.utcnow().strftime("%H%M%S")
+        return shrink(f"{normalized_base}_{org_id}_{suffix}")
 
     def _get_headers(self) -> Dict[str, str]:
         """Get HTTP headers with tenant and auth information."""

@@ -23,15 +23,12 @@ async def create_task(
     """
     # Extract Authorization header from HTTP request (same as execute router)
     auth_token = None
-    all_headers = dict(http_request.headers)
-    logger.info(f"📨 Request headers: {all_headers}")
     auth_header = http_request.headers.get("Authorization", "")
-    logger.info(f"📨 Authorization header value: '{auth_header}'")
     if auth_header.startswith("Bearer "):
         auth_token = auth_header[7:]  # Remove "Bearer " prefix
-        logger.info(f"✅ AUTH TOKEN EXTRACTED: {auth_token}")
+        logger.debug("Auth token extracted for planning request")
     else:
-        logger.warning(f"❌ NO BEARER TOKEN IN HEADER, auth_header='{auth_header}'")
+        logger.debug("No bearer token provided for planning request")
     
     response = await engine.plan_task(task_request, tenant_id, auth_token=auth_token)
     return response

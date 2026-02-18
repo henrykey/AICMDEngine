@@ -41,7 +41,8 @@ class LLMClient:
         self,
         messages: list[Dict[str, str]],
         temperature: float = 0.0,
-        response_format: Optional[Dict[str, Any]] = None
+        response_format: Optional[Dict[str, Any]] = None,
+        max_tokens: int = 4000
     ) -> str:
         """
         Generate LLM response with automatic fallback mechanism.
@@ -57,6 +58,7 @@ class LLMClient:
                     "model": current_provider['model'],
                     "messages": messages,
                     "temperature": temperature,
+                    "max_tokens": max_tokens,
                 }
                 if response_format:
                     kwargs["response_format"] = response_format
@@ -67,8 +69,17 @@ class LLMClient:
 
                 response = await current_provider['client'].chat.completions.create(**kwargs)
 
-                logger.info(f"Successfully got response from provider='{current_provider['name']}'")
-                return response.choices[0].message.content
+                finish_reason = None
+                content = ""
+                if response.choices:
+                    finish_reason = response.choices[0].finish_reason
+                    content = response.choices[0].message.content or ""
+
+                logger.info(
+                    f"Successfully got response from provider='{current_provider['name']}', "
+                    f"finish_reason='{finish_reason}', content_len={len(content)}"
+                )
+                return content
 
             except RateLimitError as e:
                 last_error = e

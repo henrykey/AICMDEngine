@@ -328,9 +328,11 @@ class ExecutionEngine:
             step_results=step_results
         )
 
-        # 检查是否有未解析的 JSONPath 引用（值为 None）
-        if self._contains_none_values(resolved_params):
-            unresolved_fields = self._find_unresolved_fields(resolved_params, step_def.get('params', {}))
+        # 检查未解析的 JSONPath 引用。
+        # 注意：params 中的 None 可能是合法的可选参数（例如 parent_id=None），
+        # 只有当 None 是由 JSONPath 解析失败导致时才应判定为错误。
+        unresolved_fields = self._find_unresolved_fields(resolved_params, step_def.get('params', {}))
+        if unresolved_fields:
             error_msg = f"Step {step.step_number} failed to extract values from previous steps. Could not resolve: {unresolved_fields}. This usually means a previous step did not return the expected data structure."
             logger.error(error_msg)
             logger.debug(f"Original params: {step_def.get('params', {})}, Resolved params: {resolved_params}")
@@ -779,6 +781,17 @@ class ExecutionEngine:
                     # 因为 response_data 本身就是响应的内容
                     if part == "response" and i == 0 and not skipped_response:
                         skipped_response = True
+                        continue
+
+                    # 对常见包装层做兼容：部分 MCP 返回的是实体对象而非 {data: ...}
+                    # 若路径要求 .data/.body 但当前没有该键，则尝试按后续访问模式自适配。
+                    if part not in current and part in {"data", "body"}:
+                        next_part = path_parts[i + 1] if i + 1 < len(path_parts) else None
+                        if next_part and next_part.startswith("["):
+                            # 后续要做 [0] 或过滤器 [?(...)], 统一包装为单元素列表
+                            current = [current]
+                            continue
+                        # 后续是字段访问，跳过这一层包装名
                         continue
 
                     # 尝试直接访问
