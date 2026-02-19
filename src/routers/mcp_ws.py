@@ -53,17 +53,27 @@ async def mcp_websocket_endpoint(
         await websocket.close(code=1011, reason="Server not ready")
         return
 
-    # 初始化认证器
+    # 初始化认证器（委托给 membership 服务）
     auth_config = JWTAuthConfig(
-        secret_key=settings.jwt_secret_key,
-        algorithm=settings.jwt_algorithm,
-        required_scope=settings.mcp_required_scope
+        membership_url=settings.membership_service_url,
+        required_scope="mcp"
     )
     auth = MCPJWTAuth(auth_config)
 
-    # 认证客户端
+    # 认证客户端（委托给 membership 服务）
     client_info = await auth.authenticate_websocket(websocket)
     if not client_info:
+        return
+
+    # 保存原始JWT token用于后续API调用
+    token = websocket.query_params.get("token")
+    auth_header = websocket.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+
+    if not token:
+        logger.error("JWT token not found in WebSocket connection")
+        await websocket.close(code=4001, reason="Missing token")
         return
 
     client_id = client_info["client_id"]
@@ -95,10 +105,11 @@ async def mcp_websocket_endpoint(
         f"Active connections: {connection_manager.get_connection_count()}"
     )
 
-    # 准备上下文
+    # 准备上下文（包含JWT token用于工具调用）
     context = {
         "client_id": client_id,
         "client_info": client_info,
+        "jwt_token": token,  # 保存JWT token用于后续API调用
         "registry": registry,
         "audit_logger": audit_logger
     }

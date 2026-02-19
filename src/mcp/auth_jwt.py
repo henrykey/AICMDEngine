@@ -2,13 +2,12 @@
 JWT Authentication for MCP Router
 
 This module provides JWT authentication for WebSocket connections,
-validating tokens and checking for MCP permissions.
+delegating token validation to Membership Service.
 """
 
 from typing import Optional, Dict, Any
 from datetime import datetime
-import jwt
-from jwt import PyJWTError
+import httpx
 from fastapi import HTTPException, WebSocket, status
 import logging
 
@@ -20,27 +19,18 @@ class JWTAuthConfig:
 
     def __init__(
         self,
-        secret_key: str,
-        algorithm: str = "HS256",
+        membership_url: str,
         required_scope: str = "mcp",
-        issuer: Optional[str] = None,
-        audience: Optional[str] = None
     ):
         """
         Initialize JWT auth config
 
         Args:
-            secret_key: JWT secret key for validation
-            algorithm: JWT algorithm (default: HS256)
+            membership_url: Membership service URL (e.g., "http://localhost:8080")
             required_scope: Required scope/permission (default: "mcp")
-            issuer: Expected JWT issuer (optional)
-            audience: Expected JWT audience (optional)
         """
-        self.secret_key = secret_key
-        self.algorithm = algorithm
+        self.membership_url = membership_url
         self.required_scope = required_scope
-        self.issuer = issuer
-        self.audience = audience
 
 
 class MCPJWTAuth:
@@ -55,9 +45,9 @@ class MCPJWTAuth:
         """
         self.config = config
 
-    def validate_token(self, token: str) -> dict:
+    async def validate_token(self, token: str) -> dict:
         """
-        验证JWT token并返回payload
+        验证JWT token并返回payload（委托给 membership 服务）
 
         Args:
             token: JWT string
@@ -69,72 +59,33 @@ class MCPJWTAuth:
             HTTPException: Token无效或缺少MCP权限
         """
         try:
-            # 解码JWT
-            payload = jwt.decode(
-                token,
-                self.config.secret_key,
-                algorithms=[self.config.algorithm],
-                issuer=self.config.issuer,
-                audience=self.config.audience
-            )
-
-            # 检查MCP权限
-            if not self._has_mcp_permission(payload):
-                logger.warning(
-                    f"Token valid but missing MCP permission: "
-                    f"{payload.get('sub')}"
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Missing MCP permission scope"
+            # 调用 membership 服务验证 token
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(
+                    f"{self.config.membership_url}/v2/auth/validate",
+                    headers={
+                        "Authorization": f"Bearer {token}"
+                    }
                 )
 
-            logger.info(f"JWT validated successfully for: {payload.get('sub')}")
-            return payload
+                if response.status_code == 200:
+                    payload = response.json()
+                    logger.info(f"Token validated by membership service for: {payload.get('sub')}")
+                    return payload
+                else:
+                    error_detail = response.json().get("error_message", "Validation failed")
+                    logger.error(f"Token validation failed: {error_detail}")
+                    raise HTTPException(
+                        status_code=response.status_code,
+                        detail=error_detail
+                    )
 
-        except PyJWTError as e:
-            logger.error(f"JWT validation failed: {str(e)}")
+        except httpx.RequestError as e:
+            logger.error(f"Failed to connect to membership service: {e}")
             raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=f"Invalid token: {str(e)}"
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Authentication service unavailable"
             )
-
-    def _has_mcp_permission(self, payload: dict) -> bool:
-        """
-        检查payload中是否包含MCP权限
-
-        支持多种格式:
-        - scopes: ["mcp:*", "mcp.read", ...]
-        - permissions: ["mcp.access", "mcp.tools.execute", ...]
-        - resource_access: {"mcp": {"roles": ["admin"]}}
-
-        Args:
-            payload: JWT payload
-
-        Returns:
-            bool: True if has MCP permission
-        """
-        # 方式1: 检查scopes字段
-        scopes = payload.get("scopes", payload.get("scope", []))
-        if isinstance(scopes, str):
-            scopes = scopes.split()
-
-        for scope in scopes:
-            if scope.startswith("mcp") or scope == "mcp:*":
-                return True
-
-        # 方式2: 检查permissions字段
-        permissions = payload.get("permissions", [])
-        for perm in permissions:
-            if perm.startswith("mcp"):
-                return True
-
-        # 方式3: 检查resource_access (Keycloak风格)
-        resource_access = payload.get("resource_access", {})
-        if "mcp" in resource_access:
-            return True
-
-        return False
 
     def extract_client_info(self, payload: dict) -> dict:
         """
@@ -189,7 +140,8 @@ class MCPJWTAuth:
             return None
 
         try:
-            payload = self.validate_token(token)
+            # 调用 membership 服务验证 token
+            payload = await self.validate_token(token)
             client_info = self.extract_client_info(payload)
 
             logger.info(

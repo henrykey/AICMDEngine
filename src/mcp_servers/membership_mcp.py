@@ -764,12 +764,10 @@ class MembershipMCPServer(BaseMCPServer):
                     error_code="AUTH_REQUIRED"
                 )
 
+            # If no tenant_id, use default (for superadmin or system users)
             if not effective_tenant:
-                logger.error("list_members called without tenant_id")
-                return ToolResult.error(
-                    content="Tenant ID required. Please provide tenant_id parameter.",
-                    error_code="TENANT_REQUIRED"
-                )
+                logger.info("No tenant_id provided, using default tenant_id=1")
+                effective_tenant = 1
 
             # Log for debugging
             logger.debug(f"list_members called with token: {effective_token[:20] if effective_token else 'None'}..., tenant: {effective_tenant}")

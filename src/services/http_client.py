@@ -178,6 +178,11 @@ class HTTPClient:
             logger.warning("Membership URL not configured, cannot refresh token")
             return None
 
+        # Don't attempt refresh if token is None or invalid
+        if not current_token or current_token == "None" or not isinstance(current_token, str):
+            logger.warning(f"Cannot refresh token: invalid token value '{current_token}'")
+            return None
+
         try:
             refresh_url = urljoin(self.membership_url, "/v2/auth/token/refresh")
             logger.info(f"Refreshing token from {refresh_url}")

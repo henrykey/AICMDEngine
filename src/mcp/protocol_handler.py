@@ -266,6 +266,11 @@ class MCPProtocolHandler:
         if not registry:
             raise ValueError("Registry not available")
 
+        # 获取JWT token和tenant_id用于工具调用
+        jwt_token = context.get("jwt_token")
+        client_info = context.get("client_info", {})
+        tenant_id = client_info.get("tenant_id")
+
         params = message.params or {}
         tool_name = params.get("name")
         arguments = params.get("arguments", {})
@@ -282,11 +287,13 @@ class MCPProtocolHandler:
 
         logger.info(f"Executing tool: {mcp_name}.{tool_name}")
 
-        # 执行工具
+        # 执行工具（传递JWT token和tenant_id）
         try:
             result = await registry.execute_command(
                 mcp_name=mcp_name,
                 tool_name=tool_name,
+                auth_token=jwt_token,  # 传递JWT token
+                tenant_id=tenant_id,   # 传递tenant_id
                 **arguments
             )
 
