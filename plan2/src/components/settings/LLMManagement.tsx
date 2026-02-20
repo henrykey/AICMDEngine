@@ -23,6 +23,18 @@ interface LLMProvider {
     region: string;
     max_qps: number;
   };
+  // Capability detection fields
+  capabilities?: string[];
+  context_window?: number;
+  supports_multimodal?: boolean;
+  supported_formats?: string[];
+  embedding_dimensions?: number | null;
+  capabilities_detection_status?: 'pending' | 'detecting' | 'completed' | 'failed';
+  capabilities_last_updated?: string;
+  capabilities_detection_error?: string | null;
+  is_current?: boolean;
+  is_initialized?: boolean;
+  capabilities_mode?: 'auto' | 'manual';
 }
 
 const LLMManagement = () => {
@@ -158,6 +170,77 @@ const LLMManagement = () => {
     setShowTestPanel(true);
   };
 
+  // 处理重试能力检测
+  const handleRetryDetection = async (name: string) => {
+    try {
+      const config = getConfig();
+      const baseUrl = config.nlTpsApiUrl.replace('/v1', '');
+      const url = `${baseUrl}/api/llm/providers/${name}/retry-detection`;
+      const response = await fetch(url, {
+        method: 'POST',
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to retry detection: ${response.status} ${response.statusText}`);
+      }
+
+      const result = await response.json();
+      console.log('Detection restarted:', result.task_id);
+
+      // Refresh providers to show updated status
+      await fetchProviders();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unknown error');
+    }
+  };
+
+  // WebSocket连接以接收实时能力检测更新
+  useEffect(() => {
+    const config = getConfig();
+    const wsUrl = `${config.nlTpsApiUrl.replace('/v1', '').replace('http', 'ws')}/api/llm/ws/notifications`;
+
+    const ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+      console.log('WebSocket connected for capability detection updates');
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+
+        // 处理能力检测状态更新
+        if (data.type === 'capability_detection_status' || data.type === 'capability_update') {
+          console.log('Capability detection update:', data);
+          // 刷新提供商列表以显示最新状态
+          fetchProviders();
+        }
+      } catch (err) {
+        console.error('Failed to parse WebSocket message:', err);
+      }
+    };
+
+    ws.onerror = (error) => {
+      console.error('WebSocket error:', error);
+    };
+
+    ws.onclose = () => {
+      console.log('WebSocket disconnected');
+    };
+
+    // 发送ping保持连接
+    const pingInterval = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'ping' }));
+      }
+    }, 30000);
+
+    return () => {
+      clearInterval(pingInterval);
+      ws.close();
+    };
+  }, []);
+
   return (
     <div className="flex flex-col h-full overflow-hidden">
       {/* 顶部 */}
@@ -215,6 +298,7 @@ const LLMManagement = () => {
               onDelete={handleDeleteProvider}
               onTest={handleTestProvider}
               onSelect={handleSelectProvider}
+              onRetryDetection={handleRetryDetection}
             />
           )}
         </div>
@@ -297,6 +381,113 @@ const ProviderDetails = ({ provider }: ProviderDetailsProps) => (
           <p className="text-slate-900">${provider.cost_per_1k_tokens.toFixed(6)}</p>
         </div>
       </div>
+
+      {/* Capabilities Section */}
+      {(provider.capabilities || provider.context_window || provider.supports_multimodal) && (
+        <div className="border-t border-slate-200 pt-4 space-y-3">
+          <h3 className="text-sm font-semibold text-slate-700">Capabilities</h3>
+
+          {provider.capabilities && provider.capabilities.length > 0 && (
+            <div>
+              <label className="text-xs text-slate-600">Supported Capabilities</label>
+              <div className="flex flex-wrap gap-2 mt-1">
+                {provider.capabilities.map((cap) => (
+                  <span key={cap} className="px-3 py-1 bg-purple-100 text-purple-800 text-sm rounded-full font-medium">
+                    {cap}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {provider.context_window && (
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="text-xs text-slate-600">Context Window</label>
+                <p className="text-slate-900">{provider.context_window.toLocaleString()} tokens</p>
+              </div>
+              {provider.supports_multimodal !== undefined && (
+                <div>
+                  <label className="text-xs text-slate-600">Multimodal Support</label>
+                  <p className="text-slate-900">{provider.supports_multimodal ? 'Yes' : 'No'}</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {provider.supported_formats && provider.supported_formats.length > 0 && (
+            <div>
+              <label className="text-xs text-slate-600">Supported Formats</label>
+              <div className="flex flex-wrap gap-1 mt-1">
+                {provider.supported_formats.map((fmt) => (
+                  <span key={fmt} className="px-2 py-0.5 bg-slate-200 text-slate-700 text-xs rounded">
+                    {fmt}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {provider.embedding_dimensions && (
+            <div>
+              <label className="text-xs text-slate-600">Embedding Dimensions</label>
+              <p className="text-slate-900">{provider.embedding_dimensions}</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Detection Status Section */}
+      {provider.capabilities_detection_status && (
+        <div className="border-t border-slate-200 pt-4 space-y-3">
+          <h3 className="text-sm font-semibold text-slate-700">Capability Detection</h3>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="text-xs text-slate-600">Status</label>
+              <p className={`inline-block px-3 py-1 rounded-full text-sm font-medium ${
+                provider.capabilities_detection_status === 'completed' ? 'bg-green-100 text-green-800' :
+                provider.capabilities_detection_status === 'detecting' ? 'bg-blue-100 text-blue-800' :
+                provider.capabilities_detection_status === 'failed' ? 'bg-red-100 text-red-800' :
+                'bg-gray-100 text-gray-800'
+              }`}>
+                {provider.capabilities_detection_status === 'completed' ? '✓ Completed' :
+                 provider.capabilities_detection_status === 'detecting' ? '🔍 Detecting...' :
+                 provider.capabilities_detection_status === 'failed' ? '⚠️ Failed' :
+                 '⏳ Pending'}
+              </p>
+            </div>
+
+            {provider.capabilities_mode && (
+              <div>
+                <label className="text-xs text-slate-600">Mode</label>
+                <p className="text-slate-900">
+                  {provider.capabilities_mode === 'auto' ? 'Auto-detected' : 'Manual'}
+                </p>
+              </div>
+            )}
+          </div>
+
+          {provider.capabilities_last_updated && (
+            <div>
+              <label className="text-xs text-slate-600">Last Updated</label>
+              <p className="text-slate-900 text-sm">
+                {new Date(provider.capabilities_last_updated).toLocaleString()}
+              </p>
+            </div>
+          )}
+
+          {provider.capabilities_detection_error && (
+            <div>
+              <label className="text-xs text-slate-600">Error</label>
+              <p className="text-red-700 text-sm bg-red-50 p-2 rounded">
+                {provider.capabilities_detection_error}
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
       <div>
         <label className="text-sm font-semibold text-slate-700">Status</label>
         <p className={`inline-block px-3 py-1 rounded-full text-sm font-medium ${

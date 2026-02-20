@@ -9,6 +9,11 @@ interface LLMProvider {
   metadata?: {
     provider_name: string;
   };
+  // Capability detection fields
+  capabilities?: string[];
+  capabilities_detection_status?: 'pending' | 'detecting' | 'completed' | 'failed';
+  capabilities_detection_error?: string | null;
+  capabilities_mode?: 'auto' | 'manual';
 }
 
 interface ProviderListProps {
@@ -19,6 +24,7 @@ interface ProviderListProps {
   onDelete: (name: string) => void;
   onTest: (name: string) => void;
   onSelect: (name: string) => void;
+  onRetryDetection?: (name: string) => void;
 }
 
 const ProviderList = ({
@@ -29,7 +35,79 @@ const ProviderList = ({
   onDelete,
   onTest,
   onSelect,
+  onRetryDetection,
 }: ProviderListProps) => {
+
+  // 获取检测状态对应的样式
+  const getDetectionStatusBadge = (provider: LLMProvider) => {
+    const status = provider.capabilities_detection_status;
+    if (!status || status === 'pending') {
+      return (
+        <span className="px-2 py-1 bg-gray-100 text-gray-700 text-xs rounded-full font-medium">
+          ⏳ Pending
+        </span>
+      );
+    }
+    if (status === 'detecting') {
+      return (
+        <span className="px-2 py-1 bg-blue-100 text-blue-800 text-xs rounded-full font-medium animate-pulse">
+          🔍 Detecting...
+        </span>
+      );
+    }
+    if (status === 'completed') {
+      return (
+        <span className="px-2 py-1 bg-green-100 text-green-800 text-xs rounded-full font-medium">
+          ✓ Detected
+        </span>
+      );
+    }
+    if (status === 'failed') {
+      return (
+        <span className="px-2 py-1 bg-red-100 text-red-800 text-xs rounded-full font-medium" title={provider.capabilities_detection_error || 'Detection failed'}>
+          ⚠️ Failed
+        </span>
+      );
+    }
+    return null;
+  };
+
+  // 获取能力徽章
+  const getCapabilityBadges = (provider: LLMProvider) => {
+    if (!provider.capabilities || provider.capabilities.length === 0) {
+      return null;
+    }
+
+    const capabilityColors: Record<string, string> = {
+      'chat': 'bg-purple-100 text-purple-800',
+      'vision': 'bg-indigo-100 text-indigo-800',
+      'embedding': 'bg-cyan-100 text-cyan-800',
+      'code': 'bg-orange-100 text-orange-800',
+      'reasoning': 'bg-pink-100 text-pink-800',
+      'ocr': 'bg-yellow-100 text-yellow-800',
+    };
+
+    return (
+      <div className="flex flex-wrap gap-1 mt-2">
+        {provider.capabilities.map((cap) => (
+          <span
+            key={cap}
+            className={`px-2 py-0.5 text-xs rounded-full font-medium ${
+              capabilityColors[cap] || 'bg-gray-100 text-gray-800'
+            }`}
+          >
+            {cap}
+          </span>
+        ))}
+        {provider.capabilities_mode === 'auto' && (
+          <span className="px-2 py-0.5 text-xs rounded-full font-medium bg-blue-50 text-blue-600 border border-blue-200">
+            Auto-detected
+          </span>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className="divide-y divide-slate-200">
       {providers.length === 0 ? (
@@ -48,27 +126,31 @@ const ProviderList = ({
             }`}
           >
             <div className="flex items-start justify-between mb-2">
-              <div>
+              <div className="flex-1">
                 <h3 className="font-semibold text-slate-900">{provider.name}</h3>
                 <p className="text-sm text-slate-600">{provider.metadata?.provider_name || provider.model}</p>
+                {getCapabilityBadges(provider)}
               </div>
-              <div className="flex gap-1">
-                {provider.is_current && (
-                  <span className="px-2 py-1 bg-blue-100 text-blue-800 text-xs rounded-full font-medium flex items-center gap-1">
-                    <span>🎯</span>
-                    Selected
+              <div className="flex flex-col gap-1 items-end">
+                <div className="flex gap-1">
+                  {provider.is_current && (
+                    <span className="px-2 py-1 bg-blue-100 text-blue-800 text-xs rounded-full font-medium flex items-center gap-1">
+                      <span>🎯</span>
+                      Selected
+                    </span>
+                  )}
+                  {provider.enabled && !provider.is_current && (
+                    <span className="px-2 py-1 bg-green-100 text-green-800 text-xs rounded-full font-medium">
+                      ✓ Active
                   </span>
-                )}
-                {provider.enabled && !provider.is_current && (
-                  <span className="px-2 py-1 bg-green-100 text-green-800 text-xs rounded-full font-medium">
-                    ✓ Active
-                  </span>
-                )}
-                {!provider.is_initialized && provider.enabled && (
-                  <span className="px-2 py-1 bg-amber-100 text-amber-800 text-xs rounded-full font-medium">
-                    ⚠️ Initializing
-                  </span>
-                )}
+                  )}
+                  {!provider.is_initialized && provider.enabled && (
+                    <span className="px-2 py-1 bg-amber-100 text-amber-800 text-xs rounded-full font-medium">
+                      ⚠️ Initializing
+                    </span>
+                  )}
+                  {getDetectionStatusBadge(provider)}
+                </div>
               </div>
             </div>
 
@@ -97,6 +179,18 @@ const ProviderList = ({
               >
                 Test
               </button>
+              {provider.capabilities_detection_status === 'failed' && onRetryDetection && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onRetryDetection(provider.name);
+                  }}
+                  className="flex-1 px-2 py-1.5 text-xs font-medium text-purple-600 hover:bg-purple-50 rounded transition"
+                  title={provider.capabilities_detection_error || 'Retry capability detection'}
+                >
+                  Retry
+                </button>
+              )}
               <button
                 onClick={(e) => {
                   e.stopPropagation();
