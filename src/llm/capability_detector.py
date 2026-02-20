@@ -6,6 +6,8 @@ Auto-detect LLM model capabilities through multi-tier strategy:
 """
 
 import logging
+import httpx
+import json
 from typing import Optional, Dict, Any
 from .model_capabilities import get_predefined_capabilities
 
@@ -96,9 +98,68 @@ class CapabilityDetector:
         model: str,
         auth_token: str
     ) -> Optional[Dict[str, Any]]:
-        """Query LLM to describe its own capabilities"""
-        # Will be implemented in Task 4
-        pass
+        """Query LLM to describe its capabilities"""
+        prompt = '''Please describe your capabilities in JSON format:
+{
+  "model_name": "your exact model name",
+  "capabilities": ["chat", "embedding", "vision", "ocr", "code", "reasoning", "multimodal", "function_calling"],
+  "context_window": max tokens (integer),
+  "max_tokens": max output tokens (integer),
+  "supports_multimodal": true/false,
+  "supported_formats": ["png", "jpg", "webp"] (if applicable),
+  "embedding_dimensions": integer (if embedding model)
+}
+
+Only include capabilities you ACTUALLY have. Return valid JSON only.'''
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    f"{base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {auth_token}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": model,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": "You are a helpful AI assistant. Answer with JSON only."
+                            },
+                            {
+                                "role": "user",
+                                "content": prompt
+                            }
+                        ],
+                        "temperature": 0,
+                        "max_tokens": 500
+                    }
+                )
+
+                if response.status_code != 200:
+                    logger.error(f"LLM query failed: {response.status_code}")
+                    return None
+
+                data = response.json()
+                content = data["choices"][0]["message"]["content"]
+
+                # Parse JSON response
+                parsed = json.loads(content)
+
+                # Validate and return
+                return {
+                    "capabilities": parsed.get("capabilities", ["chat"]),
+                    "context_window": parsed.get("context_window", 4096),
+                    "max_tokens": parsed.get("max_tokens", 2048),
+                    "supports_multimodal": parsed.get("supports_multimodal", False),
+                    "supported_formats": parsed.get("supported_formats", []),
+                    "embedding_dimensions": parsed.get("embedding_dimensions")
+                }
+
+        except Exception as e:
+            logger.error(f"Error querying LLM: {e}")
+            return None
 
     def _get_default_capabilities(self) -> Dict[str, Any]:
         """Safe default capabilities"""

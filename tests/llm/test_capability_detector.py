@@ -1,6 +1,7 @@
 """Tests for capability detector"""
 
 import pytest
+import os
 from src.llm.capability_detector import CapabilityDetector
 
 
@@ -56,3 +57,25 @@ def test_get_default_capabilities():
     assert result["context_window"] == 4096
     assert result["detection_method"] == "default"
     assert result["confidence"] == "low"
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_llm_self_description():
+    """Test LLM self-description query (requires real API key)"""
+    # Skip if no API key
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        pytest.skip("OPENAI_API_KEY not set")
+
+    detector = CapabilityDetector(None)
+    result = await detector._ask_llm_self_description(
+        "https://api.openai.com/v1",
+        "gpt-4o-mini",
+        api_key
+    )
+
+    assert result is not None
+    assert "chat" in result["capabilities"]
+    assert "context_window" in result
+
