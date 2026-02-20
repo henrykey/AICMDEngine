@@ -40,11 +40,15 @@ class AsyncCapabilityDetector:
     async def _detect_and_update(self, provider_name: str, provider_data: Dict[str, Any]):
         """Background detection task"""
 
+        logger.info(f"[{provider_name}] Starting capability detection task")
+
         # Update status: detecting
         await self._update_status(provider_name, "detecting")
+        logger.info(f"[{provider_name}] Status updated to: detecting")
 
         try:
             # Detect capabilities
+            logger.info(f"[{provider_name}] Calling CapabilityDetector...")
             detector = CapabilityDetector(self.provider_manager)
             detected = await detector.detect_capabilities(
                 provider_data.get("base_url", ""),
@@ -53,28 +57,37 @@ class AsyncCapabilityDetector:
                 provider_data.get("auth_token")
             )
 
+            logger.info(f"[{provider_name}] Detection result: {detected}")
+
             # Update provider config (including status to completed)
             await self._update_provider_capabilities(provider_name, detected)
+            logger.info(f"[{provider_name}] Capabilities updated in database")
 
             # Update status: completed
             await self._update_status(provider_name, "completed")
+            logger.info(f"[{provider_name}] Status updated to: completed")
 
             # Notify frontend
             if self.notification:
-                await self.notification.notify_capability_update(
-                    provider_name,
-                    detected
-                )
+                try:
+                    await self.notification.notify_capability_update(
+                        provider_name,
+                        detected
+                    )
+                    logger.info(f"[{provider_name}] Frontend notified")
+                except Exception as e:
+                    logger.warning(f"[{provider_name}] Failed to notify frontend: {e}")
 
-            logger.info(f"Detection completed: {provider_name}")
+            logger.info(f"[{provider_name}] ✓ Detection completed successfully")
 
         except Exception as e:
-            logger.error(f"Detection failed: {provider_name}: {e}")
+            logger.error(f"[{provider_name}] ✗ Detection failed: {e}", exc_info=True)
             await self._update_status(
                 provider_name,
                 "failed",
                 error=str(e)
             )
+            logger.info(f"[{provider_name}] Status updated to: failed")
 
     async def _update_status(self, provider_name: str, status: str, error: str = None):
         """Update detection status in DB"""
