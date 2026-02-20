@@ -216,31 +216,10 @@ class LLMConfigLoader:
             for doc in documents:
                 try:
                     provider_name = doc.get("name")
-                    config = LLMConfig(
-                        name=provider_name,
-                        type=doc.get("type", "openai_compatible"),
-                        base_url=doc.get("base_url", ""),
-                        model=doc.get("model", ""),
-                        api_key_ref=doc.get("api_key_ref", ""),
-                        timeout=doc.get("timeout", 30),
-                        temperature=doc.get("temperature", 0.7),
-                        max_tokens=doc.get("max_tokens", 2048),
-                        top_p=doc.get("top_p", 1.0),
-                        cost_per_1k_tokens=doc.get("cost_per_1k_tokens", 0.001),
-                        priority=doc.get("priority", 1),
-                        enabled=doc.get("enabled", True),
-                        metadata=doc.get("metadata"),
-                        # Capability fields
-                        capabilities=doc.get("capabilities"),
-                        context_window=doc.get("context_window", 4096),
-                        supports_multimodal=doc.get("supports_multimodal", False),
-                        supported_formats=doc.get("supported_formats"),
-                        embedding_dimensions=doc.get("embedding_dimensions"),
-                        # Detection status
-                        capabilities_detection_status=doc.get("capabilities_detection_status", "pending"),
-                        capabilities_last_updated=doc.get("capabilities_last_updated"),
-                        capabilities_detection_error=doc.get("capabilities_detection_error"),
-                    )
+                    # Convert MongoDB doc to dict, excluding _id
+                    doc_dict = {k: v for k, v in doc.items() if k != '_id'}
+                    # Use from_dict to properly handle datetime conversion
+                    config = LLMConfig.from_dict(doc_dict)
                     configs[provider_name] = config
                 except Exception as e:
                     logger.error(f"Error loading provider from MongoDB: {e}")
