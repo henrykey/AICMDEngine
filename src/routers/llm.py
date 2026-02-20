@@ -124,17 +124,46 @@ async def create_provider(
             capabilities_provided = "capabilities" in provider and provider["capabilities"]
 
             if not capabilities_provided:
-                # Auto-detection mode: set safe defaults and pending status
-                provider["capabilities"] = ["chat"]  # Default capability
-                provider["capabilities_detection_status"] = "pending"
-                provider["context_window"] = provider.get("context_window", 4096)
-                provider["max_tokens"] = provider.get("max_tokens", 2048)
-                provider["supports_multimodal"] = provider.get("supports_multimodal", False)
-                provider["supported_formats"] = provider.get("supported_formats", [])
-                provider["embedding_dimensions"] = provider.get("embedding_dimensions")
-                provider["capabilities_last_updated"] = None
+                # Auto-detection mode: detect capabilities immediately
+                from src.llm.capability_detector import CapabilityDetector
+                from datetime import datetime
+
+                detector = CapabilityDetector(manager)
+
+                try:
+                    logger.info(f"Starting capability detection for {name}...")
+                    detected = await detector.detect_capabilities(
+                        provider["base_url"],
+                        provider["model"],
+                        provider.get("api_key_ref", ""),
+                        provider.get("auth_token")
+                    )
+
+                    # Apply detected capabilities
+                    provider["capabilities"] = detected.get("capabilities", ["chat"])
+                    provider["context_window"] = detected.get("context_window", 4096)
+                    provider["supports_multimodal"] = detected.get("supports_multimodal", False)
+                    provider["supported_formats"] = detected.get("supported_formats", [])
+                    provider["embedding_dimensions"] = detected.get("embedding_dimensions")
+                    provider["capabilities_detection_status"] = "completed"
+                    provider["capabilities_last_updated"] = datetime.now().isoformat()
+                    provider["capabilities_detection_error"] = None
+
+                    logger.info(f"Capability detection completed for {name}: {provider['capabilities']}")
+                except Exception as e:
+                    # Detection failed, use safe defaults
+                    logger.error(f"Capability detection failed for {name}: {e}")
+                    provider["capabilities"] = ["chat"]  # Default capability
+                    provider["context_window"] = provider.get("context_window", 4096)
+                    provider["max_tokens"] = provider.get("max_tokens", 2048)
+                    provider["supports_multimodal"] = provider.get("supports_multimodal", False)
+                    provider["supported_formats"] = provider.get("supported_formats", [])
+                    provider["embedding_dimensions"] = provider.get("embedding_dimensions")
+                    provider["capabilities_detection_status"] = "failed"
+                    provider["capabilities_detection_error"] = str(e)
+                    provider["capabilities_last_updated"] = datetime.now().isoformat()
             else:
-                # Manual mode: capabilities provided, no detection needed
+                # Manual mode: capabilities provided by user
                 provider["capabilities_detection_status"] = None
                 provider["capabilities_last_updated"] = None
                 provider["capabilities_detection_error"] = None
@@ -147,11 +176,6 @@ async def create_provider(
                 # Reload providers
                 manager.providers = await manager.config_loader.load_from_mongodb(manager.db_client)
                 await manager.initialize(manager.db_client)
-
-                # Start async detection if auto mode
-                if not capabilities_provided and async_detector:
-                    task_id = await async_detector.start_detection(name, provider)
-                    logger.info(f"Started async capability detection: {task_id}")
             else:
                 raise HTTPException(status_code=500, detail="Database client not initialized")
 
