@@ -7,6 +7,7 @@ from typing import List, Dict, Any, Optional
 import logging
 
 from src.llm.config_loader import LLMConfig
+from src.llm.async_capability_detector import AsyncCapabilityDetector
 from .websocket import NotificationService
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,15 @@ _provider_manager = None
 
 # Global notification service
 notification_service = NotificationService()
+
+# Global async capability detector
+async_detector = None
+
+
+def set_async_detector(detector):
+    """Set the global async capability detector instance."""
+    global async_detector
+    async_detector = detector
 
 
 def set_provider_manager(manager):
@@ -110,6 +120,20 @@ async def create_provider(
 
         else:
             # Create new provider
+            # Determine if manual or auto-detection mode
+            capabilities_provided = "capabilities" in provider
+
+            if not capabilities_provided:
+                # Auto-detection mode: set safe defaults
+                provider["capabilities"] = ["chat"]  # Default capability
+                provider["capabilities_detection_status"] = "pending"
+                provider["context_window"] = provider.get("context_window", 4096)
+                provider["max_tokens"] = provider.get("max_tokens", 2048)
+                provider["supports_multimodal"] = provider.get("supports_multimodal", False)
+                provider["supported_formats"] = provider.get("supported_formats", [])
+                provider["embedding_dimensions"] = provider.get("embedding_dimensions")
+                provider["capabilities_last_updated"] = None
+
             if manager.db_client:
                 db = manager.db_client.nl_tps
                 collection = db.llm_providers
@@ -118,12 +142,29 @@ async def create_provider(
                 # Reload providers
                 manager.providers = await manager.config_loader.load_from_mongodb(manager.db_client)
                 await manager.initialize(manager.db_client)
+
+                # Start async detection if auto mode
+                if not capabilities_provided and async_detector:
+                    task_id = await async_detector.start_detection(name, provider)
+                    logger.info(f"Started async capability detection: {task_id}")
             else:
                 raise HTTPException(status_code=500, detail="Database client not initialized")
 
             # Return the created provider info without MongoDB's _id field
             provider_copy = {k: v for k, v in provider.items() if k != "_id"}
-            return {"success": True, "provider": provider_copy, "action": "created"}
+
+            response = {
+                "success": True,
+                "provider": provider_copy,
+                "action": "created"
+            }
+
+            # Add detection status if auto mode
+            if not capabilities_provided:
+                response["capabilities_detection_status"] = provider.get("capabilities_detection_status", "pending")
+                response["capabilities_mode"] = "auto"
+
+            return response
     except HTTPException:
         raise
     except Exception as e:
