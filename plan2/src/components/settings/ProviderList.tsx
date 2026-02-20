@@ -38,23 +38,20 @@ const ProviderList = ({
   onRetryDetection,
 }: ProviderListProps) => {
 
-  // 获取检测状态对应的样式
-  const getDetectionStatusBadge = (provider: LLMProvider) => {
+  // 获取检测模式对应的样式
+  const getDetectionModeBadge = (provider: LLMProvider) => {
     const status = provider.capabilities_detection_status;
-    if (!status || status === 'pending') {
+
+    // Manual mode: no detection status (old configurations)
+    if (!status) {
       return (
         <span className="px-2 py-1 bg-gray-100 text-gray-700 text-xs rounded-full font-medium">
-          ⏳ Pending
+          Manual
         </span>
       );
     }
-    if (status === 'detecting') {
-      return (
-        <span className="px-2 py-1 bg-blue-100 text-blue-800 text-xs rounded-full font-medium animate-pulse">
-          🔍 Detecting...
-        </span>
-      );
-    }
+
+    // Auto-detected mode: detection completed or failed
     if (status === 'completed') {
       return (
         <span className="px-2 py-1 bg-green-100 text-green-800 text-xs rounded-full font-medium">
@@ -69,6 +66,23 @@ const ProviderList = ({
         </span>
       );
     }
+
+    // Temporary states during detection
+    if (status === 'detecting') {
+      return (
+        <span className="px-2 py-1 bg-blue-100 text-blue-800 text-xs rounded-full font-medium animate-pulse">
+          🔍 Detecting...
+        </span>
+      );
+    }
+    if (status === 'pending') {
+      return (
+        <span className="px-2 py-1 bg-amber-100 text-amber-800 text-xs rounded-full font-medium">
+          ⏳ Pending
+        </span>
+      );
+    }
+
     return null;
   };
 
@@ -99,11 +113,6 @@ const ProviderList = ({
             {cap}
           </span>
         ))}
-        {provider.capabilities_mode === 'auto' && (
-          <span className="px-2 py-0.5 text-xs rounded-full font-medium bg-blue-50 text-blue-600 border border-blue-200">
-            Auto-detected
-          </span>
-        )}
       </div>
     );
   };
@@ -149,7 +158,7 @@ const ProviderList = ({
                       ⚠️ Initializing
                     </span>
                   )}
-                  {getDetectionStatusBadge(provider)}
+                  {getDetectionModeBadge(provider)}
                 </div>
               </div>
             </div>
