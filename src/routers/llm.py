@@ -304,6 +304,49 @@ async def test_provider(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/providers/{name}/retry-detection")
+async def retry_provider_detection(
+    name: str,
+    manager=Depends(get_provider_manager),
+):
+    """
+    Retry capability detection for a provider.
+
+    Useful when previous detection failed or capabilities need to be refreshed.
+    Restarts async detection task.
+    """
+    try:
+        # Check if provider exists
+        provider = manager.get_provider(name)
+        if not provider:
+            raise HTTPException(status_code=404, detail=f"Provider {name} not found")
+
+        # Check if async detector is available
+        if not async_detector:
+            raise HTTPException(
+                status_code=500,
+                detail="Async capability detector not initialized"
+            )
+
+        # Start async detection
+        provider_data = provider.to_dict()
+        task_id = await async_detector.start_detection(name, provider_data)
+
+        logger.info(f"Restarted capability detection for provider {name}: {task_id}")
+
+        return {
+            "success": True,
+            "message": f"Capability detection restarted for provider {name}",
+            "task_id": task_id,
+            "provider": name
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrying detection for provider {name}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/providers/{name}/costs")
 async def get_provider_costs(
     name: str,
