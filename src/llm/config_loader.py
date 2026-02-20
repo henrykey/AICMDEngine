@@ -3,6 +3,7 @@ LLM Configuration Loader - supports MongoDB, YAML, and .env files.
 """
 
 from typing import Dict, List, Optional, Any
+from datetime import datetime
 import os
 import yaml
 import logging
@@ -29,6 +30,16 @@ class LLMConfig:
         priority: int = 1,
         enabled: bool = True,
         metadata: Optional[Dict[str, Any]] = None,
+        # Capability detection fields
+        capabilities: List[str] = None,
+        context_window: int = 4096,
+        supports_multimodal: bool = False,
+        supported_formats: List[str] = None,
+        embedding_dimensions: Optional[int] = None,
+        # Detection status fields
+        capabilities_detection_status: str = "pending",
+        capabilities_last_updated: Optional[datetime] = None,
+        capabilities_detection_error: Optional[str] = None,
     ):
         """Initialize LLM configuration."""
         self.name = name
@@ -44,6 +55,16 @@ class LLMConfig:
         self.priority = priority
         self.enabled = enabled
         self.metadata = metadata or {}
+        # Capability fields
+        self.capabilities = capabilities or ["chat"]
+        self.context_window = context_window
+        self.supports_multimodal = supports_multimodal
+        self.supported_formats = supported_formats or []
+        self.embedding_dimensions = embedding_dimensions
+        # Detection status fields
+        self.capabilities_detection_status = capabilities_detection_status
+        self.capabilities_last_updated = capabilities_last_updated
+        self.capabilities_detection_error = capabilities_detection_error
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -61,12 +82,57 @@ class LLMConfig:
             "priority": self.priority,
             "enabled": self.enabled,
             "metadata": self.metadata,
+            # Capability fields
+            "capabilities": self.capabilities,
+            "context_window": self.context_window,
+            "supports_multimodal": self.supports_multimodal,
+            "supported_formats": self.supported_formats,
+            "embedding_dimensions": self.embedding_dimensions,
+            # Detection status fields
+            "capabilities_detection_status": self.capabilities_detection_status,
+            "capabilities_last_updated": self.capabilities_last_updated.isoformat() if self.capabilities_last_updated else None,
+            "capabilities_detection_error": self.capabilities_detection_error,
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "LLMConfig":
-        """Create from dictionary."""
-        return cls(**data)
+        """Create from dictionary with capability field defaults."""
+        # Handle datetime conversion
+        last_updated = data.get("capabilities_last_updated")
+        if last_updated and isinstance(last_updated, str):
+            from datetime import datetime
+            try:
+                last_updated = datetime.fromisoformat(last_updated.replace("Z", "+00:00"))
+            except:
+                last_updated = None
+
+        return cls(
+            # Required fields
+            name=data.get("name"),
+            type=data.get("type", "openai_compatible"),
+            base_url=data.get("base_url", ""),
+            model=data.get("model", ""),
+            api_key_ref=data.get("api_key_ref", ""),
+            # Optional fields with defaults
+            timeout=data.get("timeout", 30),
+            temperature=data.get("temperature", 0.7),
+            max_tokens=data.get("max_tokens", 2048),
+            top_p=data.get("top_p", 1.0),
+            cost_per_1k_tokens=data.get("cost_per_1k_tokens", 0.001),
+            priority=data.get("priority", 1),
+            enabled=data.get("enabled", True),
+            metadata=data.get("metadata"),
+            # Capability fields with defaults
+            capabilities=data.get("capabilities", ["chat"]),
+            context_window=data.get("context_window", 4096),
+            supports_multimodal=data.get("supports_multimodal", False),
+            supported_formats=data.get("supported_formats", []),
+            embedding_dimensions=data.get("embedding_dimensions"),
+            # Detection status fields
+            capabilities_detection_status=data.get("capabilities_detection_status", "pending"),
+            capabilities_last_updated=last_updated,
+            capabilities_detection_error=data.get("capabilities_detection_error"),
+        )
 
 
 class LLMConfigLoader:
@@ -117,6 +183,14 @@ class LLMConfigLoader:
                         priority=provider_config.get("priority", 1),
                         enabled=provider_config.get("enabled", True),
                         metadata=provider_config.get("metadata"),
+                        # Capability fields
+                        capabilities=provider_config.get("capabilities"),
+                        context_window=provider_config.get("context_window", 4096),
+                        supports_multimodal=provider_config.get("supports_multimodal", False),
+                        supported_formats=provider_config.get("supported_formats"),
+                        embedding_dimensions=provider_config.get("embedding_dimensions"),
+                        # Detection status
+                        capabilities_detection_status=provider_config.get("capabilities_detection_status", "completed"),
                     )
                     configs[provider_name] = config
                 except Exception as e:
@@ -156,6 +230,16 @@ class LLMConfigLoader:
                         priority=doc.get("priority", 1),
                         enabled=doc.get("enabled", True),
                         metadata=doc.get("metadata"),
+                        # Capability fields
+                        capabilities=doc.get("capabilities"),
+                        context_window=doc.get("context_window", 4096),
+                        supports_multimodal=doc.get("supports_multimodal", False),
+                        supported_formats=doc.get("supported_formats"),
+                        embedding_dimensions=doc.get("embedding_dimensions"),
+                        # Detection status
+                        capabilities_detection_status=doc.get("capabilities_detection_status", "pending"),
+                        capabilities_last_updated=doc.get("capabilities_last_updated"),
+                        capabilities_detection_error=doc.get("capabilities_detection_error"),
                     )
                     configs[provider_name] = config
                 except Exception as e:
