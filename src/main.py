@@ -61,6 +61,16 @@ async def startup_db_client():
         app.provider_manager = provider_manager
 
         logger.info(f"Initialized LLM Provider Manager with {len(provider_manager.get_providers())} providers")
+
+        # Initialize Async Capability Detector
+        from src.llm.async_capability_detector import AsyncCapabilityDetector
+        async_detector = AsyncCapabilityDetector(
+            provider_manager=provider_manager,
+            notification_service=llm.notification_service
+        )
+        llm.set_async_detector(async_detector)
+        logger.info("Initialized Async Capability Detector")
+
     except Exception as e:
         logger.error(f"Failed to initialize LLM Provider Manager: {e}")
         # Continue without LLM manager for now

@@ -92,6 +92,53 @@ const LLMManagement = () => {
     }
   }, [providers]);
 
+  // WebSocket连接以接收实时能力检测更新
+  useEffect(() => {
+    const config = getConfig();
+    const wsUrl = `${config.nlTpsApiUrl.replace('/v1', '').replace('http', 'ws')}/api/llm/ws/notifications`;
+
+    const ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+      console.log('WebSocket connected for capability detection updates');
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+
+        // 处理能力检测状态更新
+        if (data.type === 'capability_detection_status' || data.type === 'capability_update') {
+          console.log('Capability detection update:', data);
+          // 刷新提供商列表以显示最新状态
+          fetchProviders();
+        }
+      } catch (err) {
+        console.error('Failed to parse WebSocket message:', err);
+      }
+    };
+
+    ws.onerror = (error) => {
+      console.error('WebSocket error:', error);
+    };
+
+    ws.onclose = () => {
+      console.log('WebSocket disconnected');
+    };
+
+    // 发送ping保持连接
+    const pingInterval = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'ping' }));
+      }
+    }, 30000);
+
+    return () => {
+      clearInterval(pingInterval);
+      ws.close();
+    };
+  }, []);
+
   // 处理创建/更新提供商
   const handleSaveProvider = async (provider: LLMProvider) => {
     try {

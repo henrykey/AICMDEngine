@@ -120,54 +120,28 @@ async def create_provider(
 
         else:
             # Create new provider
-            # Determine if manual or auto-detection mode
+            from datetime import datetime
             capabilities_provided = "capabilities" in provider and provider["capabilities"]
 
+            # Set initial capabilities and status
             if not capabilities_provided:
-                # Auto-detection mode: detect capabilities immediately
-                from src.llm.capability_detector import CapabilityDetector
-                from datetime import datetime
-
-                detector = CapabilityDetector(manager)
-
-                try:
-                    logger.info(f"Starting capability detection for {name}...")
-                    detected = await detector.detect_capabilities(
-                        provider["base_url"],
-                        provider["model"],
-                        provider.get("api_key_ref", ""),
-                        provider.get("auth_token")
-                    )
-
-                    # Apply detected capabilities
-                    provider["capabilities"] = detected.get("capabilities", ["chat"])
-                    provider["context_window"] = detected.get("context_window", 4096)
-                    provider["supports_multimodal"] = detected.get("supports_multimodal", False)
-                    provider["supported_formats"] = detected.get("supported_formats", [])
-                    provider["embedding_dimensions"] = detected.get("embedding_dimensions")
-                    provider["capabilities_detection_status"] = "completed"
-                    provider["capabilities_last_updated"] = datetime.now().isoformat()
-                    provider["capabilities_detection_error"] = None
-
-                    logger.info(f"Capability detection completed for {name}: {provider['capabilities']}")
-                except Exception as e:
-                    # Detection failed, use safe defaults
-                    logger.error(f"Capability detection failed for {name}: {e}")
-                    provider["capabilities"] = ["chat"]  # Default capability
-                    provider["context_window"] = provider.get("context_window", 4096)
-                    provider["max_tokens"] = provider.get("max_tokens", 2048)
-                    provider["supports_multimodal"] = provider.get("supports_multimodal", False)
-                    provider["supported_formats"] = provider.get("supported_formats", [])
-                    provider["embedding_dimensions"] = provider.get("embedding_dimensions")
-                    provider["capabilities_detection_status"] = "failed"
-                    provider["capabilities_detection_error"] = str(e)
-                    provider["capabilities_last_updated"] = datetime.now().isoformat()
+                # Auto-detection mode: start with safe defaults
+                provider["capabilities"] = provider.get("capabilities", ["chat"])
+                provider["context_window"] = provider.get("context_window", 4096)
+                provider["max_tokens"] = provider.get("max_tokens", 2048)
+                provider["supports_multimodal"] = provider.get("supports_multimodal", False)
+                provider["supported_formats"] = provider.get("supported_formats", [])
+                provider["embedding_dimensions"] = provider.get("embedding_dimensions")
+                provider["capabilities_detection_status"] = "pending"
+                provider["capabilities_last_updated"] = None
+                provider["capabilities_detection_error"] = None
             else:
                 # Manual mode: capabilities provided by user
                 provider["capabilities_detection_status"] = None
                 provider["capabilities_last_updated"] = None
                 provider["capabilities_detection_error"] = None
 
+            # Save to database
             if manager.db_client:
                 db = manager.db_client.nl_tps
                 collection = db.llm_providers
@@ -179,6 +153,16 @@ async def create_provider(
             else:
                 raise HTTPException(status_code=500, detail="Database client not initialized")
 
+            # Start async detection for auto-detect mode
+            task_id = None
+            if not capabilities_provided and async_detector:
+                try:
+                    logger.info(f"Starting async capability detection for {name}...")
+                    task_id = await async_detector.start_detection(name, provider)
+                    logger.info(f"Async detection task started: {task_id}")
+                except Exception as e:
+                    logger.error(f"Failed to start async detection for {name}: {e}")
+
             # Return the created provider info without MongoDB's _id field
             provider_copy = {k: v for k, v in provider.items() if k != "_id"}
 
@@ -188,10 +172,12 @@ async def create_provider(
                 "action": "created"
             }
 
-            # Add detection status if auto mode
+            # Add detection status info if auto mode
             if not capabilities_provided:
-                response["capabilities_detection_status"] = provider.get("capabilities_detection_status", "pending")
+                response["capabilities_detection_status"] = "pending"
                 response["capabilities_mode"] = "auto"
+                if task_id:
+                    response["detection_task_id"] = task_id
 
             return response
     except HTTPException:
