@@ -85,7 +85,16 @@ const ProviderForm = ({ provider, onSave, onCancel }: ProviderFormProps) => {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (validateForm()) {
-      onSave(formData);
+      // Prepare data for submission
+      let submitData = { ...formData };
+
+      // If auto-detect mode, exclude capabilities field to let backend detect automatically
+      if (formData.capabilities_mode === 'auto') {
+        const { capabilities, context_window, supports_multimodal, supported_formats, embedding_dimensions, ...dataWithoutCapabilities } = submitData;
+        submitData = dataWithoutCapabilities;
+      }
+
+      onSave(submitData);
     }
   };
 

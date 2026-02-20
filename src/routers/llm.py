@@ -121,10 +121,10 @@ async def create_provider(
         else:
             # Create new provider
             # Determine if manual or auto-detection mode
-            capabilities_provided = "capabilities" in provider
+            capabilities_provided = "capabilities" in provider and provider["capabilities"]
 
             if not capabilities_provided:
-                # Auto-detection mode: set safe defaults
+                # Auto-detection mode: set safe defaults and pending status
                 provider["capabilities"] = ["chat"]  # Default capability
                 provider["capabilities_detection_status"] = "pending"
                 provider["context_window"] = provider.get("context_window", 4096)
@@ -133,6 +133,11 @@ async def create_provider(
                 provider["supported_formats"] = provider.get("supported_formats", [])
                 provider["embedding_dimensions"] = provider.get("embedding_dimensions")
                 provider["capabilities_last_updated"] = None
+            else:
+                # Manual mode: capabilities provided, no detection needed
+                provider["capabilities_detection_status"] = None
+                provider["capabilities_last_updated"] = None
+                provider["capabilities_detection_error"] = None
 
             if manager.db_client:
                 db = manager.db_client.nl_tps
