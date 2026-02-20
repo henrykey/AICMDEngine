@@ -53,7 +53,7 @@ class AsyncCapabilityDetector:
                 provider_data.get("auth_token")
             )
 
-            # Update provider config
+            # Update provider config (including status to completed)
             await self._update_provider_capabilities(provider_name, detected)
 
             # Update status: completed
@@ -125,7 +125,5 @@ class AsyncCapabilityDetector:
             {"$set": update_data}
         )
 
-        # Reload providers in manager
-        self.provider_manager.providers = await self.provider_manager.config_loader.load_from_mongodb(
-            self.provider_manager.db_client
-        )
+        # Note: Don't reload providers here to avoid race conditions
+        # The reload will happen when _update_status is called next
