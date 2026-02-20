@@ -179,16 +179,35 @@ const ProviderList = ({
               >
                 Test
               </button>
-              {provider.capabilities_detection_status === 'failed' && onRetryDetection && (
+              {onRetryDetection && (
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
                     onRetryDetection(provider.name);
                   }}
-                  className="flex-1 px-2 py-1.5 text-xs font-medium text-purple-600 hover:bg-purple-50 rounded transition"
-                  title={provider.capabilities_detection_error || 'Retry capability detection'}
+                  disabled={provider.capabilities_detection_status === 'detecting'}
+                  className={`flex-1 px-2 py-1.5 text-xs font-medium rounded transition ${
+                    provider.capabilities_detection_status === 'detecting'
+                      ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                      : 'text-purple-600 hover:bg-purple-50'
+                  }`}
+                  title={
+                    provider.capabilities_detection_status === 'detecting'
+                      ? 'Detection in progress...'
+                      : provider.capabilities_detection_status === 'completed'
+                        ? 'Re-detect capabilities'
+                        : provider.capabilities_detection_status === 'failed'
+                          ? (provider.capabilities_detection_error || 'Retry capability detection')
+                          : 'Start capability detection'
+                  }
                 >
-                  Retry
+                  {provider.capabilities_detection_status === 'detecting'
+                    ? 'Detecting...'
+                    : provider.capabilities_detection_status === 'completed'
+                      ? 'Re-detect'
+                      : provider.capabilities_detection_status === 'failed'
+                        ? 'Retry'
+                        : 'Detect'}
                 </button>
               )}
               <button
