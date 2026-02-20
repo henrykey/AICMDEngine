@@ -68,34 +68,62 @@ async def create_provider(
     provider: Dict[str, Any],
     manager=Depends(get_provider_manager),
 ):
-    """Create a new LLM provider."""
+    """Create a new LLM provider or update if exists (upsert)."""
     try:
         name = provider.get("name")
         if not name:
             raise HTTPException(status_code=400, detail="Provider name is required")
 
-        if name in manager.get_providers():
-            raise HTTPException(status_code=409, detail=f"Provider {name} already exists")
+        # Check if provider already exists
+        existing_providers = manager.get_providers()
 
-        # Save to MongoDB
-        if manager.db_client:
-            db = manager.db_client.nl_tps
-            collection = db.llm_providers
-            await collection.insert_one(provider)
+        if name in existing_providers:
+            # Provider exists - update it instead of creating
+            logger.info(f"Provider {name} already exists, updating...")
 
-            # Reload providers
-            manager.providers = await manager.config_loader.load_from_mongodb(manager.db_client)
-            await manager.initialize(manager.db_client)
+            if manager.db_client:
+                db = manager.db_client.nl_tps
+                collection = db.llm_providers
+
+                # Update existing provider
+                result = await collection.update_one(
+                    {"name": name},
+                    {"$set": provider}
+                )
+
+                if result.matched_count == 0:
+                    logger.warning(f"Provider {name} found in memory but not in database")
+
+                # Reload providers
+                manager.providers = await manager.config_loader.load_from_mongodb(manager.db_client)
+                await manager.initialize(manager.db_client)
+            else:
+                raise HTTPException(status_code=500, detail="Database client not initialized")
+
+            # Return the updated provider info
+            provider_copy = {k: v for k, v in provider.items() if k != "_id"}
+            return {"success": True, "provider": provider_copy, "action": "updated"}
+
         else:
-            raise HTTPException(status_code=500, detail="Database client not initialized")
+            # Create new provider
+            if manager.db_client:
+                db = manager.db_client.nl_tps
+                collection = db.llm_providers
+                await collection.insert_one(provider)
 
-        # Return the created provider info without MongoDB's _id field
-        provider_copy = {k: v for k, v in provider.items() if k != "_id"}
-        return {"success": True, "provider": provider_copy}
+                # Reload providers
+                manager.providers = await manager.config_loader.load_from_mongodb(manager.db_client)
+                await manager.initialize(manager.db_client)
+            else:
+                raise HTTPException(status_code=500, detail="Database client not initialized")
+
+            # Return the created provider info without MongoDB's _id field
+            provider_copy = {k: v for k, v in provider.items() if k != "_id"}
+            return {"success": True, "provider": provider_copy, "action": "created"}
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error creating provider: {e}")
+        logger.error(f"Error creating/updating provider: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
