@@ -327,6 +327,71 @@ async def get_provider_costs(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/providers/detect-capabilities")
+async def detect_provider_capabilities(
+    provider_data: Dict[str, Any],
+    manager=Depends(get_provider_manager),
+):
+    """
+    Manually detect capabilities for a provider configuration.
+
+    Useful for previewing capabilities before creating a provider.
+    Does not save the provider to the database.
+    """
+    try:
+        from src.llm.capability_detector import CapabilityDetector
+
+        # Validate required fields
+        base_url = provider_data.get("base_url", "")
+        model = provider_data.get("model", "")
+        api_key_ref = provider_data.get("api_key_ref", "")
+        auth_token = provider_data.get("auth_token")
+
+        if not base_url or not model:
+            raise HTTPException(
+                status_code=400,
+                detail="base_url and model are required"
+            )
+
+        # Get API key
+        api_key = manager.config_loader.get_api_key(api_key_ref) if api_key_ref else auth_token
+        if not api_key:
+            raise HTTPException(
+                status_code=400,
+                detail="API key not found. Provide either api_key_ref or auth_token"
+            )
+
+        # Detect capabilities
+        detector = CapabilityDetector(manager)
+        detected = await detector.detect_capabilities(
+            base_url=base_url,
+            model=model,
+            api_key=api_key,
+            auth_token=None  # Already have the key
+        )
+
+        return {
+            "success": True,
+            "capabilities": detected,
+            "provider_preview": {
+                "name": provider_data.get("name", "preview"),
+                "base_url": base_url,
+                "model": model,
+                "capabilities": detected.get("capabilities", ["chat"]),
+                "context_window": detected.get("context_window", 4096),
+                "max_tokens": detected.get("max_tokens", 2048),
+                "supports_multimodal": detected.get("supports_multimodal", False),
+                "supported_formats": detected.get("supported_formats", []),
+                "embedding_dimensions": detected.get("embedding_dimensions"),
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error detecting capabilities: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/current")
 async def get_current_provider(manager=Depends(get_provider_manager)):
     """Get the current active provider."""
