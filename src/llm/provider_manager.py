@@ -268,3 +268,86 @@ class LLMProviderManager:
             "is_current": name == self.current_provider,
             "is_initialized": name in self.clients,
         }
+
+    def select_provider_by_capabilities(
+        self,
+        required_capabilities: List[str],
+        min_context_window: Optional[int] = None,
+        embedding_dimensions: Optional[int] = None,
+    ) -> Optional[str]:
+        """
+        Select the best provider based on required capabilities.
+
+        Selection strategy:
+        1. Filter providers that have all required capabilities
+        2. Filter by embedding dimensions if specified (for embedding models)
+        3. Filter by minimum context window if specified
+        4. Sort candidates by: priority (desc), context_window (desc), cost (asc)
+        5. Return the highest-ranked provider
+
+        Args:
+            required_capabilities: List of required capabilities (e.g., ["chat", "vision"])
+            min_context_window: Minimum context window required
+            embedding_dimensions: Required embedding dimensions (for embedding models)
+
+        Returns:
+            Best matching provider name, or None if no suitable provider found
+        """
+        candidates = []
+
+        for name, config in self.providers.items():
+            # Skip if client not initialized
+            if name not in self.clients:
+                continue
+
+            # Check if provider has all required capabilities
+            provider_caps = config.capabilities or []
+            if not all(cap in provider_caps for cap in required_capabilities):
+                continue
+
+            # Check embedding dimensions if specified
+            if embedding_dimensions is not None:
+                if config.embedding_dimensions != embedding_dimensions:
+                    continue
+
+            # Check minimum context window if specified
+            if min_context_window is not None:
+                if (config.context_window or 0) < min_context_window:
+                    continue
+
+            # Provider meets all criteria
+            candidates.append({
+                "name": name,
+                "priority": config.priority or 0,
+                "context_window": config.context_window or 0,
+                "cost": config.cost_per_1k_tokens or 0.0,
+            })
+
+        if not candidates:
+            logger.warning(
+                f"No provider found matching requirements: "
+                f"capabilities={required_capabilities}, "
+                f"context_window>={min_context_window}, "
+                f"embedding_dimensions={embedding_dimensions}"
+            )
+            return None
+
+        # Sort by: priority (desc), context_window (desc), cost (asc)
+        candidates.sort(
+            key=lambda x: (
+                -x["priority"],      # Higher priority first
+                -x["context_window"], # Larger context window first
+                x["cost"]             # Lower cost first
+            )
+        )
+
+        best = candidates[0]
+        logger.info(
+            f"Selected provider '{best['name']}' for capabilities {required_capabilities}. "
+            f"Matched {len(candidates)} candidates, "
+            f"priority={best['priority']}, "
+            f"context_window={best['context_window']}, "
+            f"cost=${best['cost']}/1k tokens"
+        )
+
+        return best["name"]
