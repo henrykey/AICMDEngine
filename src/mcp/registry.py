@@ -63,6 +63,7 @@ class MCPRegistry:
         self,
         mcp_name: str,
         tool_name: str,
+        llm_provider: Optional[str] = None,
         **kwargs
     ) -> ToolResult:
         """
@@ -71,6 +72,7 @@ class MCPRegistry:
         Args:
             mcp_name: Name of the MCP containing the tool
             tool_name: Name of the tool to execute
+            llm_provider: Optional LLM provider name to use
             **kwargs: Parameters to pass to the tool
 
         Returns:
@@ -82,7 +84,27 @@ class MCPRegistry:
             logger.error(error_msg)
             return ToolResult.error(error_msg, error_code="MCP_NOT_FOUND")
 
+        # Validate LLM provider if specified
+        if llm_provider is not None:
+            if not hasattr(mcp, 'provider_manager') or mcp.provider_manager is None:
+                logger.warning(f"[{mcp_name}] LLM provider '{llm_provider}' specified but MCP has no provider_manager, using default")
+                llm_provider = None
+            elif llm_provider not in mcp.provider_manager.providers:
+                available = list(mcp.provider_manager.providers.keys())
+                logger.warning(
+                    f"[{mcp_name}] Specified LLM provider '{llm_provider}' not found. "
+                    f"Available providers: {available}. Using default selection."
+                )
+                llm_provider = None
+            else:
+                logger.info(f"[{mcp_name}] Using specified LLM provider: {llm_provider}")
+
         logger.debug(f"Executing {mcp_name}.{tool_name} with params: {kwargs}")
+
+        # Add validated llm_provider to kwargs if provided and valid
+        if llm_provider is not None:
+            kwargs['_llm_provider'] = llm_provider
+
         return await mcp.execute_tool(tool_name, **kwargs)
 
     def get_registry_info(self) -> Dict[str, Any]:

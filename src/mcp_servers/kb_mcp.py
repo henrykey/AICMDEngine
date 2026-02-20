@@ -186,11 +186,21 @@ class KBMCP(BaseMCPServer):
 
         context = params.get("context")
 
-        result = await self.kb_client.kb_rag_query(question, context=context)
+        # Note: LLM provider selection is handled at MCPRegistry level
+        # If _llm_provider is in params, it means user specified a valid provider
+        llm_provider = params.get("_llm_provider", "default")
+
+        logger.info(f"[kb_mcp] Processing RAG query using LLM provider: {llm_provider}")
+
+        result = await self.kb_client.kb_rag_query(
+            question,
+            context=context
+        )
 
         return {
             "answer": result.get("answer", ""),
             "sources": result.get("sources", []),
             "confidence": result.get("confidence", 0.0),
-            "question": question
+            "question": question,
+            "llm_provider": llm_provider
         }

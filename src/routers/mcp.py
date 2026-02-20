@@ -138,15 +138,35 @@ async def execute_mcp_tool(
 ) -> ToolResult:
     """
     Execute a tool from a specific MCP server.
+
+    Args:
+        server_name: Name of the MCP server
+        tool_name: Name of the tool to execute
+        **kwargs: Tool parameters (including optional "llm" key to specify LLM provider)
+
+    Request Body:
+        All tool parameters are passed as JSON.
+        Optional "llm" key: specifies which LLM provider to use (e.g., "ChatGPT", "multmode")
+
+    Examples:
+        # Use default LLM selection
+        {"question": "How to use membership?"}
+
+        # Use specific LLM provider
+        {"question": "How to use membership?", "llm": "ChatGPT"}
     """
     registry = getattr(request.app, 'mcp_registry', None)
     if not registry:
         raise HTTPException(status_code=503, detail="MCP Registry not initialized")
 
+    # Extract "llm" parameter if present
+    llm_provider = kwargs.pop("llm", None)
+
     try:
         result = await registry.execute_command(
             mcp_name=server_name,
             tool_name=tool_name,
+            llm_provider=llm_provider,
             **kwargs
         )
         return result
