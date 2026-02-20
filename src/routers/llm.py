@@ -2,11 +2,12 @@
 LLM Provider Management API routes.
 """
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect
 from typing import List, Dict, Any, Optional
 import logging
 
 from src.llm.config_loader import LLMConfig
+from .websocket import NotificationService
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +15,9 @@ router = APIRouter(prefix="/api/llm", tags=["llm"])
 
 # Global provider manager instance (will be set during app startup)
 _provider_manager = None
+
+# Global notification service
+notification_service = NotificationService()
 
 
 def set_provider_manager(manager):
@@ -311,3 +315,21 @@ async def get_all_costs(manager=Depends(get_provider_manager)):
     except Exception as e:
         logger.error(f"Error getting costs: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.websocket("/ws/notifications")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for real-time notifications"""
+    await notification_service.connect(websocket)
+
+    try:
+        while True:
+            # Keep connection alive, handle ping/pong
+            data = await websocket.receive_text()
+            if data == "ping":
+                await websocket.send_json({"type": "pong"})
+    except WebSocketDisconnect:
+        notification_service.disconnect(websocket)
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+        notification_service.disconnect(websocket)
