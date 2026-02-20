@@ -19,6 +19,13 @@ interface LLMProvider {
     region: string;
     max_qps: number;
   };
+  // Capability fields
+  capabilities?: string[];
+  context_window?: number;
+  supports_multimodal?: boolean;
+  supported_formats?: string[];
+  embedding_dimensions?: number | null;
+  capabilities_mode?: 'auto' | 'manual';
 }
 
 interface ProviderFormProps {
@@ -40,6 +47,13 @@ const DEFAULT_PROVIDER: LLMProvider = {
   cost_per_1k_tokens: 0.001,
   priority: 1,
   enabled: true,
+  // Capability defaults
+  capabilities_mode: 'auto',
+  capabilities: [],
+  context_window: 4096,
+  supports_multimodal: false,
+  supported_formats: [],
+  embedding_dimensions: null,
 };
 
 const ProviderForm = ({ provider, onSave, onCancel }: ProviderFormProps) => {
@@ -260,6 +274,170 @@ const ProviderForm = ({ provider, onSave, onCancel }: ProviderFormProps) => {
             />
           </div>
         </div>
+      </div>
+
+      {/* Capabilities Configuration */}
+      <div className="space-y-4">
+        <h4 className="text-sm font-semibold text-slate-700 uppercase tracking-wide">
+          Capabilities
+        </h4>
+
+        <div>
+          <label className="block text-sm font-medium text-slate-700 mb-2">
+            Detection Mode
+          </label>
+          <div className="flex gap-4">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="radio"
+                name="capabilities_mode"
+                value="auto"
+                checked={formData.capabilities_mode !== 'manual'}
+                onChange={(e) => {
+                  setFormData((prev) => ({
+                    ...prev,
+                    capabilities_mode: e.target.value as 'auto' | 'manual',
+                  }));
+                }}
+                className="w-4 h-4 text-blue-600"
+              />
+              <div>
+                <span className="text-sm font-medium text-slate-900">Auto-detect</span>
+                <p className="text-xs text-slate-500">Automatically detect capabilities from LLM API</p>
+              </div>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="radio"
+                name="capabilities_mode"
+                value="manual"
+                checked={formData.capabilities_mode === 'manual'}
+                onChange={(e) => {
+                  setFormData((prev) => ({
+                    ...prev,
+                    capabilities_mode: e.target.value as 'auto' | 'manual',
+                  }));
+                }}
+                className="w-4 h-4 text-blue-600"
+              />
+              <div>
+                <span className="text-sm font-medium text-slate-900">Manual</span>
+                <p className="text-xs text-slate-500">Manually specify capabilities</p>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        {formData.capabilities_mode === 'manual' && (
+          <div className="space-y-4 p-4 bg-blue-50 rounded-lg border border-blue-200">
+            <p className="text-sm text-blue-800 font-medium mb-3">
+              Manually configure provider capabilities
+            </p>
+
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-2">
+                Capabilities
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {['chat', 'vision', 'embedding', 'code', 'reasoning', 'ocr'].map((cap) => (
+                  <label key={cap} className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={formData.capabilities?.includes(cap) || false}
+                      onChange={(e) => {
+                        const capabilities = formData.capabilities || [];
+                        if (e.target.checked) {
+                          setFormData((prev) => ({
+                            ...prev,
+                            capabilities: [...capabilities, cap],
+                          }));
+                        } else {
+                          setFormData((prev) => ({
+                            ...prev,
+                            capabilities: capabilities.filter((c) => c !== cap),
+                          }));
+                        }
+                      }}
+                      className="w-4 h-4 rounded border-slate-300 text-blue-600"
+                    />
+                    <span className="text-sm text-slate-700 capitalize">{cap}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">
+                  Context Window
+                </label>
+                <input
+                  type="number"
+                  name="context_window"
+                  value={formData.context_window || 4096}
+                  onChange={handleChange}
+                  min="1"
+                  placeholder="e.g., 128000"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">
+                  Embedding Dimensions
+                </label>
+                <input
+                  type="number"
+                  name="embedding_dimensions"
+                  value={formData.embedding_dimensions || ''}
+                  onChange={handleChange}
+                  min="1"
+                  placeholder="e.g., 1536"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3 p-3 bg-white rounded-lg border border-slate-200">
+              <input
+                type="checkbox"
+                name="supports_multimodal"
+                checked={formData.supports_multimodal || false}
+                onChange={(e) => {
+                  setFormData((prev) => ({
+                    ...prev,
+                    supports_multimodal: e.target.checked,
+                  }));
+                }}
+                id="supports_multimodal"
+                className="w-4 h-4 rounded border-slate-300 text-blue-600"
+              />
+              <label htmlFor="supports_multimodal" className="text-sm font-medium text-slate-700">
+                Supports Multimodal (Images, Audio, etc.)
+              </label>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">
+                Supported Formats (comma-separated)
+              </label>
+              <input
+                type="text"
+                name="supported_formats"
+                value={formData.supported_formats?.join(', ') || ''}
+                onChange={(e) => {
+                  const formats = e.target.value.split(',').map((s) => s.trim()).filter((s) => s);
+                  setFormData((prev) => ({
+                    ...prev,
+                    supported_formats: formats,
+                  }));
+                }}
+                placeholder="e.g., text, image, audio"
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Configuration */}
