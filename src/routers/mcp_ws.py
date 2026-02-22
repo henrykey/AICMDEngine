@@ -78,8 +78,8 @@ async def mcp_websocket_endpoint(
 
     client_id = client_info["client_id"]
 
-    # 初始化审计日志
-    audit_logger = SimpleAuditLogger(registry)
+    # 初始化审计日志（传递JWT token用于后续API调用）
+    audit_logger = SimpleAuditLogger(registry, jwt_token=token)
 
     # 记录连接事件
     tenant_id = client_info.get("tenant_id")
@@ -90,7 +90,7 @@ async def mcp_websocket_endpoint(
             tenant_id=tenant_id,
             member_id=member_id,
             action="WEBSOCKET_CONNECT",
-            category="API",
+            category="AUTH",  # WebSocket connection is an authentication event
             metadata={
                 "client_id": client_id,
                 "client_name": client_info.get("name"),
@@ -178,7 +178,7 @@ async def mcp_websocket_endpoint(
                 tenant_id=tenant_id,
                 member_id=member_id,
                 action="WEBSOCKET_DISCONNECT",
-                category="API",
+                category="AUTH",  # WebSocket disconnection is an authentication event
                 metadata={
                     "client_id": client_id,
                     "client_name": client_info.get("name")
@@ -227,8 +227,7 @@ async def _log_tool_execution(
             tenant_id=tenant_id,
             member_id=member_id,
             action=action,
-            category="API",
-            tool_name=tool_name,
+            category="ACCESS",  # Tool calls are access control events
             arguments=arguments,
             success=not is_error,
             error_message=error_msg

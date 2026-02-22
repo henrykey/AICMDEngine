@@ -14,22 +14,24 @@ logger = logging.getLogger(__name__)
 class SimpleAuditLogger:
     """简单的审计日志记录器"""
 
-    def __init__(self, mcp_registry):
+    def __init__(self, mcp_registry, jwt_token=None):
         """
         初始化
 
         Args:
             mcp_registry: MCP 注册表
+            jwt_token: JWT token用于调用membership API
         """
         self.mcp_registry = mcp_registry
         self.membership_name = "membership"
+        self.jwt_token = jwt_token
 
     async def log_operation(
         self,
         tenant_id: int,
         member_id: int,
         action: str,
-        category: str = "API",
+        category: str = "ACCESS",  # Valid: AUTH, ACCESS, MEMBERSHIP, ROLE, PERMISSION, AGENT, SYSTEM
         tool_name: Optional[str] = None,
         arguments: Optional[Dict[str, Any]] = None,
         success: bool = True,
@@ -96,6 +98,7 @@ class SimpleAuditLogger:
             await self.mcp_registry.execute_command(
                 mcp_name=self.membership_name,
                 tool_name="submit_audit_event",
+                auth_token=self.jwt_token,  # 传递JWT token
                 **audit_event
             )
             logger.debug(f"Audit log recorded: {action} - {member_id}")
