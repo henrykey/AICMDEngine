@@ -54,7 +54,7 @@ class MCPServerWrapper:
         self.server: Optional[websockets.WebSocketServer] = None
         self.is_running = False
 
-    async def handle_client(self, websocket, path):
+    async def handle_client(self, websocket):
         """处理客户端 WebSocket 连接"""
         logger.info(f"New WebSocket connection for '{self.name}' from {websocket.remote_address}")
 
@@ -105,10 +105,10 @@ class MCPServerWrapper:
         env = os.environ.copy()
         env.update(self.env)
 
-        logger.info(f"Starting stdio MCP '{self.name}': {' '.join([self.command] + self.args)}")
+        logger.info(f"Starting stdio MCP '{self.name}': {' '.join(self.command + self.args)}")
 
         process = await asyncio.create_subprocess_exec(
-            self.command,
+            *self.command,
             *self.args,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,

@@ -10,7 +10,7 @@ servers:
   # PaddleOCR MCP Server
   - name: paddleocr
     port: 9001
-    cwd: ../servers/paddleocr
+    cwd: ../../servers/paddleocr
     command: ["python"]
     args: ["-m", "paddleocr"]
     env:
@@ -20,13 +20,13 @@ servers:
   # Office Word MCP Server
   - name: office-word
     port: 9002
-    cwd: ../servers/office-word
+    cwd: ../../servers/office-word
     command: ["python"]
     args: ["word_mcp_server.py"]
 
   # PDF Extraction MCP Server
   - name: pdf-extraction
     port: 9003
-    cwd: ../servers/pdf-extraction
+    cwd: ../../servers/pdf-extraction
     command: ["python"]
     args: ["-m", "pdf_extraction"]
