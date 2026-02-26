@@ -114,6 +114,7 @@ async def startup_db_client():
                         command=mcp_config.get("command"),
                         args=mcp_config.get("args", []),
                         transport=mcp_config.get("transport", "stdio"),
+                        url=mcp_config.get("url"),
                         env=mcp_config.get("env"),
                         timeout=mcp_config.get("timeout", 30)
                     )

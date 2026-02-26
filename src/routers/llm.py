@@ -94,15 +94,44 @@ async def create_provider(
         if name in existing_providers:
             # Provider exists - update it instead of creating
             logger.info(f"Provider {name} already exists, updating...")
+            logger.info(f"[{name}] Update data keys: {provider.keys()}")
 
             if manager.db_client:
                 db = manager.db_client.nl_tps
                 collection = db.llm_providers
 
+                # Handle capabilities_mode switching
+                update_data = provider.copy()
+                unset_fields = {}
+
+                logger.info(f"[{name}] capabilities_mode in request: {'capabilities_mode' in update_data}")
+
+                # If switching to manual mode, remove detection status fields
+                if "capabilities_mode" in update_data and update_data["capabilities_mode"] == "manual":
+                    logger.info(f"[{name}] Switching to manual mode, removing detection status fields")
+                    # Remove from $set to avoid conflict
+                    fields_to_remove = ["capabilities_detection_status", "capabilities_detection_error", "capabilities_last_updated"]
+                    for field in fields_to_remove:
+                        if field in update_data:
+                            del update_data[field]
+                    # Add to $unset (use 1 as placeholder value)
+                    unset_fields = {
+                        "capabilities_detection_status": 1,
+                        "capabilities_detection_error": 1,
+                        "capabilities_last_updated": 1
+                    }
+
+                # Build update operation
+                update_operation = {"$set": update_data}
+                if unset_fields:
+                    update_operation["$unset"] = unset_fields
+
+                logger.info(f"[{name}] Final update operation: {update_operation}")
+
                 # Update existing provider
                 result = await collection.update_one(
                     {"name": name},
-                    {"$set": provider}
+                    update_operation
                 )
 
                 if result.matched_count == 0:
@@ -195,6 +224,8 @@ async def update_provider(
 ):
     """Update an existing LLM provider."""
     try:
+        logger.info(f"[{name}] Received update request with data: {provider_data.keys()}")
+
         # Check if provider exists
         if name not in manager.get_providers():
             raise HTTPException(status_code=404, detail=f"Provider {name} not found")
@@ -203,9 +234,54 @@ async def update_provider(
         if manager.db_client:
             db = manager.db_client.nl_tps
             collection = db.llm_providers
+
+            # Handle capabilities_mode switching
+            update_data = provider_data.copy()
+            unset_fields = {}
+
+            logger.info(f"[{name}] capabilities_mode in request: {'capabilities_mode' in update_data}")
+
+            # If switching to manual mode, remove detection status fields
+            if "capabilities_mode" in update_data and update_data["capabilities_mode"] == "manual":
+                logger.info(f"[{name}] Switching to manual mode, removing detection status fields")
+                # Remove from $set to avoid conflict
+                fields_to_remove = ["capabilities_detection_status", "capabilities_detection_error", "capabilities_last_updated"]
+                for field in fields_to_remove:
+                    if field in update_data:
+                        del update_data[field]
+                # Add to $unset (use 1 as placeholder value)
+                unset_fields = {
+                    "capabilities_detection_status": 1,
+                    "capabilities_detection_error": 1,
+                    "capabilities_last_updated": 1
+                }
+
+            # If switching to auto mode with capabilities provided, treat as manual
+            if "capabilities_mode" in update_data and update_data["capabilities_mode"] == "auto":
+                # Check if user is providing capabilities in auto mode (shouldn't happen but handle it)
+                if "capabilities" in update_data and update_data["capabilities"]:
+                    logger.warning(f"[{name}] Auto mode specified but capabilities provided, switching to manual")
+                    update_data["capabilities_mode"] = "manual"
+                    # Remove detection status fields
+                    fields_to_remove = ["capabilities_detection_status", "capabilities_detection_error", "capabilities_last_updated"]
+                    for field in fields_to_remove:
+                        if field in update_data:
+                            del update_data[field]
+                    unset_fields = {
+                        "capabilities_detection_status": 1,
+                        "capabilities_detection_error": 1,
+                        "capabilities_last_updated": 1
+                    }
+
+            # Build update operation
+            update_operation = {"$set": update_data}
+            if unset_fields:
+                update_operation["$unset"] = unset_fields
+
+            logger.info(f"[{name}] Final update operation: {update_operation}")
             result = await collection.update_one(
                 {"name": name},
-                {"$set": provider_data}
+                update_operation
             )
 
             if result.matched_count == 0:

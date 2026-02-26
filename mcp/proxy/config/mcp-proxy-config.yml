@@ -1,0 +1,32 @@
+# MCP WebSocket Proxy 配置文件
+# 将 stdio MCP 转换为 WebSocket 服务器
+
+proxy:
+  # 基础端口号（每个 MCP 会从这个端口开始分配）
+  port_base: 9000
+
+# 要代理的 MCP 服务器列表
+servers:
+  # PaddleOCR MCP Server
+  - name: paddleocr
+    port: 9001
+    cwd: ../servers/paddleocr
+    command: ["python"]
+    args: ["-m", "paddleocr"]
+    env:
+      PADDLEOCR_MCP_PIPELINE: "OCR"
+      PADDLEOCR_MCP_PPOCR_SOURCE: "local"
+
+  # Office Word MCP Server
+  - name: office-word
+    port: 9002
+    cwd: ../servers/office-word
+    command: ["python"]
+    args: ["word_mcp_server.py"]
+
+  # PDF Extraction MCP Server
+  - name: pdf-extraction
+    port: 9003
+    cwd: ../servers/pdf-extraction
+    command: ["python"]
+    args: ["-m", "pdf_extraction"]

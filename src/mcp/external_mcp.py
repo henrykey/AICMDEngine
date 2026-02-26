@@ -26,9 +26,10 @@ class ExternalMCPServer(BaseMCPServer):
     def __init__(
         self,
         name: str,
-        command: str,
+        command: Optional[str] = None,
         args: Optional[List[str]] = None,
         transport: str = "stdio",
+        url: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         timeout: int = 30
     ):
@@ -37,9 +38,10 @@ class ExternalMCPServer(BaseMCPServer):
 
         Args:
             name: MCP服务器名称
-            command: 启动MCP服务器的命令
+            command: 启动MCP服务器的命令 (stdio transport 需要)
             args: 命令参数列表
             transport: 传输方式 (stdio 或 websocket)
+            url: WebSocket URL (websocket transport 需要)
             env: 环境变量
             timeout: 请求超时时间（秒）
         """
@@ -47,20 +49,32 @@ class ExternalMCPServer(BaseMCPServer):
         self.command = command
         self.args = args or []
         self.transport = transport
+        self.url = url
         self.env = env or {}
         self.timeout = timeout
 
-        # 进程管理
+        # 进程管理 (stdio)
         self.process: Optional[asyncio.subprocess.Process] = None
+
+        # WebSocket 连接 (websocket)
+        self.websocket: Optional[Any] = None
+
+        # 请求管理
         self.request_id = 0
         self.pending_requests: Dict[int, asyncio.Future] = {}
 
         # 工具缓存
         self.tools_cache: Dict[str, Dict[str, Any]] = {}
 
+        # 验证参数
+        if transport == "stdio" and not command:
+            raise ValueError(f"'command' is required for stdio transport in '{name}'")
+        if transport == "websocket" and not url:
+            raise ValueError(f"'url' is required for websocket transport in '{name}'")
+
         logger.info(
             f"Created ExternalMCPServer '{name}' "
-            f"(command={command}, transport={transport})"
+            f"(transport={transport}, url={url or 'N/A'}, command={command or 'N/A'})"
         )
 
     async def initialize(self) -> None:
@@ -128,9 +142,45 @@ class ExternalMCPServer(BaseMCPServer):
 
     async def _connect_websocket(self):
         """通过WebSocket连接外部MCP"""
-        # TODO: 实现WebSocket连接
-        logger.warning("WebSocket transport not yet implemented")
-        raise NotImplementedError("WebSocket transport not yet implemented")
+        try:
+            import websockets
+
+            logger.info(f"Connecting to WebSocket MCP '{self.name}': {self.url}")
+
+            # 建立 WebSocket 连接
+            self.websocket = await websockets.connect(
+                self.url,
+                ping_interval=20,
+                ping_timeout=20,
+                close_timeout=10,
+                max_size=10 * 1024 * 1024  # 10MB
+            )
+
+            logger.info(f"WebSocket connection established to '{self.name}'")
+
+            # 启动消息接收任务
+            asyncio.create_task(self._read_websocket_messages_loop())
+
+            # 等待连接稳定
+            await asyncio.sleep(0.2)
+
+            # 发送initialize握手
+            await self._send_initialize()
+
+            # 发现工具
+            await self._discover_tools()
+
+            logger.info(f"WebSocket MCP '{self.name}' initialized successfully")
+
+        except Exception as e:
+            logger.error(f"Failed to connect WebSocket MCP '{self.name}': {e}")
+            if self.websocket:
+                try:
+                    await self.websocket.close()
+                except Exception:
+                    pass
+                self.websocket = None
+            raise
 
     async def _send_initialize(self):
         """发送initialize握手请求"""
@@ -311,8 +361,13 @@ class ExternalMCPServer(BaseMCPServer):
         Returns:
             JSON-RPC响应对象
         """
-        if not self.process or self.process.stdin is None:
-            raise RuntimeError("External MCP process is not running")
+        # 根据transport类型检查连接
+        if self.transport == "stdio":
+            if not self.process or self.process.stdin is None:
+                raise RuntimeError("External MCP process is not running")
+        elif self.transport == "websocket":
+            if not self.websocket:
+                raise RuntimeError("WebSocket MCP connection is not established")
 
         # 创建Future等待响应
         request_id = request["id"]
@@ -323,11 +378,16 @@ class ExternalMCPServer(BaseMCPServer):
             # 发送请求
             json_str = json.dumps(request)
             logger.debug(
-                f"Sending to external MCP '{self.name}': {json_str[:200]}..."
+                f"Sending to external MCP '{self.name}' ({self.transport}): {json_str[:200]}..."
             )
 
-            self.process.stdin.write((json_str + "\n").encode())
-            await self.process.stdin.drain()
+            if self.transport == "websocket":
+                # WebSocket 发送
+                await self.websocket.send(json_str)
+            else:
+                # stdio 发送
+                self.process.stdin.write((json_str + "\n").encode())
+                await self.process.stdin.drain()
 
             # 等待响应
             timeout = timeout or self.timeout
@@ -338,13 +398,13 @@ class ExternalMCPServer(BaseMCPServer):
         except asyncio.TimeoutError:
             logger.error(
                 f"Request timeout for external MCP '{self.name}' "
-                f"(request_id={request_id})"
+                f"(request_id={request_id}, transport={self.transport})"
             )
             # 清理pending request
             self.pending_requests.pop(request_id, None)
             raise
         except Exception as e:
-            logger.error(f"Error sending request: {e}")
+            logger.error(f"Error sending request to '{self.name}': {e}")
             # 清理pending request
             self.pending_requests.pop(request_id, None)
             raise
@@ -413,6 +473,40 @@ class ExternalMCPServer(BaseMCPServer):
                     )
             self.pending_requests.clear()
 
+    async def _read_websocket_messages_loop(self):
+        """WebSocket 消息接收循环"""
+        if not self.websocket:
+            logger.error("Cannot start WebSocket message loop: no connection")
+            return
+
+        try:
+            logger.debug(f"Starting WebSocket message loop for '{self.name}'")
+
+            async for message in self.websocket:
+                try:
+                    data = json.loads(message)
+                    logger.debug(f"Received WebSocket message from '{self.name}': {str(data)[:200]}...")
+                    await self._handle_message(data)
+
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse WebSocket JSON from '{self.name}': {e}")
+                    logger.debug(f"Invalid JSON: {message[:200]}")
+                except Exception as e:
+                    logger.error(f"Error handling WebSocket message from '{self.name}': {e}")
+
+            logger.warning(f"WebSocket MCP '{self.name}' connection closed")
+
+        except Exception as e:
+            logger.error(f"WebSocket message loop error for '{self.name}': {e}")
+        finally:
+            # 清理所有pending requests
+            for future in self.pending_requests.values():
+                if not future.done():
+                    future.set_exception(
+                        RuntimeError("WebSocket MCP connection closed")
+                    )
+            self.pending_requests.clear()
+
     async def _handle_message(self, message: Dict[str, Any]):
         """处理收到的消息"""
         request_id = message.get("id")
@@ -442,7 +536,7 @@ class ExternalMCPServer(BaseMCPServer):
 
     async def close(self):
         """关闭连接并清理资源"""
-        logger.info(f"Closing external MCP '{self.name}'")
+        logger.info(f"Closing external MCP '{self.name}' (transport={self.transport})")
 
         # 清理pending requests
         for future in self.pending_requests.values():
@@ -452,8 +546,18 @@ class ExternalMCPServer(BaseMCPServer):
                 )
         self.pending_requests.clear()
 
-        # 终止进程
-        if self.process:
+        # 关闭 WebSocket 连接
+        if self.transport == "websocket" and self.websocket:
+            try:
+                await self.websocket.close()
+                logger.info(f"WebSocket connection closed for '{self.name}'")
+            except Exception as e:
+                logger.error(f"Error closing WebSocket connection: {e}")
+            finally:
+                self.websocket = None
+
+        # 终止进程 (stdio)
+        if self.transport == "stdio" and self.process:
             try:
                 self.process.terminate()
                 await asyncio.wait_for(self.process.wait(), timeout=5.0)
@@ -478,7 +582,13 @@ class ExternalMCPServer(BaseMCPServer):
             "transport": self.transport,
             "command": self.command,
             "args": self.args,
-            "is_running": self.process is not None and
-                         self.process.returncode is None
+            "url": self.url
         })
+
+        # 连接状态
+        if self.transport == "websocket":
+            info["is_connected"] = self.websocket is not None and not self.websocket.closed
+        else:  # stdio
+            info["is_running"] = self.process is not None and self.process.returncode is None
+
         return info
