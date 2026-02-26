@@ -20,6 +20,15 @@ coverage.xml
 dist/
 build/
 
+# Python virtual environments
+venv/
+env/
+ENV/
+venv.bak/
+
+# Test scripts (temporary development tools)
+tests/
+
 
 # Git worktrees
 .worktrees/

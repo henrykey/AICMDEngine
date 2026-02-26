@@ -24,10 +24,3 @@ servers:
     cwd: ../../servers/office-word
     command: ["python"]
     args: ["word_mcp_server.py"]
-
-  # PDF Extraction MCP Server
-  - name: pdf-extraction
-    port: 9003
-    cwd: ../../servers/pdf-extraction
-    command: ["python"]
-    args: ["-m", "pdf_extraction"]

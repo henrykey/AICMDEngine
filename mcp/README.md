@@ -8,8 +8,7 @@
 mcp/
 ├── servers/              # MCP 服务器实现
 │   ├── paddleocr/       # PaddleOCR MCP (OCR 识别)
-│   ├── office-word/     # Office Word MCP (Word 文档操作)
-│   └── pdf-extraction/  # PDF Extraction MCP (PDF 内容提取)
+│   └── office-word/     # Office Word MCP (Word 文档操作)
 │
 ├── proxy/               # WebSocket 代理服务
 │   ├── src/             # 代理源码
@@ -31,7 +30,6 @@ cd /Users/kehongwei/workspace/AICMDEngine/mcp
 这会启动以下 WebSocket 服务：
 - **PaddleOCR**: `ws://localhost:9001`
 - **Office Word**: `ws://localhost:9002`
-- **PDF Extraction**: `ws://localhost:9003`
 
 ### 2. 配置 MCP Router 连接
 
@@ -49,10 +47,6 @@ mcp-router:
         "office-word": {
           "transport": "websocket",
           "url": "ws://host.docker.internal:9002"
-        },
-        "pdf-extraction": {
-          "transport": "websocket",
-          "url": "ws://host.docker.internal:9003"
         }
       }
 ```
@@ -67,13 +61,11 @@ mcp-router:
 │  │ MCP WebSocket Proxy (本代理)                  │    │
 │  │ - 端口 9001: PaddleOCR MCP                   │    │
 │  │ - 端口 9002: Office Word MCP                 │    │
-│  │ - 端口 9003: PDF Extraction MCP              │    │
 │  └────────────┬────────────────────────────────┘    │
 │               │                                     │
 │      通过 stdio 启动各 MCP:                        │
-│      python -m paddleocr                          │
+│      python -m paddleocr_mcp                          │
 │      python word_mcp_server.py                    │
-│      python -m pdf_extraction                     │
 │                                                       │
 └───────────────┬───────────────────────────────────┘
                 │ WebSocket

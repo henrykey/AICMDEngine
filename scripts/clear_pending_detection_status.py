@@ -2,8 +2,15 @@
 """
 Clear incorrect pending status from existing providers.
 
-Old providers that were manually configured should not have 'pending' status.
-This script clears those incorrect statuses.
+Manual Mode Providers (should NOT have pending status):
+1. Old existing configurations (created before auto-detection feature)
+2. New providers created with Manual mode (user manually selected capabilities)
+
+Auto-Detection Mode Providers (should have detection status):
+1. New providers created with Auto-detect mode
+2. Status flow: pending → detecting → completed/failed
+
+This script clears incorrect 'pending' status from manual mode providers.
 """
 
 import asyncio

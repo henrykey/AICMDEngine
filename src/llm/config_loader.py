@@ -37,9 +37,10 @@ class LLMConfig:
         supported_formats: List[str] = None,
         embedding_dimensions: Optional[int] = None,
         # Detection status fields
-        capabilities_detection_status: str = "pending",
+        capabilities_detection_status: Optional[str] = "pending",
         capabilities_last_updated: Optional[datetime] = None,
         capabilities_detection_error: Optional[str] = None,
+        capabilities_mode: Optional[str] = None,
     ):
         """Initialize LLM configuration."""
         self.name = name
@@ -65,6 +66,7 @@ class LLMConfig:
         self.capabilities_detection_status = capabilities_detection_status
         self.capabilities_last_updated = capabilities_last_updated
         self.capabilities_detection_error = capabilities_detection_error
+        self.capabilities_mode = capabilities_mode
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -92,6 +94,7 @@ class LLMConfig:
             "capabilities_detection_status": self.capabilities_detection_status,
             "capabilities_last_updated": self.capabilities_last_updated.isoformat() if self.capabilities_last_updated else None,
             "capabilities_detection_error": self.capabilities_detection_error,
+            "capabilities_mode": self.capabilities_mode,
         }
 
     @classmethod
@@ -105,6 +108,15 @@ class LLMConfig:
                 last_updated = datetime.fromisoformat(last_updated.replace("Z", "+00:00"))
             except:
                 last_updated = None
+
+        # Detection status: only default to "pending" if capabilities_mode is "auto"
+        # If capabilities_mode is "manual" or not specified, keep as None (manual mode)
+        capabilities_mode = data.get("capabilities_mode")
+        if capabilities_mode == "auto":
+            detection_status_default = "pending"
+        else:
+            # Manual mode or not specified: no default, use None
+            detection_status_default = None
 
         return cls(
             # Required fields
@@ -129,9 +141,10 @@ class LLMConfig:
             supported_formats=data.get("supported_formats", []),
             embedding_dimensions=data.get("embedding_dimensions"),
             # Detection status fields
-            capabilities_detection_status=data.get("capabilities_detection_status", "pending"),
+            capabilities_detection_status=data.get("capabilities_detection_status", detection_status_default),
             capabilities_last_updated=last_updated,
             capabilities_detection_error=data.get("capabilities_detection_error"),
+            capabilities_mode=capabilities_mode,
         )
 
 

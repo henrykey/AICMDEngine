@@ -587,7 +587,9 @@ class ExternalMCPServer(BaseMCPServer):
 
         # 连接状态
         if self.transport == "websocket":
-            info["is_connected"] = self.websocket is not None and not self.websocket.closed
+            # websockets.ClientConnection 没有直接的 open/closed 属性
+            # 简单检查连接对象是否存在
+            info["is_connected"] = self.websocket is not None
         else:  # stdio
             info["is_running"] = self.process is not None and self.process.returncode is None
 
