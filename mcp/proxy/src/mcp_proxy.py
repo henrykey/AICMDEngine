@@ -149,7 +149,7 @@ class MCPServerWrapper:
                 await process.stdin.drain()
 
         except Exception as e:
-            logger.error(f"Error forwarding WebSocket to stdio for '{self.name}": {e}")
+            logger.error(f"Error forwarding WebSocket to stdio for '{self.name}': {e}")
             raise
 
     async def start(self):
