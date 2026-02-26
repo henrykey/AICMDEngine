@@ -123,6 +123,16 @@ class MCPServerWrapper:
     async def _forward_stdio_to_websocket(self, process, websocket):
         """将 stdio 输出转发到 WebSocket"""
         try:
+            # 创建stderr读取任务
+            async def read_stderr():
+                while True:
+                    line = await process.stderr.readline()
+                    if not line:
+                        break
+                    logger.warning(f"{self.name} stderr: {line.decode().strip()}")
+
+            asyncio.create_task(read_stderr())
+
             while True:
                 line = await process.stdout.readline()
                 if not line:
