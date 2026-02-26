@@ -12,7 +12,7 @@ servers:
     port: 9001
     cwd: ../../servers/paddleocr
     command: ["python"]
-    args: ["-m", "paddleocr"]
+    args: ["-m", "paddleocr_mcp"]
     env:
       PADDLEOCR_MCP_PIPELINE: "OCR"
       PADDLEOCR_MCP_PPOCR_SOURCE: "local"
