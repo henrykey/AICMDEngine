@@ -270,7 +270,15 @@ class ExternalMCPServer(BaseMCPServer):
                                 text_content.append(item.get("text", ""))
 
                         if text_content:
-                            return ToolResult.success("\n".join(text_content))
+                            combined_text = "\n".join(text_content)
+                            # 记录识别的文字长度
+                            logger.info(
+                                f"OCR tool '{tool_name}' recognized text length: {len(combined_text)} characters"
+                            )
+                            # 打印前100个字符用于调试
+                            preview = combined_text[:100] if len(combined_text) > 100 else combined_text
+                            logger.debug(f"OCR text preview: {preview}")
+                            return ToolResult.success(combined_text)
 
                     return ToolResult.success(str(result))
 

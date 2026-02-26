@@ -133,16 +133,14 @@ async def get_mcp_tool_info(server_name: str, tool_name: str, request: Request) 
 async def execute_mcp_tool(
     server_name: str,
     tool_name: str,
-    request: Request,
-    **kwargs: Any
-) -> ToolResult:
+    request: Request
+) -> Dict[str, Any]:
     """
     Execute a tool from a specific MCP server.
 
     Args:
         server_name: Name of the MCP server
         tool_name: Name of the tool to execute
-        **kwargs: Tool parameters (including optional "llm" key to specify LLM provider)
 
     Request Body:
         All tool parameters are passed as JSON.
@@ -159,6 +157,9 @@ async def execute_mcp_tool(
     if not registry:
         raise HTTPException(status_code=503, detail="MCP Registry not initialized")
 
+    # Read parameters from request body
+    kwargs = await request.json()
+
     # Extract "llm" parameter if present
     llm_provider = kwargs.pop("llm", None)
 
@@ -169,9 +170,30 @@ async def execute_mcp_tool(
             llm_provider=llm_provider,
             **kwargs
         )
-        return result
+        # Transform ToolResult to MCP standard format
+        # Java client expects: {"result": {"content": [{"type": "text", "text": "..."}]}}
+        return {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": result.content
+                    }
+                ]
+            }
+        }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to execute tool: {str(e)}")
+        # Return error in MCP format
+        return {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {
+                "code": -32603,
+                "message": str(e)
+            }
+        }
 
 @router.get("/tools")
 async def list_all_tools(request: Request) -> List[Dict[str, Any]]:
