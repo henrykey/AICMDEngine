@@ -151,7 +151,7 @@ class ExternalMCPServer(BaseMCPServer):
             self.websocket = await websockets.connect(
                 self.url,
                 ping_interval=20,
-                ping_timeout=20,
+                ping_timeout=120,  # 增加到120秒，适应PaddleOCR等慢速MCP
                 close_timeout=10,
                 max_size=10 * 1024 * 1024  # 10MB
             )
@@ -251,7 +251,7 @@ class ExternalMCPServer(BaseMCPServer):
 
     async def _register_external_tool(self, tool_def: Dict[str, Any]):
         """注册外部工具到本地MCP"""
-        tool_name = tool_def["name"]
+        tool_name = tool_def["name"]  # 保持原始名称，不带前缀
         self.tools_cache[tool_name] = tool_def
 
         # 创建工具描述
@@ -262,7 +262,7 @@ class ExternalMCPServer(BaseMCPServer):
         async def external_tool_wrapper(**kwargs):
             return await self._execute_external_tool(tool_name, kwargs)
 
-        # 注册到MCP
+        # 注册到MCP（工具名不带前缀，前缀只用于协议层路由）
         self.register_tool(Tool(
             name=tool_name,
             description=description,
@@ -278,73 +278,93 @@ class ExternalMCPServer(BaseMCPServer):
         arguments: Dict[str, Any]
     ) -> ToolResult:
         """执行外部工具"""
-        try:
-            request = {
-                "jsonrpc": "2.0",
-                "id": self._next_request_id(),
-                "method": "tools/call",
-                "params": {
-                    "name": tool_name,
-                    "arguments": arguments
+        # 最大重试次数（用于处理连接断开重连）
+        max_retries = 1
+        last_error = None
+
+        for attempt in range(max_retries + 1):
+            try:
+                request = {
+                    "jsonrpc": "2.0",
+                    "id": self._next_request_id(),
+                    "method": "tools/call",
+                    "params": {
+                        "name": tool_name,
+                        "arguments": arguments
+                    }
                 }
-            }
 
-            response = await self._send_request(request, timeout=self.timeout)
+                response = await self._send_request(request, timeout=self.timeout)
 
-            if response:
-                if "error" in response:
-                    error = response["error"]
-                    error_msg = error.get("message", "Unknown error")
-                    error_code = str(error.get("code", "UNKNOWN"))
-                    logger.error(
-                        f"External tool '{tool_name}' error: {error_msg}"
-                    )
-                    return ToolResult.error(error_msg, error_code=error_code)
+                if response:
+                    if "error" in response:
+                        error = response["error"]
+                        error_msg = error.get("message", "Unknown error")
+                        error_code = str(error.get("code", "UNKNOWN"))
+                        logger.error(
+                            f"External tool '{tool_name}' error: {error_msg}"
+                        )
+                        return ToolResult.error(error_msg, error_code=error_code)
 
-                if "result" in response:
-                    result = response["result"]
+                    if "result" in response:
+                        result = response["result"]
 
-                    # 检查是否有错误标记
-                    if result.get("isError", False):
+                        # 检查是否有错误标记
+                        if result.get("isError", False):
+                            content = result.get("content", [])
+                            if content and len(content) > 0:
+                                error_text = content[0].get("text", "Unknown error")
+                                return ToolResult.error(error_text, error_code="TOOL_ERROR")
+
+                        # 提取文本内容
                         content = result.get("content", [])
                         if content and len(content) > 0:
-                            error_text = content[0].get("text", "Unknown error")
-                            return ToolResult.error(error_text, error_code="TOOL_ERROR")
+                            text_content = []
+                            for item in content:
+                                if item.get("type") == "text":
+                                    text_content.append(item.get("text", ""))
 
-                    # 提取文本内容
-                    content = result.get("content", [])
-                    if content and len(content) > 0:
-                        text_content = []
-                        for item in content:
-                            if item.get("type") == "text":
-                                text_content.append(item.get("text", ""))
-
-                        if text_content:
-                            combined_text = "\n".join(text_content)
-                            # 记录识别的文字长度
-                            logger.info(
-                                f"OCR tool '{tool_name}' recognized text length: {len(combined_text)} characters"
-                            )
-                            # 打印前100个字符用于调试
-                            preview = combined_text[:100] if len(combined_text) > 100 else combined_text
-                            logger.debug(f"OCR text preview: {preview}")
-                            return ToolResult.success(combined_text)
+                            if text_content:
+                                combined_text = "\n".join(text_content)
+                                # 记录识别的文字长度
+                                logger.info(
+                                    f"OCR tool '{tool_name}' recognized text length: {len(combined_text)} characters"
+                                )
+                                # 打印前100个字符用于调试
+                                preview = combined_text[:100] if len(combined_text) > 100 else combined_text
+                                logger.debug(f"OCR text preview: {preview}")
+                                return ToolResult.success(combined_text)
 
                     return ToolResult.success(str(result))
 
-            return ToolResult.error(
-                "No response from external MCP",
-                error_code="NO_RESPONSE"
-            )
+                return ToolResult.error(
+                    "No response from external MCP",
+                    error_code="NO_RESPONSE"
+                )
 
-        except asyncio.TimeoutError:
-            error_msg = f"Tool '{tool_name}' execution timed out"
-            logger.error(error_msg)
-            return ToolResult.error(error_msg, error_code="TIMEOUT")
-        except Exception as e:
-            error_msg = f"Error executing external tool '{tool_name}': {e}"
-            logger.error(error_msg)
-            return ToolResult.error(error_msg, error_code="EXECUTION_ERROR")
+            except (RuntimeError, ConnectionError) as conn_err:
+                # 连接错误（包括 WebSocket closed），尝试重试
+                last_error = conn_err
+                if attempt < max_retries:
+                    logger.warning(
+                        f"Connection error for '{tool_name}' (attempt {attempt + 1}/{max_retries + 1}): {conn_err}. Retrying..."
+                    )
+                    # 等待一小段时间后重试，让连接有时间恢复
+                    await asyncio.sleep(0.5)
+                    continue
+                else:
+                    error_msg = f"Error executing external tool '{tool_name}' after {max_retries + 1} attempts: {conn_err}"
+                    logger.error(error_msg)
+                    return ToolResult.error(error_msg, error_code="CONNECTION_ERROR")
+
+            except asyncio.TimeoutError:
+                error_msg = f"Tool '{tool_name}' execution timed out"
+                logger.error(error_msg)
+                return ToolResult.error(error_msg, error_code="TIMEOUT")
+            except Exception as e:
+                error_msg = f"Error executing external tool '{tool_name}': {e}"
+                logger.error(error_msg)
+                return ToolResult.error(error_msg, error_code="EXECUTION_ERROR")
 
     async def _send_request(
         self,
@@ -361,6 +381,11 @@ class ExternalMCPServer(BaseMCPServer):
         Returns:
             JSON-RPC响应对象
         """
+        # 检查WebSocket连接，如果断开则重新连接
+        if self.transport == "websocket" and self.websocket is None:
+            logger.warning(f"WebSocket connection to '{self.name}' lost, reconnecting...")
+            await self._connect_websocket()
+
         # 根据transport类型检查连接
         if self.transport == "stdio":
             if not self.process or self.process.stdin is None:
@@ -383,7 +408,18 @@ class ExternalMCPServer(BaseMCPServer):
 
             if self.transport == "websocket":
                 # WebSocket 发送
-                await self.websocket.send(json_str)
+                try:
+                    await self.websocket.send(json_str)
+                except Exception as send_err:
+                    # WebSocket 发送失败，可能连接已断开
+                    logger.warning(f"WebSocket send failed for '{self.name}': {send_err}")
+                    # 清理连接
+                    self.websocket = None
+                    # 清理pending request
+                    self.pending_requests.pop(request_id, None)
+                    # 重新抛出异常
+                    raise RuntimeError(f"WebSocket connection closed: {send_err}")
+
             else:
                 # stdio 发送
                 self.process.stdin.write((json_str + "\n").encode())
@@ -402,11 +438,17 @@ class ExternalMCPServer(BaseMCPServer):
             )
             # 清理pending request
             self.pending_requests.pop(request_id, None)
+            # WebSocket连接可能已失效，标记为需要重新连接
+            if self.transport == "websocket":
+                self.websocket = None
             raise
         except Exception as e:
             logger.error(f"Error sending request to '{self.name}': {e}")
             # 清理pending request
             self.pending_requests.pop(request_id, None)
+            # WebSocket连接可能已失效，标记为需要重新连接
+            if self.transport == "websocket":
+                self.websocket = None
             raise
 
     async def _read_messages_loop(self):

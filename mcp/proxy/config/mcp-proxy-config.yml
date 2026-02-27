@@ -1,5 +1,9 @@
 # MCP WebSocket Proxy 配置文件
-# 将 stdio MCP 转换为 WebSocket 服务器
+# 将 stdio MCP（进程或 Docker 容器）转换为 WebSocket 服务器
+#
+# 支持两种模式:
+#   1. type: process - 启动本地 stdio MCP 进程（开发环境）
+#   2. type: docker  - 连接到 Docker 容器中的 stdio MCP（生产环境）
 
 proxy:
   # 基础端口号（每个 MCP 会从这个端口开始分配）
@@ -7,20 +11,34 @@ proxy:
 
 # 要代理的 MCP 服务器列表
 servers:
-  # PaddleOCR MCP Server
+  # PaddleOCR MCP Server - 直接在 Host 上启动 ✅ 简化架构
   - name: paddleocr
+    type: process  # 直接启动 Host 进程
     port: 9001
-    cwd: ../../servers/paddleocr
-    command: ["python"]
-    args: ["-m", "paddleocr_mcp"]
+    command: ["python", "-m", "paddleocr_mcp"]
+    args: ["--verbose"]
+    cwd: /Users/kehongwei/workspace/membership
     env:
-      PADDLEOCR_MCP_PIPELINE: "OCR"
-      PADDLEOCR_MCP_PPOCR_SOURCE: "local"
-      PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: "True"
+      PYTHONUNBUFFERED: "1"
 
-  # Office Word MCP Server
+  # Office Word MCP Server - 在 Docker 容器中运行
   - name: office-word
+    type: docker  # 连接到 Docker 容器
     port: 9002
-    cwd: ../../servers/office-word
-    command: ["python"]
-    args: ["word_mcp_server.py"]
+    container: office-word-mcp  # Docker 容器名称
+    command: ["word_mcp_server"]  # 使用 Dockerfile ENTRYPOINT 定义的命令
+
+  # 方式 2: 容器模式（生产环境）- 取消注释以启用
+  # # PaddleOCR MCP Server - 在 Docker 容器中运行
+  # - name: paddleocr
+  #   type: docker  # 连接到 Docker 容器
+  #   port: 9001
+  #   container: paddleocr-mcp  # Docker 容器名称
+  #   # command: ["python", "-m", "paddleocr_mcp"]  # 可选：容器内要执行的命令
+  #
+  # # Office Word MCP Server - 在 Docker 容器中运行
+  # - name: office-word
+  #   type: docker  # 连接到 Docker 容器
+  #   port: 9002
+  #   container: office-word-mcp  # Docker 容器名称
+  #   # command: ["python", "word_mcp_server.py"]  # 可选：容器内要执行的命令

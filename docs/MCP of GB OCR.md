@@ -15,20 +15,20 @@
 
 ```mermaid
 graph TD
-    Client[MCP Client (Cursor/Claude)] -->|MCP Protocol | Router[你的 MCP Router]
-    Router -->|HTTP/Stdio | CustomMCP[自定义 MinerU MCP Server]
+    Client["MCP Client (Cursor/Claude)"] -->|MCP Protocol| Router["你的 MCP Router"]
+    Router -->|HTTP/Stdio| Server["自定义 MinerU MCP Server"]
     
-    subgraph CustomMCP [自定义 MCP Server]
-        Tool[parse_document Tool]
-        PreProc[图像预处理 (去噪/增强)]
-        MagicPDF[MinerU Engine]
-        VLM[Qwen-VL Client]
+    subgraph Server["自定义 MCP Server"]
+        Tool["parse_document Tool"]
+        PreProc["图像预处理 (去噪/增强)"]
+        MagicPDF["MinerU Engine"]
+        VLM["Qwen-VL Client"]
     end
     
-    CustomMCP -->|1. 版面分析 | MagicPDF
-    CustomMCP -->|2. 复杂区域识别 | VLM
-    MagicPDF -->|3. 结果聚合 | Tool
-    Tool -->|Markdown/JSON | Router
+    Server -->|1. 版面分析| MagicPDF
+    Server -->|2. 复杂区域识别| VLM
+    MagicPDF -->|3. 结果聚合| Tool
+    Tool -->|Markdown/JSON| Router
 ```
 
 ---

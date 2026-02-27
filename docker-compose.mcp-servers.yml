@@ -1,0 +1,89 @@
+# MCP Servers Docker Compose Configuration
+# 容器化部署外部 MCP 服务器，由 MCP Proxy 统一管理
+#
+# 用法:
+#   docker-compose -f docker-compose.mcp-servers.yml up -d
+#   docker-compose -f docker-compose.mcp-servers.yml down
+#
+# 注意:
+#   - 这些容器通过 stdio 协议与 MCP Proxy 通信
+#   - MCP Proxy 通过 docker exec 连接到容器的 stdin/stdout
+#   - 容器本身不暴露端口，所有通信由 MCP Proxy 转换为 WebSocket
+
+version: '3.8'
+
+services:
+  # PaddleOCR MCP Server - 持久化容器
+  paddleocr-mcp:
+    build:
+      context: ./mcp/servers/paddleocr
+      dockerfile: Dockerfile
+    image: paddleocr-mcp:latest
+    container_name: paddleocr-mcp
+    restart: unless-stopped
+    # 持久化模型文件，避免每次容器重建时重新下载
+    volumes:
+      - paddleocr-models:/root/.paddlex
+    # 保持容器运行（供docker exec启动MCP）
+    command: sleep infinity
+    stdin_open: true
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PADDLEOCR_MCP_PIPELINE=OCR
+      - PADDLEOCR_MCP_PPOCR_SOURCE=local
+      - PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
+    # 资源限制 - 增加内存用于处理大型图像
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+        reservations:
+          cpus: '2'
+          memory: 6G
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "test", "-d", "/root/.paddlex"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Office Word MCP Server
+  office-word-mcp:
+    build:
+      context: ./mcp/servers/office-word
+      dockerfile: Dockerfile
+    image: office-word-mcp:latest
+    container_name: office-word-mcp
+    restart: unless-stopped
+    # 不暴露端口 - 通过 stdio 与 MCP Proxy 通信
+    environment:
+      - PYTHONUNBUFFERED=1
+    # 资源限制
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+# 网络配置
+networks:
+  default:
+    name: mcp-servers-network
+    driver: bridge
+
+# 定义持久化卷
+volumes:
+  paddleocr-models:
+    driver: local

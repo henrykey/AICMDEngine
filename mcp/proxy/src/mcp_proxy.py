@@ -2,11 +2,15 @@
 """
 MCP WebSocket Proxy Server
 
-将 stdio MCP 服务器转换为 WebSocket 服务器，
+将 stdio MCP 服务器（进程或 Docker 容器）转换为 WebSocket 服务器，
 使 MCP Router 可以通过网络连接外部 MCP。
 
 用法:
     python -m mcp_proxy
+
+支持两种模式:
+    1. 进程模式 (type: process) - 启动本地 stdio MCP 进程
+    2. 容器模式 (type: docker) - 连接到 Docker 容器中的 stdio MCP
 """
 
 import asyncio
@@ -19,6 +23,7 @@ from typing import Dict, Any, Optional, List
 
 import websockets
 import yaml
+import aiohttp
 
 # 配置日志
 logging.basicConfig(
@@ -28,8 +33,102 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+class DockerContainerManager:
+    """管理 Docker 容器中的 MCP 服务器"""
+
+    def __init__(self, container_name: str):
+        """
+        初始化 Docker 容器管理器
+
+        Args:
+            container_name: Docker 容器名称
+        """
+        self.container_name = container_name
+        self.docker_api = None
+
+    async def _get_docker_session(self):
+        """获取 aiohttp session 用于 Docker API 调用"""
+        if self.docker_api is None:
+            self.docker_api = aiohttp.ClientSession(
+                base_url="http://localhost/v1.41",
+                timeout=aiohttp.ClientTimeout(total=30)
+            )
+        return self.docker_api
+
+    async def attach_to_container(self):
+        """
+        附加到 Docker 容器的 stdin/stdout
+
+        Returns:
+            (stdin_write, stdout_read, stderr_read)
+        """
+        session = await self._get_docker_session()
+
+        # 检查容器是否运行
+        async with session.get(f"/containers/{self.container_name}/json") as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"Container {self.container_name} not found")
+            container_info = await resp.json()
+            if container_info["State"]["Running"] != True:
+                raise RuntimeError(f"Container {self.container_name} is not running")
+
+        logger.info(f"Attaching to container '{self.container_name}'")
+
+        # 附加到容器
+        async with session.post(
+            f"/containers/{self.container_name}/attach",
+            params={"stdin": 1, "stdout": 1, "stderr": 1, "stream": 1},
+            headers={"Content-Type": "application/json"}
+        ) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"Failed to attach to container: {await resp.text()}")
+
+            # 返回 WebSocket 连接用于双向通信
+            # 注意：这里需要使用 Docker API 的 WebSocket 升级
+            # 为简化实现，我们使用 docker exec 命令的方式
+            pass
+
+        # 由于 Docker API 的 attach 复杂性，我们使用 docker exec 方式
+        # 这样更简单可靠
+        return await self._exec_in_container()
+
+    async def _exec_in_container(self):
+        """
+        在容器中执行命令并返回 stdin/stdout
+
+        Returns:
+            (process, stdin_write, stdout_read, stderr_read)
+        """
+        import os
+
+        # 使用 docker exec 命令
+        cmd = [
+            "docker", "exec", "-i",  # 交互模式
+            self.container_name,
+            # 容器中的命令（由配置决定）
+        ]
+
+        logger.info(f"Executing in container: {' '.join(cmd)}")
+
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+
+        logger.info(f"Attached to container '{self.container_name}' with PID {process.pid}")
+        return process
+
+    async def close(self):
+        """关闭 Docker API session"""
+        if self.docker_api:
+            await self.docker_api.close()
+            self.docker_api = None
+
+
 class MCPServerWrapper:
-    """包装一个 stdio MCP 进程，提供 WebSocket 接口"""
+    """包装一个 stdio MCP 进程或 Docker 容器，提供 WebSocket 接口"""
 
     def __init__(self, name: str, config: Dict[str, Any]):
         """
@@ -38,21 +137,38 @@ class MCPServerWrapper:
         Args:
             name: MCP 服务器名称
             config: 配置字典，包含:
+                - type: "process" 或 "docker"
                 - port: WebSocket 端口
-                - cwd: 工作目录
-                - command: 启动命令
-                - args: 命令参数
-                - env: 环境变量
+                - 对于 type="process":
+                    - cwd: 工作目录
+                    - command: 启动命令
+                    - args: 命令参数
+                    - env: 环境变量
+                - 对于 type="docker":
+                    - container: Docker 容器名称
+                    - command: 容器内要执行的命令（可选）
         """
         self.name = name
         self.port = config['port']
-        self.cwd = config.get('cwd', '.')
-        self.command = config['command']
-        self.args = config.get('args', [])
-        self.env = config.get('env', {})
+        self.server_type = config.get('type', 'process')  # 默认为进程模式
 
         self.server: Optional[websockets.WebSocketServer] = None
         self.is_running = False
+
+        # 进程模式配置
+        if self.server_type == 'process':
+            self.cwd = config.get('cwd', '.')
+            self.command = config['command']
+            self.args = config.get('args', [])
+            self.env = config.get('env', {})
+            self.docker_manager = None
+        # Docker 容器模式配置
+        elif self.server_type == 'docker':
+            self.container_name = config['container']
+            self.container_cmd = config.get('command', [])
+            self.docker_manager = DockerContainerManager(self.container_name)
+        else:
+            raise ValueError(f"Unknown server type: {self.server_type}")
 
     async def handle_client(self, websocket):
         """处理客户端 WebSocket 连接"""
@@ -70,19 +186,21 @@ class MCPServerWrapper:
                 self._forward_websocket_to_stdio(websocket, process)
             )
 
-            # 等待任一任务完成
+            # 等待两个任务都完成（而不是任一完成）
+            # 这样可以确保只要 WebSocket 或 stdio 有一个保持打开，进程就能继续运行
+            # 当 PaddleOCR 等处理延迟时，stdout 暂时没有数据但仍保持打开，
+            # 不会导致进程被意外终止
             done, pending = await asyncio.wait(
                 [receive_task, send_task],
-                return_when=asyncio.FIRST_COMPLETED
+                return_when=asyncio.ALL_COMPLETED
             )
 
-            # 取消未完成的任务
-            for task in pending:
-                task.cancel()
+            # 获取异常信息（如果有）
+            for task in done:
                 try:
                     await task
-                except asyncio.CancelledError:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Task exception: {e}")
 
         except websockets.exceptions.ConnectionClosed:
             logger.info(f"WebSocket connection closed for '{self.name}'")
@@ -100,7 +218,16 @@ class MCPServerWrapper:
                     await process.wait()
 
     async def _start_stdio_process(self):
-        """启动 stdio MCP 进程"""
+        """启动 stdio MCP 进程或连接到 Docker 容器"""
+        if self.server_type == 'process':
+            return await self._start_process()
+        elif self.server_type == 'docker':
+            return await self._start_docker_container()
+        else:
+            raise RuntimeError(f"Unknown server type: {self.server_type}")
+
+    async def _start_process(self):
+        """启动本地 stdio MCP 进程"""
         import os
         env = os.environ.copy()
         env.update(self.env)
@@ -118,6 +245,27 @@ class MCPServerWrapper:
         )
 
         logger.info(f"Started stdio process for '{self.name}' with PID {process.pid}")
+        return process
+
+    async def _start_docker_container(self):
+        """连接到 Docker 容器中的 stdio MCP"""
+        logger.info(f"Connecting to Docker container '{self.container_name}' for '{self.name}'")
+
+        # 构建 docker exec 命令
+        cmd = ["docker", "exec", "-i", self.container_name]
+        if self.container_cmd:
+            cmd.extend(self.container_cmd)
+
+        logger.info(f"Executing in container: {' '.join(cmd)}")
+
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+
+        logger.info(f"Connected to container '{self.container_name}' with PID {process.pid}")
         return process
 
     async def _forward_stdio_to_websocket(self, process, websocket):
@@ -171,7 +319,7 @@ class MCPServerWrapper:
             "0.0.0.0",
             self.port,
             ping_interval=20,
-            ping_timeout=20,
+            ping_timeout=120,  # 增加到120秒，适应PaddleOCR等慢速MCP
             max_size=10 * 1024 * 1024  # 10MB
         )
 
