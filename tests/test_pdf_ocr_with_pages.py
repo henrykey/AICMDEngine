@@ -155,31 +155,66 @@ class StdIoTransport:
             raise RuntimeError('stdio stdin is closed')
         self.proc.stdin.write((text + "\n").encode())
         await self.proc.stdin.drain()
+        print(f"  [调试] stdin已写入 {len(text)} 字符，drain()完成", flush=True)
 
-    async def recv(self, timeout_seconds=60) -> str:
+    async def recv(self, timeout_seconds=300) -> str:
         """读取完整的 MCP RPC 响应（可能跨越多行，跳过中间的日志消息）
         
         MCP 响应必须包含 result 或 error 字段。
         中间可能会收到日志消息，我们跳过它们。
+        长时间运行的任务（如OCR）可能需要数分钟，使用大的默认超时。
         
         参数:
-            timeout_seconds: 等待响应的最大秒数
+            timeout_seconds: 等待响应的最大秒数（默认5分钟用于长时间OCR任务）
         """
         if self.proc.stdout is None:
             raise RuntimeError('stdio stdout is closed')
         
         buffer = ""
         decoder = json.JSONDecoder()
-        max_wait_objects = 100  # 最多读取 100 个 JSON 对象后放弃（防止无限循环）
+        max_wait_objects = 1000  # 最多读取 1000 个 JSON 对象后放弃（防止无限循环）
         objects_read = 0
+        start_time = time.time()
         
         async def _read_with_timeout():
             nonlocal buffer, objects_read
             
             while objects_read < max_wait_objects:
-                line = await self.proc.stdout.readline()
+                # 计算剩余超时时间
+                elapsed = time.time() - start_time
+                remaining = timeout_seconds - elapsed
+                
+                if remaining <= 0:
+                    raise TimeoutError(f'Timeout waiting for RPC response after {timeout_seconds}s (read {objects_read} objects)')
+                
+                # 使用较短的readline超时（30秒），防止单个readline阻塞整个操作
+                # 这样即使长任务正在处理，我们也能定期检查连接
+                line_timeout = min(30, remaining)
+                
+                try:
+                    line = await asyncio.wait_for(self.proc.stdout.readline(), timeout=line_timeout)
+                except asyncio.TimeoutError:
+                    # 如果readline超时，但总体超时还未到，继续等待（可能是长任务）
+                    if remaining > 0:
+                        print(f"  [调试] readline超时（{line_timeout}s），继续等待... ({objects_read} objects已读，{remaining:.0f}s剩余)")
+                        continue
+                    else:
+                        raise TimeoutError(f'Timeout waiting for RPC response after {timeout_seconds}s')
+                
                 if not line:
-                    raise EOFError('stdio EOF')
+                    # 检查进程是否仍在运行
+                    if self.proc.returncode is not None:
+                        stderr_data = ""
+                        try:
+                            if self.proc.stderr:
+                                stderr_chunk = await asyncio.wait_for(self.proc.stderr.read(1000), timeout=0.1)
+                                if stderr_chunk:
+                                    stderr_data = stderr_chunk.decode(errors='ignore')
+                        except:
+                            pass
+                        raise EOFError(f'stdio EOF (process exited with code {self.proc.returncode})\nstderr: {stderr_data[:200]}')
+                    else:
+                        raise EOFError('stdio EOF')
                 
                 buffer += line.decode()
                 
@@ -203,12 +238,14 @@ class StdIoTransport:
                     # 还没有完整的 JSON，继续读下一行
                     continue
             
-            raise RuntimeError(f'Timeout waiting for RPC response after reading {objects_read} objects')
+            raise RuntimeError(f'Too many objects received ({objects_read}) while waiting for RPC response')
         
         try:
-            return await asyncio.wait_for(_read_with_timeout(), timeout=timeout_seconds)
-        except asyncio.TimeoutError:
-            raise TimeoutError(f'No RPC response received within {timeout_seconds} seconds (read {objects_read} objects, buffer: {buffer[:200]}')
+            return await _read_with_timeout()
+        except TimeoutError as e:
+            raise TimeoutError(str(e))
+        except EOFError as e:
+            raise e
 
 
 class WebSocketTransport:
