@@ -21,3 +21,13 @@ servers:
       PADDLEOCR_MCP_PIPELINE: "OCR"
       PADDLEOCR_MCP_PPOCR_SOURCE: "local"
       PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: "True"
+
+  # Office Word MCP Server - stdio 模式（本地进程）
+  - name: office-word
+    port: 9002
+    cwd: ../../servers/office-word
+    command: ["python"]
+    args: ["word_mcp_server.py"]
+    env:
+      PYTHONUNBUFFERED: "1"
+      MCP_TRANSPORT: "stdio"

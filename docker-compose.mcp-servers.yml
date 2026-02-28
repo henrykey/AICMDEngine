@@ -6,9 +6,9 @@
 #   docker-compose -f docker-compose.mcp-servers.yml down
 #
 # 注意:
-#   - PaddleOCR MCP: HTTP/SSE 模式（直接监听端口）
-#   - Office Word MCP: stdio 模式（通过 docker exec）
-#   - MCP Router/客户端通过 HTTP 连接到 PaddleOCR，通过 docker exec 连接到 Office Word
+#   - PaddleOCR MCP: 通过本地代理（mcp/proxy）暴露 stdio 进程，监听端口 9001
+#   - Office Word MCP: 通过本地代理（mcp/proxy）暴露 stdio 进程，监听端口 9002
+#   - MCP Router 通过 http://host.docker.internal:9001/2 连接到各代理
 
 version: '3.8'
 
@@ -28,7 +28,7 @@ services:
       PYTHONUNBUFFERED: 1
       MCP_HOST: 0.0.0.0
       MCP_PORT: 8000
-      EXTERNAL_MCPS: '{"paddleocr":{"transport":"http","url":"http://host.docker.internal:9001","timeout":300}}'
+      EXTERNAL_MCPS: '{"paddleocr":{"transport":"http","url":"http://host.docker.internal:9001","timeout":300},"office-word":{"transport":"http","url":"http://host.docker.internal:9002","timeout":60}}'
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # LLM_BASE_URL: ${LLM_BASE_URL}
       # LLM_API_KEY: ${LLM_API_KEY}
@@ -84,7 +84,8 @@ services:
       retries: 3
       start_period: 20s
 
-  # Office Word MCP Server - SSE HTTP 模式
+  # Office Word MCP Server - 已改用本地代理（mcp/proxy）运行，此 Docker 服务不再使用
+  # 若需独立运行容器版本，弹此服务并将 MCP_TRANSPORT 改为 sse
   office-word-mcp:
     build:
       context: ./mcp/servers/office-word
@@ -94,12 +95,12 @@ services:
     container_name: office-word-mcp
     restart: unless-stopped
     ports:
-      - "9002:9002"
+      - "9003:9003"
     environment:
       - PYTHONUNBUFFERED=1
       - MCP_TRANSPORT=sse
       - MCP_HOST=0.0.0.0
-      - MCP_PORT=9002
+      - MCP_PORT=9003
     # 资源限制
     deploy:
       resources:
@@ -113,7 +114,7 @@ services:
       - mcp-servers-network
     # 健康检查
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9002/sse"]
+      test: ["CMD", "curl", "-f", "http://localhost:9003/sse"]
       interval: 30s
       timeout: 10s
       retries: 3
