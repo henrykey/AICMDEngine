@@ -33,7 +33,7 @@ AICMDEngine/
 
 1. **MCP Proxy** (`mcp/proxy/`)
    - 职责：统一管理所有 MCP 服务器
-   - 功能：stdio → WebSocket 转换、端口分配、生命周期管理
+   - 功能：stdio → HTTP/SSE 转换（Legacy SSE 协议）、端口分配、生命周期管理
    - 运行位置：Host 机器（需要 Docker 权限）
 
 2. **MCP Servers** (`mcp/servers/`)
@@ -43,7 +43,7 @@ AICMDEngine/
 
 3. **MCP Router** (独立服务)
    - 职责：提供统一的 API 接口
-   - 连接方式：通过 WebSocket 连接 MCP Proxy
+   - 连接方式：通过 HTTP/SSE 连接 MCP Proxy（`transport: http`）
 
 ### 部署模式对比
 
@@ -71,8 +71,8 @@ AICMDEngine/
 ./scripts/start-mcp-proxy.sh
 
 # MCP Proxy 会自动启动:
-# - paddleocr (ws://localhost:9001)
-# - office-word (ws://localhost:9002)
+# - paddleocr (http://localhost:9001)
+# - office-word (http://localhost:9002)
 ```
 
 ### 生产环境（容器模式）
@@ -143,17 +143,7 @@ servers:
 ```yaml
 mcp-router:
   environment:
-    EXTERNAL_MCPS: >
-      {
-        "paddleocr": {
-          "transport": "websocket",
-          "url": "ws://host.docker.internal:9001"
-        },
-        "office-word": {
-          "transport": "websocket",
-          "url": "ws://host.docker.internal:9002"
-        }
-      }
+    EXTERNAL_MCPS: '{"paddleocr":{"transport":"http","url":"http://host.docker.internal:9001"},"office-word":{"transport":"http","url":"http://host.docker.internal:9002"}}'
 ```
 
 ## 📊 完整架构图
@@ -174,7 +164,7 @@ mcp-router:
 │  │  └──────────────────────────────────────────────────┘   │   │
 │  │                                                          │   │
 │  │  Port 9001 ◄─────────┐  Port 9002 ◄─────────┐          │   │
-│  │     (WebSocket)       │     (WebSocket)       │          │   │
+│  │     (HTTP/SSE)        │     (HTTP/SSE)        │          │   │
 │  │                       │                     │   │            │   │
 │  └───────────────────────┼─────────────────────┼───────────┘   │
 │                        │                     │                  │
@@ -190,7 +180,7 @@ mcp-router:
 └─────────────────────────────────────────────────────────────────┘
                             │
                             │ host.docker.internal
-                            │ WebSocket (9001/9002)
+                            │ HTTP/SSE (9001/9002)
                             │
 ┌───────────────────────────▼──────────────────────────────────┐
 │                  Docker Network (membership)                │
@@ -200,8 +190,8 @@ mcp-router:
 │  │       Port: 8000                                    │     │
 │  │                                                     │     │
 │  │  EXTERNAL_MCPS:                                     │     │
-│  │  - ws://host.docker.internal:9001 (paddleocr)     │     │
-│  │  - ws://host.docker.internal:9002 (office-word)   │     │
+  │  - http://host.docker.internal:9001 (paddleocr)   │     │
+  │  - http://host.docker.internal:9002 (office-word) │     │
 │  └───────────────────────────────────────────────────┘     │
 │                                                              │
 └──────────────────────────────────────────────────────────────┘
@@ -258,8 +248,8 @@ EXTERNAL_MCPS: >
     "paddleocr": {...},
     "office-word": {...},
     "your-mcp": {
-      "transport": "websocket",
-      "url": "ws://host.docker.internal:9003"
+      "transport": "http",
+      "url": "http://host.docker.internal:9003"
     }
   }
 ```
@@ -290,12 +280,15 @@ docker exec -it paddleocr-mcp python -c "print('test')"
 cat mcp/proxy/config/mcp-proxy-config.yml | grep type
 ```
 
-### 问题 3: WebSocket 连接失败
+### 问题 3: HTTP/SSE 连接失败
 
 ```bash
 # 检查端口占用
 lsof -i :9001
 lsof -i :9002
+
+# 测试 SSE 端点是否正常
+curl -N http://localhost:9001/sse
 
 # 检查 MCP Proxy 日志
 # 日志会显示详细的连接信息
@@ -318,5 +311,5 @@ lsof -i :9002
 
 ---
 
-**最后更新**: 2026-02-26
+**最后更新**: 2026-02-28
 **版本**: v1.0.0

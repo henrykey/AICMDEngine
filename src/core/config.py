@@ -9,6 +9,8 @@ from dotenv import load_dotenv
 # Load .env file
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
@@ -77,6 +79,57 @@ class Settings(BaseSettings):
         env_file_encoding = "utf-8"
         case_sensitive = False
         extra = "ignore"  # Ignore extra environment variables
+
+    @classmethod
+    async def load_llm_from_mongodb(cls, db) -> None:
+        """Load LLM configuration from MongoDB llm_providers collection and update global settings."""
+        try:
+            collection = db.llm_providers
+            
+            # Find the highest priority enabled provider
+            doc = await collection.find_one(
+                {"enabled": True},
+                sort=[("priority", 1)]  # Ascending order, so priority 1 comes first
+            )
+            
+            if doc:
+                logger.info(f"Loading LLM config from MongoDB: provider={doc.get('name')}")
+                
+                # Update settings fields based on MongoDB document
+                provider_name = doc.get("name", "").lower()
+                
+                # Map provider name to settings
+                if "deepseek" in provider_name:
+                    settings.deepseek_base_url = doc.get("base_url", settings.deepseek_base_url)
+                    settings.deepseek_model_name = doc.get("model", settings.deepseek_model_name)
+                    if doc.get("api_key"):
+                        settings.deepseek_api_key = doc.get("api_key")
+                    logger.info(f"Updated Deepseek config from MongoDB: {doc.get('name')}")
+                    
+                elif "openai" in provider_name:
+                    settings.openai_base_url = doc.get("base_url", settings.openai_base_url)
+                    settings.openai_model_name = doc.get("model", settings.openai_model_name)
+                    if doc.get("api_key"):
+                        settings.openai_api_key = doc.get("api_key")
+                    logger.info(f"Updated OpenAI config from MongoDB: {doc.get('name')}")
+                else:
+                    # Generic update for other providers
+                    if "deepseek" in doc.get("base_url", "").lower() or "deepseek" in doc.get("model", "").lower():
+                        settings.deepseek_base_url = doc.get("base_url", settings.deepseek_base_url)
+                        settings.deepseek_model_name = doc.get("model", settings.deepseek_model_name)
+                        if doc.get("api_key"):
+                            settings.deepseek_api_key = doc.get("api_key")
+                    else:
+                        settings.openai_base_url = doc.get("base_url", settings.openai_base_url)
+                        settings.openai_model_name = doc.get("model", settings.openai_model_name)
+                        if doc.get("api_key"):
+                            settings.openai_api_key = doc.get("api_key")
+                    logger.info(f"Updated config from MongoDB: {doc.get('name')}")
+            else:
+                logger.warning("No enabled LLM provider found in MongoDB, using environment variables")
+                
+        except Exception as e:
+            logger.warning(f"Failed to load LLM config from MongoDB: {e}, using environment variables")
 
 
 def setup_logging(settings: Settings):

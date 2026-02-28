@@ -10,7 +10,7 @@ mcp/
 │   ├── paddleocr/       # PaddleOCR MCP (OCR 识别)
 │   └── office-word/     # Office Word MCP (Word 文档操作)
 │
-├── proxy/               # WebSocket 代理服务
+├── proxy/               # HTTP/SSE 代理服务（Legacy SSE 协议）
 │   ├── src/             # 代理源码
 │   ├── config/          # 配置文件
 │   └── requirements.txt # 依赖
@@ -20,16 +20,16 @@ mcp/
 
 ## 快速开始
 
-### 1. 启动 WebSocket 代理（将 stdio MCP 转换为 WebSocket）
+### 1. 启动 HTTP/SSE 代理（将 stdio MCP 转换为 HTTP/SSE）
 
 ```bash
 cd /Users/kehongwei/workspace/AICMDEngine/mcp
 ./start-proxy.sh
 ```
 
-这会启动以下 WebSocket 服务：
-- **PaddleOCR**: `ws://localhost:9001`
-- **Office Word**: `ws://localhost:9002`
+这会启动以下 HTTP/SSE 服务：
+- **PaddleOCR**: `http://localhost:9001`（`GET /sse` + `POST /messages`）
+- **Office Word**: `http://localhost:9002`（`GET /sse` + `POST /messages`）
 
 ### 2. 配置 MCP Router 连接
 
@@ -38,17 +38,7 @@ cd /Users/kehongwei/workspace/AICMDEngine/mcp
 ```yaml
 mcp-router:
   environment:
-    EXTERNAL_MCPS: >
-      {
-        "paddleocr": {
-          "transport": "websocket",
-          "url": "ws://host.docker.internal:9001"
-        },
-        "office-word": {
-          "transport": "websocket",
-          "url": "ws://host.docker.internal:9002"
-        }
-      }
+    EXTERNAL_MCPS: '{"paddleocr":{"transport":"http","url":"http://host.docker.internal:9001"},"office-word":{"transport":"http","url":"http://host.docker.internal:9002"}}'
 ```
 
 ## 架构
@@ -58,7 +48,7 @@ mcp-router:
 │ Host Machine                                          │
 │                                                       │
 │  ┌─────────────────────────────────────────────┐    │
-│  │ MCP WebSocket Proxy (本代理)                  │    │
+│  │ MCP HTTP/SSE Proxy (本代理)                   │    │
 │  │ - 端口 9001: PaddleOCR MCP                   │    │
 │  │ - 端口 9002: Office Word MCP                 │    │
 │  └────────────┬────────────────────────────────┘    │
@@ -68,13 +58,13 @@ mcp-router:
 │      python word_mcp_server.py                    │
 │                                                       │
 └───────────────┬───────────────────────────────────┘
-                │ WebSocket
+                │ HTTP/SSE (Legacy SSE)
 ┌───────────────▼───────────────────────────────────┐
 │ Docker Network                                      │
 │  ┌──────────────────┐                              │
 │  │ MCP Router 容器   │                              │
-│  │ ws://host.docker. │                              │
-│  │ internal:9001... │                              │
+│  │ http://host.      │                              │
+│  │ docker.internal  │                              │
 │  └──────────────────┘                              │
 └────────────────────────────────────────────────────┘
 ```
@@ -117,7 +107,7 @@ servers:
 ## 优势
 
 - ✅ **统一管理**: 所有 MCP 集中在一个目录
-- ✅ **网络解耦**: MCP Router 通过 WebSocket 连接，无需在容器内安装依赖
+- ✅ **网络解耦**: MCP Router 通过 HTTP/SSE 连接，无需在容器内安装依赖
 - ✅ **独立部署**: 每个 MCP 可以独立启动、停止、升级
 - ✅ **语言无关**: 支持 Python、Node.js 等任何语言的 stdio MCP
 - ✅ **配置驱动**: 只需修改 YAML 配置文件即可添加新 MCP
@@ -134,7 +124,7 @@ servers:
 
 代理源码在 `mcp/proxy/src/mcp_proxy.py`，实现了：
 - stdio 进程管理
-- WebSocket <-> stdio 消息转发
+- HTTP/SSE (Legacy SSE) <-> stdio 消息转发
 - JSON-RPC 协议透传
 - 多 MCP 并发处理
 
@@ -153,14 +143,14 @@ lsof -i :9002
 lsof -i :9003
 ```
 
-### 测试 WebSocket 连接
+### 测试 HTTP/SSE 连接
 
 ```bash
-# 安装 websocat
-brew install websocat
+# 测试 SSE 端点（应返回 event: endpoint）
+curl -N http://localhost:9001/sse
 
-# 测试连接
-websocat ws://localhost:9001
+# 或用 curl 快速验证代理存活
+curl -s -o /dev/null -w "%{http_code}" http://localhost:9001/sse --max-time 2
 ```
 
 ## 相关链接

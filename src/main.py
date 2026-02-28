@@ -50,6 +50,13 @@ async def startup_db_client():
 
     logger.info(f"Connected to MongoDB at {settings.database_name}")
 
+    # Load LLM configuration from MongoDB
+    try:
+        await settings.load_llm_from_mongodb(app.mongodb)
+        logger.info(f"Loaded LLM config from MongoDB: {settings.deepseek_model_name or settings.openai_model_name}")
+    except Exception as e:
+        logger.warning(f"Could not load LLM config from MongoDB: {e}")
+
     # Initialize LLM Provider Manager
     try:
         config_loader = LLMConfigLoader(use_mongodb=True)

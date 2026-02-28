@@ -1,0 +1,65 @@
+[project]
+name = "fast-paddleocr-mcp"
+version = "0.5.0"
+description = "Fast PaddleOCR MCP server - Extract text from images using PaddleOCR with optimized performance"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "PaddleOCR-MCP Contributors"}
+]
+keywords = ["paddleocr", "ocr", "mcp", "model-context-protocol", "text-recognition", "image-processing"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "mcp>=1.0.0",
+    "paddleocr>=2.7.0",
+    "paddlepaddle>=2.5.0",
+    "pillow>=10.0.0",
+    "pyyaml>=6.0.0",
+    "websockets>=11.0",
+    "anyio>=4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.0.0",
+]
+
+[project.scripts]
+fast-paddleocr-mcp = "paddleocr_cli.mcp_server:main"
+
+[project.urls]
+Homepage = "https://github.com/yourusername/PaddleOCR-MCP"
+Documentation = "https://github.com/yourusername/PaddleOCR-MCP#readme"
+Repository = "https://github.com/yourusername/PaddleOCR-MCP"
+Issues = "https://github.com/yourusername/PaddleOCR-MCP/issues"
+# TODO: 发布前请更新为实际的 GitHub 仓库地址
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["paddleocr_cli"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+addopts = "-v --tb=short"

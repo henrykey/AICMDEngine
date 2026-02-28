@@ -96,8 +96,8 @@ docs/MCP_ARCHITECTURE_SUMMARY.md             (本文件)
 
 ### 1. 统一管理
 - **单一入口**: MCP Proxy 是所有 MCP 服务器的统一管理层
-- **协议转换**: 自动将 stdio 转换为 WebSocket
-- **端口分配**: 统一管理 WebSocket 端口（9001, 9002, ...）
+- **协议转换**: 自动将 stdio 转换为 HTTP/SSE（Legacy SSE 协议）
+- **端口分配**: 统一管理 HTTP/SSE 端口（9001, 9002, ...）
 
 ### 2. 灵活部署
 - **开发环境**: 使用进程模式，简单快速
@@ -145,7 +145,7 @@ container: paddleocr-mcp
 ### 已验证 ✅
 - [x] MCP Proxy 进程模式启动成功
 - [x] Office-Word MCP 进程模式运行正常
-- [x] WebSocket 端口分配正确（9001, 9002）
+- [x] HTTP/SSE 端口分配正确（9001, 9002）
 - [x] MCP Router 可以连接到 MCP Proxy
 - [x] 配置文件格式正确
 - [x] 脚本可执行权限设置正确
@@ -223,7 +223,7 @@ docker-compose -f docker-compose.mcp-servers.yml up -d
 
 **架构已固定** ✅：
 - MCP Proxy 是核心，支持双模式
-- 统一的 stdio → WebSocket 转换
+- 统一的 stdio → HTTP/SSE 转换（Legacy SSE 协议）
 - 灵活的部署方式（进程/容器）
 
 **开发环境可用** ✅：

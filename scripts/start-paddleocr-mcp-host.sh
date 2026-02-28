@@ -25,8 +25,8 @@ fi
 pkill -f "python -m paddleocr_mcp" || true
 sleep 1
 
-# 启动新的MCP服务
-nohup python -m paddleocr_mcp --verbose > "$MCP_LOG" 2>&1 &
+# 启动新的MCP服务（HTTP/SSE 模式，通过 MCP proxy 管理）
+nohup python -m paddleocr_mcp --http --host 0.0.0.0 --port 9001 --verbose > "$MCP_LOG" 2>&1 &
 MCP_PID=$!
 
 # 保存PID
