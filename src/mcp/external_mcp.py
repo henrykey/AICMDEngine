@@ -1,6 +1,11 @@
 """
 External MCP Server Adapter
-支持通过stdio或WebSocket连接外部MCP服务器
+支持多种传输方式连接外部MCP服务器：
+- stdio: 标准输入/输出进程通信
+- websocket: WebSocket 连接
+- http: HTTP/SSE (streamable-http) 或 Legacy SSE 协议
+  * 自动检测 /mcp (streamable-http) 端点
+  * 降级到 /sse (legacy SSE) 端点
 """
 
 import asyncio
@@ -38,10 +43,16 @@ class ExternalMCPServer(BaseMCPServer):
 
         Args:
             name: MCP服务器名称
-            command: 启动MCP服务器的命令 (stdio transport 需要)
+            command: 启动MCP服务器的命令 (stdio/websocket transport 需要)
             args: 命令参数列表
-            transport: 传输方式 (stdio 或 websocket)
-            url: WebSocket URL (websocket transport 需要)
+            transport: 传输方式
+                - "stdio": 标准进程通信 (需要 command 参数)
+                - "websocket": WebSocket 连接 (需要 url 参数)
+                - "http": HTTP/SSE 连接 (需要 url 参数)
+                  自动probing流程: GET /mcp → GET /sse → 连接成功
+            url: 连接URL (websocket/http transport 需要)
+                - WebSocket: ws://host:port/path
+                - HTTP/SSE: http://host:port (会自动尝试 /mcp 和 /sse 端点)
             env: 环境变量
             timeout: 请求超时时间（秒）
         """
@@ -58,6 +69,13 @@ class ExternalMCPServer(BaseMCPServer):
 
         # WebSocket 连接 (websocket)
         self.websocket: Optional[Any] = None
+
+        # HTTP 会话 (http/sse)
+        self.http_session: Optional[Any] = None
+        self.http_session_id: Optional[str] = None  # MCP session ID for streamable-http
+        self.sse_mode: bool = False               # True = 使用旧版 SSE 协议 (/sse)
+        self.sse_message_url: Optional[str] = None  # 旧版 SSE 的消息端点 URL
+        self.sse_response: Optional[Any] = None    # 旧版 SSE 长连接 response 对象
 
         # 请求管理
         self.request_id = 0
@@ -84,6 +102,8 @@ class ExternalMCPServer(BaseMCPServer):
                 await self._connect_stdio()
             elif self.transport == "websocket":
                 await self._connect_websocket()
+            elif self.transport in ("http", "http-bridge", "sse"):
+                await self._connect_http()
             else:
                 raise ValueError(f"Unsupported transport: {self.transport}")
 
@@ -182,6 +202,297 @@ class ExternalMCPServer(BaseMCPServer):
                 self.websocket = None
             raise
 
+    async def _connect_http(self):
+        """
+        通过 HTTP 连接外部MCP，自动探测协议协商（Protocol Probing）
+        
+        协议探测流程:
+        1. 尝试 streamable-http: POST /mcp + initialize 握手
+           - 如果成功: 继续使用 streamable-http
+           - 如果 404: 回退到 legacy SSE
+        2. 如果 streamable-http 失败: 尝试 legacy SSE
+           a. GET /sse 打开 SSE 长连接
+           b. 等待 'event: endpoint' + 'data: /messages?session_id=xxx'
+           c. 使用该 session_id POST 消息
+        
+        这种自动降级机制确保兼容不同版本的 MCP HTTP 服务
+        """
+        import aiohttp
+
+        logger.info(f"Connecting to HTTP MCP '{self.name}': {self.url}")
+
+        self.http_session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=self.timeout, connect=30, sock_read=self.timeout)
+        )
+
+        try:
+            # 尝试 streamable-http
+            probed = await self._probe_streamable_http()
+            if probed:
+                logger.info(f"HTTP MCP '{self.name}': using streamable-http (/mcp)")
+                await self._discover_tools()
+            else:
+                # 回退旧版 SSE
+                logger.info(f"HTTP MCP '{self.name}': /mcp not found, trying legacy SSE (/sse)")
+                await self._connect_legacy_sse()
+                await self._discover_tools()
+
+            logger.info(f"HTTP MCP '{self.name}' initialized successfully")
+
+        except Exception as e:
+            logger.error(f"Failed to connect HTTP MCP '{self.name}': {e}")
+            if self.http_session:
+                try:
+                    await self.http_session.close()
+                except Exception:
+                    pass
+                self.http_session = None
+            raise
+
+    async def _probe_streamable_http(self) -> bool:
+        """
+        探测 streamable-http 协议 (/mcp 端点)
+        
+        streamable-http 特点:
+        - POST /mcp 端点，body 为 JSON-RPC 请求
+        - 支持 Mcp-Session-Id header
+        - 响应可以是单个 JSON 或 SSE 流
+        
+        返回 True: /mcp 可用，继续用 streamable-http
+        返回 False: 404/失败，回退到 legacy SSE (/sse)
+        """
+        import aiohttp
+
+        init_request = {
+            "jsonrpc": "2.0",
+            "id": self._next_request_id(),
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}, "resources": {}, "prompts": {}},
+                "clientInfo": {"name": "AICMDEngine", "version": "1.0.0"}
+            }
+        }
+
+        mcp_url = f"{self.url.rstrip('/')}/mcp"
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
+
+        try:
+            async with self.http_session.post(
+                mcp_url,
+                data=json.dumps(init_request),
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                if resp.status == 404:
+                    return False
+
+                session_id = resp.headers.get("Mcp-Session-Id") or resp.headers.get("mcp-session-id")
+                if session_id:
+                    self.http_session_id = session_id
+                    logger.info(f"HTTP MCP '{self.name}' session ID: {session_id}")
+
+                if resp.status == 200:
+                    content_type = resp.headers.get("Content-Type", "")
+                    response = None
+                    if "text/event-stream" in content_type:
+                        async for raw_line in resp.content:
+                            line = raw_line.decode("utf-8").strip()
+                            if line.startswith("data:"):
+                                data_str = line[5:].strip()
+                                if data_str:
+                                    try:
+                                        msg = json.loads(data_str)
+                                        if "result" in msg or "error" in msg:
+                                            response = msg
+                                            break
+                                    except json.JSONDecodeError:
+                                        pass
+                    else:
+                        body = await resp.text()
+                        if body.strip():
+                            response = json.loads(body)
+
+                    if response and "result" in response:
+                        server_info = response["result"].get("serverInfo", {})
+                        logger.info(
+                            f"Connected to HTTP MCP '{self.name}': "
+                            f"{server_info.get('name', 'Unknown')} "
+                            f"v{server_info.get('version', 'Unknown')}"
+                        )
+
+                    # 发送 initialized 通知
+                    try:
+                        notif = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+                        await self._send_http_request(notif)
+                    except Exception:
+                        pass
+
+                    return True
+
+        except Exception as e:
+            logger.warning(f"HTTP MCP '{self.name}' streamable-http probe failed: {e}")
+
+        return False
+
+    async def _connect_legacy_sse(self):
+        """
+        连接 legacy MCP SSE 协议 (/sse 端点)
+        
+        Legacy SSE 通讯流程:
+        1. GET /sse: 打开 SSE 长连接
+        2. 接收 'event: endpoint' + 'data: /messages?session_id=xxx'
+        3. POST /messages?session_id=xxx: 发送 JSON-RPC 请求
+        4. SSE 流推回响应: 'event: message' + 'data: {...JSON-RPC 响应...}'
+        
+        特点:
+        - 长连接用于服务器推送消息
+        - 短连接 POST 发送客户端消息
+        - session_id 映射请求/响应对
+        """
+        import aiohttp
+
+        sse_url = f"{self.url.rstrip('/')}/sse"
+        logger.info(f"Connecting legacy SSE MCP '{self.name}': {sse_url}")
+
+        endpoint_future: asyncio.Future = asyncio.get_event_loop().create_future()
+
+        # 打开 SSE 长连接
+        self.sse_response = await self.http_session.get(
+            sse_url,
+            headers={"Accept": "text/event-stream"},
+            timeout=aiohttp.ClientTimeout(total=None, connect=30, sock_read=None)
+        )
+
+        if self.sse_response.status != 200:
+            raise RuntimeError(
+                f"Legacy SSE connect failed: HTTP {self.sse_response.status}"
+            )
+
+        # 背景任务：持续读取 SSE 事件
+        async def _sse_reader():
+            event_type = None
+            try:
+                async for raw_line in self.sse_response.content:
+                    line = raw_line.decode("utf-8").rstrip("\n").rstrip("\r")
+                    if line.startswith("event:"):
+                        event_type = line[6:].strip()
+                    elif line.startswith("data:"):
+                        data_str = line[5:].strip()
+                        if event_type == "endpoint":
+                            # 收到消息端点 URL（可能是相对路径）
+                            if data_str.startswith("/"):
+                                base = self.url.rstrip("/")
+                                # 取 scheme+host
+                                from urllib.parse import urlparse
+                                p = urlparse(base)
+                                msg_url = f"{p.scheme}://{p.netloc}{data_str}"
+                            else:
+                                msg_url = data_str
+                            self.sse_message_url = msg_url
+                            self.sse_mode = True
+                            if not endpoint_future.done():
+                                endpoint_future.set_result(msg_url)
+                            logger.info(
+                                f"Legacy SSE MCP '{self.name}' message URL: {msg_url}"
+                            )
+                        elif event_type == "message" and data_str:
+                            # JSON-RPC 响应，解析并 resolve 对应的 future
+                            try:
+                                msg = json.loads(data_str)
+                                req_id = msg.get("id")
+                                if req_id is not None and req_id in self.pending_requests:
+                                    fut = self.pending_requests.pop(req_id)
+                                    if not fut.done():
+                                        fut.set_result(msg)
+                            except json.JSONDecodeError:
+                                pass
+                        event_type = None
+                    elif line == "":
+                        event_type = None
+            except Exception as e:
+                logger.warning(f"Legacy SSE reader for '{self.name}' ended: {e}")
+                # 将所有待定请求标记为错误
+                for fut in self.pending_requests.values():
+                    if not fut.done():
+                        fut.set_exception(ConnectionError("SSE connection closed"))
+
+        asyncio.create_task(_sse_reader())
+
+        # 等待 endpoint 事件（最多 10 秒）
+        try:
+            await asyncio.wait_for(endpoint_future, timeout=10)
+        except asyncio.TimeoutError:
+            raise RuntimeError(f"Legacy SSE MCP '{self.name}': timeout waiting for endpoint event")
+
+        # 发送 initialize 握手
+        init_request = {
+            "jsonrpc": "2.0",
+            "id": self._next_request_id(),
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}, "resources": {}, "prompts": {}},
+                "clientInfo": {"name": "AICMDEngine", "version": "1.0.0"}
+            }
+        }
+        response = await self._send_legacy_sse_request(init_request)
+        if response and "result" in response:
+            server_info = response["result"].get("serverInfo", {})
+            logger.info(
+                f"Connected to legacy SSE MCP '{self.name}': "
+                f"{server_info.get('name', 'Unknown')} "
+                f"v{server_info.get('version', 'Unknown')}"
+            )
+
+        # 发送 initialized 通知
+        try:
+            notif = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+            await self._send_legacy_sse_request(notif, no_reply=True)
+        except Exception:
+            pass
+
+    async def _send_legacy_sse_request(
+        self,
+        request: Dict[str, Any],
+        no_reply: bool = False
+    ) -> Optional[Dict[str, Any]]:
+        """通过旧版 SSE 协议 POST 消息，响应从 SSE 流推回。"""
+        import aiohttp
+
+        if not self.sse_message_url:
+            raise RuntimeError(f"Legacy SSE message URL not set for '{self.name}'")
+
+        request_json = json.dumps(request)
+        req_id = request.get("id")
+
+        # 注册 future（仅有 id 的请求需要等待响应）
+        fut: Optional[asyncio.Future] = None
+        if req_id is not None and not no_reply:
+            fut = asyncio.get_event_loop().create_future()
+            self.pending_requests[req_id] = fut
+
+        async with self.http_session.post(
+            self.sse_message_url,
+            data=request_json,
+            headers={"Content-Type": "application/json"},
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as resp:
+            if resp.status not in (200, 202, 204):
+                body = await resp.text()
+                if fut and req_id in self.pending_requests:
+                    self.pending_requests.pop(req_id)
+                raise RuntimeError(f"Legacy SSE POST failed: {resp.status} {body[:200]}")
+
+        if fut is None:
+            return None
+
+        # 等待 SSE 流推回响应
+        return await asyncio.wait_for(fut, timeout=self.timeout)
+
     async def _send_initialize(self):
         """发送initialize握手请求"""
         init_request = {
@@ -222,13 +533,57 @@ class ExternalMCPServer(BaseMCPServer):
     async def _discover_tools(self):
         """发现外部MCP提供的工具"""
         try:
-            list_request = {
+            if self.transport in ("http", "http-bridge", "sse"):
+                # HTTP方式：发送GET /tools请求
+                await self._discover_tools_http()
+            else:
+                # JSON-RPC方式：stdio 和 websocket
+                await self._discover_tools_jsonrpc()
+
+        except Exception as e:
+            logger.error(f"Failed to discover tools from '{self.name}': {e}")
+
+    async def _discover_tools_jsonrpc(self):
+        """通过JSON-RPC发现工具（stdio/websocket）"""
+        list_request = {
+            "jsonrpc": "2.0",
+            "id": self._next_request_id(),
+            "method": "tools/list"
+        }
+
+        response = await self._send_request(list_request)
+
+        if response and "result" in response:
+            tools = response["result"].get("tools", [])
+
+            # 清空现有工具
+            self.tools = {}
+
+            # 注册所有发现的工具
+            for tool_def in tools:
+                await self._register_external_tool(tool_def)
+
+            logger.info(
+                f"Discovered {len(tools)} tools from external MCP '{self.name}'"
+            )
+        else:
+            logger.warning(f"No tools returned from external MCP '{self.name}'")
+
+    async def _discover_tools_http(self):
+        """通过 HTTP 协议发现工具（自动选择 streamable-http 或 legacy SSE）"""
+        try:
+            logger.info(f"Discovering tools from HTTP MCP '{self.name}'")
+
+            request = {
                 "jsonrpc": "2.0",
                 "id": self._next_request_id(),
                 "method": "tools/list"
             }
 
-            response = await self._send_request(list_request)
+            if self.sse_mode:
+                response = await self._send_legacy_sse_request(request)
+            else:
+                response, _ = await self._send_http_request(request)
 
             if response and "result" in response:
                 tools = response["result"].get("tools", [])
@@ -241,13 +596,94 @@ class ExternalMCPServer(BaseMCPServer):
                     await self._register_external_tool(tool_def)
 
                 logger.info(
-                    f"Discovered {len(tools)} tools from external MCP '{self.name}'"
+                    f"Discovered {len(tools)} tools from HTTP MCP '{self.name}'"
                 )
             else:
-                logger.warning(f"No tools returned from external MCP '{self.name}'")
+                logger.warning(f"No tools returned from HTTP MCP '{self.name}'")
 
         except Exception as e:
-            logger.error(f"Failed to discover tools from '{self.name}': {e}")
+            logger.error(f"Error discovering tools from HTTP MCP '{self.name}': {e}")
+            raise
+
+    async def _send_http_request(
+        self,
+        request: Dict[str, Any]
+    ) -> tuple:
+        """向 streamable-http MCP 端点发送 JSON-RPC 请求。
+
+        按 MCP streamable-http 规范：
+        - POST /mcp
+        - Content-Type: application/json
+        - Accept: application/json, text/event-stream
+        - Mcp-Session-Id: <session_id>  (握手后必须携带)
+
+        响应可能是 application/json 或 text/event-stream，均处理。
+        返回 (response_dict_or_None, session_id_or_None)
+        """
+        import aiohttp
+
+        mcp_url = f"{self.url.rstrip('/')}/mcp"
+        request_json = json.dumps(request)
+
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
+        if self.http_session_id:
+            headers["Mcp-Session-Id"] = self.http_session_id
+
+        is_notification = "id" not in request  # 通知无需等待响应
+
+        logger.debug(f"HTTP POST {mcp_url} method={request.get('method')}")
+
+        try:
+            async with self.http_session.post(
+                mcp_url,
+                data=request_json,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=self.timeout)
+            ) as resp:
+                # 提取 session ID（仅在 initialize 响应中出现）
+                session_id = resp.headers.get("Mcp-Session-Id") or resp.headers.get("mcp-session-id")
+
+                # 202 Accepted = 通知已收，无响应体
+                if resp.status == 202 or is_notification:
+                    return None, session_id
+
+                if resp.status != 200:
+                    body = await resp.text()
+                    logger.error(
+                        f"HTTP MCP '{self.name}' request failed: "
+                        f"{resp.status} {body[:200]}"
+                    )
+                    return None, session_id
+
+                content_type = resp.headers.get("Content-Type", "")
+
+                if "text/event-stream" in content_type:
+                    # SSE 响应：解析事件流，取第一个有 result/error 的消息
+                    async for raw_line in resp.content:
+                        line = raw_line.decode("utf-8").strip()
+                        if line.startswith("data:"):
+                            data_str = line[5:].strip()
+                            if data_str and data_str != "[DONE]":
+                                try:
+                                    msg = json.loads(data_str)
+                                    if "result" in msg or "error" in msg:
+                                        return msg, session_id
+                                except json.JSONDecodeError:
+                                    pass
+                    return None, session_id
+                else:
+                    # 直接 JSON 响应
+                    body = await resp.text()
+                    if body.strip():
+                        return json.loads(body), session_id
+                    return None, session_id
+
+        except Exception as e:
+            logger.error(f"HTTP request error for '{self.name}': {e}")
+            raise
 
     async def _register_external_tool(self, tool_def: Dict[str, Any]):
         """注册外部工具到本地MCP"""
@@ -278,6 +714,18 @@ class ExternalMCPServer(BaseMCPServer):
         arguments: Dict[str, Any]
     ) -> ToolResult:
         """执行外部工具"""
+        # HTTP方式有不同的实现
+        if self.transport in ("http", "http-bridge", "sse"):
+            return await self._execute_tool_http(tool_name, arguments)
+        else:
+            return await self._execute_tool_jsonrpc(tool_name, arguments)
+
+    async def _execute_tool_jsonrpc(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any]
+    ) -> ToolResult:
+        """通过JSON-RPC执行工具（stdio/websocket）"""
         # 最大重试次数（用于处理连接断开重连）
         max_retries = 1
         last_error = None
@@ -365,6 +813,82 @@ class ExternalMCPServer(BaseMCPServer):
                 error_msg = f"Error executing external tool '{tool_name}': {e}"
                 logger.error(error_msg)
                 return ToolResult.error(error_msg, error_code="EXECUTION_ERROR")
+
+    async def _execute_tool_http(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any]
+    ) -> ToolResult:
+        """通过 HTTP SSE (streamable-http) 执行工具"""
+        try:
+            # 构造 JSON-RPC 请求
+            request = {
+                "jsonrpc": "2.0",
+                "id": self._next_request_id(),
+                "method": "tools/call",
+                "params": {
+                    "name": tool_name,
+                    "arguments": arguments
+                }
+            }
+
+            logger.info(f"Executing HTTP tool '{tool_name}'")
+
+            # 根据协议模式选择发送方式
+            if self.sse_mode:
+                response = await self._send_legacy_sse_request(request)
+            else:
+                response, _ = await self._send_http_request(request)
+
+            if response:
+                if "error" in response:
+                    error = response["error"]
+                    error_msg = error.get("message", "Unknown error")
+                    error_code = str(error.get("code", "UNKNOWN"))
+                    logger.error(f"Tool '{tool_name}' error: {error_msg}")
+                    return ToolResult.error(error_msg, error_code=error_code)
+
+                if "result" in response:
+                    result = response["result"]
+
+                    # 检查是否有错误标记
+                    if result.get("isError", False):
+                        content = result.get("content", [])
+                        if content and len(content) > 0:
+                            error_text = content[0].get("text", "Unknown error")
+                            return ToolResult.error(error_text, error_code="TOOL_ERROR")
+
+                    # 提取文本内容
+                    content = result.get("content", [])
+                    if content and len(content) > 0:
+                        text_content = []
+                        for item in content:
+                            if item.get("type") == "text":
+                                text_content.append(item.get("text", ""))
+
+                        if text_content:
+                            combined_text = "\n".join(text_content)
+                            logger.info(
+                                f"Tool '{tool_name}' result length: {len(combined_text)} characters"
+                            )
+                            return ToolResult.success(combined_text)
+
+                    return ToolResult.success(str(result))
+
+            return ToolResult.error(
+                "No response from external MCP",
+                error_code="NO_RESPONSE"
+            )
+
+        except asyncio.TimeoutError:
+            error_msg = f"HTTP tool '{tool_name}' execution timed out ({self.timeout}s)"
+            logger.error(error_msg)
+            return ToolResult.error(error_msg, error_code="TIMEOUT")
+
+        except Exception as e:
+            error_msg = f"Error executing HTTP tool '{tool_name}': {e}"
+            logger.error(error_msg)
+            return ToolResult.error(error_msg, error_code="EXECUTION_ERROR")
 
     async def _send_request(
         self,
@@ -588,6 +1112,17 @@ class ExternalMCPServer(BaseMCPServer):
                 )
         self.pending_requests.clear()
 
+        # 关闭 HTTP 会话
+        if self.transport in ("http", "http-bridge", "sse"):
+            if hasattr(self, 'http_session') and self.http_session:
+                try:
+                    await self.http_session.close()
+                    logger.info(f"HTTP session closed for '{self.name}'")
+                except Exception as e:
+                    logger.error(f"Error closing HTTP session: {e}")
+                finally:
+                    self.http_session = None
+
         # 关闭 WebSocket 连接
         if self.transport == "websocket" and self.websocket:
             try:
@@ -632,6 +1167,9 @@ class ExternalMCPServer(BaseMCPServer):
             # websockets.ClientConnection 没有直接的 open/closed 属性
             # 简单检查连接对象是否存在
             info["is_connected"] = self.websocket is not None
+        elif self.transport in ("http", "http-bridge", "sse"):
+            # HTTP 会话状态
+            info["is_connected"] = hasattr(self, 'http_session') and self.http_session is not None
         else:  # stdio
             info["is_running"] = self.process is not None and self.process.returncode is None
 
