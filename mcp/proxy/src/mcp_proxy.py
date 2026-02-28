@@ -60,9 +60,12 @@ class MCPServerWrapper:
         else:
             raise ValueError(f"Unknown server type: {self.server_type}")
 
+        self.timeout = config.get('timeout', 300)
         self.process: Optional[asyncio.subprocess.Process] = None
         # session_id -> asyncio.Queue（各 SSE 连接的响应队列）
         self.sessions: Dict[str, asyncio.Queue] = {}
+        # req_id -> Future（用于 /mcp streamable-http 端点的同步响应等待）
+        self.mcp_pending: Dict[Any, asyncio.Future] = {}
         self._read_task: Optional[asyncio.Task] = None
         self._server: Optional[uvicorn.Server] = None
         self.is_running = False
@@ -122,8 +125,19 @@ class MCPServerWrapper:
                 if not text:
                     continue
                 logger.debug(f"[{self.name}] stdout → SSE: {text[:120]}")
+                # 广播到所有 SSE 会话队列
                 for q in list(self.sessions.values()):
                     await q.put(text)
+                # 同时解析是否有等待中的 /mcp 同步请求
+                try:
+                    msg = json.loads(text)
+                    req_id = msg.get("id")
+                    if req_id is not None and req_id in self.mcp_pending:
+                        fut = self.mcp_pending.pop(req_id)
+                        if not fut.done():
+                            fut.set_result(msg)
+                except (json.JSONDecodeError, Exception):
+                    pass
         except Exception as e:
             logger.error(f"[{self.name}] stdio read error: {e}")
 
@@ -183,12 +197,114 @@ class MCPServerWrapper:
         await self.process.stdin.drain()
         return Response(status_code=202)
 
+    async def mcp_endpoint(self, request: Request) -> Response:
+        """POST /mcp — streamable-http 端点，直接转发 JSON-RPC 并等待响应。
+
+        这使 MCP Router 的 streamable-http 客户端也能工作，无需 SSE 长连接。
+        流程:
+          1. 读取 JSON-RPC 请求体
+          2. 注册一个 Future 等待对应 id 的响应
+          3. 写入 stdio 进程 stdin
+          4. 等待 _read_stdio_loop 把响应广播到 mcp_pending dict
+          5. 返回 JSON 响应
+        """
+        if self.process is None or self.process.returncode is not None:
+            return Response(content="Backend process not running", status_code=503)
+
+        body = await request.body()
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            return Response(content="Invalid JSON", status_code=400)
+
+        req_id = payload.get("id")
+        method = payload.get("method", "")
+        logger.info(f"[{self.name}] POST /mcp method={method} id={req_id}")
+        logger.info(f"[{self.name}] /mcp body: {body.decode()[:500]}")
+
+        # 通知类请求（无 id）直接写入 stdin 不等待响应
+        if req_id is None:
+            self.process.stdin.write(body + b"\n")
+            await self.process.stdin.drain()
+            return Response(status_code=202)
+
+        # 注册 Future 等待响应
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future = loop.create_future()
+        self.mcp_pending[req_id] = fut
+
+        try:
+            self.process.stdin.write(body + b"\n")
+            await self.process.stdin.drain()
+
+            response = await asyncio.wait_for(fut, timeout=self.timeout)
+            logger.info(f"[{self.name}] /mcp response: {json.dumps(response)[:500]}")
+            return Response(
+                content=json.dumps(response),
+                media_type="application/json",
+            )
+        except asyncio.TimeoutError:
+            self.mcp_pending.pop(req_id, None)
+            logger.error(f"[{self.name}] /mcp timeout for id={req_id}")
+            return Response(content="Request timeout", status_code=504)
+        except Exception as e:
+            self.mcp_pending.pop(req_id, None)
+            logger.error(f"[{self.name}] /mcp error: {e}")
+            return Response(content=str(e), status_code=500)
+
     # ------------------------------------------------------------------
     # 生命周期
     # ------------------------------------------------------------------
 
+    async def _stdio_handshake(self):
+        """在 stdio 进程启动后立即完成 MCP initialize 握手。
+        
+        stdio MCP 进程（如 paddleocr_mcp）要求：
+        1. 收到 initialize 请求并回复
+        2. 收到 notifications/initialized 通知
+        才能开始处理 tools/list、tools/call 等请求。
+        """
+        logger.info(f"[{self.name}] Performing MCP initialize handshake with stdio process...")
+
+        # 注册 Future 等待 initialize 响应
+        req_id = 0
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future = loop.create_future()
+        self.mcp_pending[req_id] = fut
+
+        init_request = json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}, "resources": {}, "prompts": {}},
+                "clientInfo": {"name": "mcp-proxy", "version": "1.0.0"}
+            }
+        }).encode()
+
+        self.process.stdin.write(init_request + b"\n")
+        await self.process.stdin.drain()
+
+        try:
+            response = await asyncio.wait_for(fut, timeout=30.0)
+            server_info = response.get("result", {}).get("serverInfo", {})
+            logger.info(
+                f"[{self.name}] stdio handshake OK: "
+                f"{server_info.get('name', 'Unknown')} v{server_info.get('version', 'Unknown')}"
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"[{self.name}] stdio handshake timed out!")
+            raise RuntimeError(f"MCP stdio handshake timeout for '{self.name}'")
+
+        # 发送 initialized 通知（无需等待响应）
+        notif = json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}).encode()
+        self.process.stdin.write(notif + b"\n")
+        await self.process.stdin.drain()
+        logger.info(f"[{self.name}] Sent notifications/initialized")
+
     async def start(self):
-        """启动 stdio 进程 + HTTP/SSE 服务器"""
+        """启动 stdio 进程 + 握手初始化 + HTTP/SSE 服务器"""
         if self.server_type == 'process':
             await self._start_process()
         elif self.server_type == 'docker':
@@ -196,9 +312,13 @@ class MCPServerWrapper:
 
         self._read_task = asyncio.create_task(self._read_stdio_loop())
 
+        # stdio MCP 进程启动后必须先完成 initialize 握手才能接受其他请求
+        await self._stdio_handshake()
+
         app = Starlette(routes=[
             Route("/sse", self.sse_endpoint, methods=["GET"]),
             Route("/messages", self.messages_endpoint, methods=["POST"]),
+            Route("/mcp", self.mcp_endpoint, methods=["POST"]),
         ])
         config = uvicorn.Config(app, host="0.0.0.0", port=self.port, log_level="warning")
         self._server = uvicorn.Server(config)
