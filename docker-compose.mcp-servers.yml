@@ -28,7 +28,7 @@ services:
       PYTHONUNBUFFERED: 1
       MCP_HOST: 0.0.0.0
       MCP_PORT: 8000
-      EXTERNAL_MCPS: '{"paddleocr":{"transport":"http","url":"http://host.docker.internal:9001","timeout":300},"office-word":{"transport":"http","url":"http://host.docker.internal:9002","timeout":60}}'
+      EXTERNAL_MCPS: '{"paddleocr":{"transport":"http","url":"http://host.docker.internal:9001","timeout":300},"office-word":{"transport":"http","url":"http://host.docker.internal:9002","timeout":60},"pdf2md":{"transport":"http","url":"http://host.docker.internal:9003","timeout":300}}'
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # LLM_BASE_URL: ${LLM_BASE_URL}
       # LLM_API_KEY: ${LLM_API_KEY}
@@ -95,12 +95,12 @@ services:
     container_name: office-word-mcp
     restart: unless-stopped
     ports:
-      - "9003:9003"
+      - "9004:9004"
     environment:
       - PYTHONUNBUFFERED=1
       - MCP_TRANSPORT=sse
       - MCP_HOST=0.0.0.0
-      - MCP_PORT=9003
+      - MCP_PORT=9004
     # 资源限制
     deploy:
       resources:
@@ -114,7 +114,7 @@ services:
       - mcp-servers-network
     # 健康检查
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9003/sse"]
+      test: ["CMD", "curl", "-f", "http://localhost:9004/sse"]
       interval: 30s
       timeout: 10s
       retries: 3

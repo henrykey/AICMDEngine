@@ -1,0 +1,12 @@
+{
+  "vip_model": false,
+  "cpu_only": true,
+  "models": {
+    "vlm": {
+      "type": "openai",
+      "base_url": "${QWEN_BASE_URL}",
+      "api_key": "${QWEN_API_KEY}",
+      "model_name": "${QWEN_MODEL_NAME}"
+    }
+  }
+}

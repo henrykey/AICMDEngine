@@ -10,42 +10,76 @@ MCP (Model Context Protocol) 框架允许你集成多个服务的API命令，并
 
 系统启动时会自动注册以下MCP服务器：
 
-```python
-# src/main.py (第65-72行)
-mcp_registry = MCPRegistry()
+**内部 MCP**（随 Router 进程启动，`src/main.py` 硬编码注册）：
 
-# Register MCP servers
-membership_mcp = MembershipMCPServer()
-test_mcp = TestMCPServer()
+| MCP名称 | 版本 | 工具数 | 用途 | 实现文件 |
+|---------|------|--------|------|----------|
+| `membership` | 2.0 | 20 | Membership API 命令 | `src/mcp_servers/membership_mcp.py` |
+| `test` | 1.0 | 3 | 测试MCP示例 | `src/mcp_servers/test_mcp.py` |
+| `kb_mcp` | 1.0.0 | — | 知识库查询 | `src/mcp_servers/kb_mcp.py` |
+| `bpmn_mcp` | 1.0.0 | — | BPMN 流程生成 | `src/mcp_servers/bpmn_mcp.py` |
+| `form_mcp` | 1.0.0 | — | 表单生成与验证 | `src/mcp_servers/form_mcp.py` |
 
-mcp_registry.register_mcp(membership_mcp)
-mcp_registry.register_mcp(test_mcp)
-```
+**外部 MCP**（通过 `mcp/proxy` 代理接入，由 `EXTERNAL_MCPS` 环境变量配置）：
 
-| MCP名称 | 版本 | 用途 | 实现文件 |
-|---------|------|------|---------|
-| `membership` | 2.0 | Membership API 命令 | `src/mcp_servers/membership_mcp.py` |
-| `test` | 1.0 | 测试MCP示例 | `src/mcp_servers/test_mcp.py` |
+| MCP名称 | 工具数 | 用途 | 代理端口 |
+|---------|--------|------|----------|
+| `paddleocr` | 1 | 图像OCR识别 | 9001 |
+| `office-word` | 54 | Word 文档操作 | 9002 |
 
 ## 架构
 
-```
-┌─────────────────────────────────────────┐
-│         MCPRegistry                     │
-│  (src/mcp/registry.py)                  │
-│                                         │
-│  register_mcp()                         │
-│  get_mcp(name)                          │
-│  execute_command()                      │
-└──────────┬──────────────────────────────┘
-           │
-      ┌────┴────┬──────────┐
-      │          │          │
-      ▼          ▼          ▼
-  ┌────────┐ ┌──────────┐ ┌────────────┐
-  │Membership│ │TestMCP   │ │Your MCP    │
-  │MCP       │ │          │ │(future)    │
-  └────────┘ └──────────┘ └────────────┘
+```mermaid
+graph TB
+    subgraph Router["MCP Router (Docker) :8000"]
+        Registry["MCPRegistry
+        src/mcp/registry.py"]
+        subgraph Internal["内部 MCP（Python 类）"]
+            M["membership
+            20 tools"]
+            T["test
+            3 tools"]
+            KB["kb_mcp"]
+            BP["bpmn_mcp"]
+            FM["form_mcp"]
+        end
+        Ext["ExternalMCPServer
+        via EXTERNAL_MCPS env"]
+        Registry --> Internal
+        Registry --> Ext
+    end
+
+    subgraph Proxy["MCP Proxy（Host 本地进程）
+    mcp/proxy"]
+        P1["paddleocr
+        :9001"]
+        P2["office-word
+        :9002"]
+        P3["your-mcp
+        :900N"]
+    end
+
+    subgraph Stdio["stdio 进程（Host）"]
+        S1["paddleocr_mcp
+        1 tool"]
+        S2["word_document_server
+        54 tools"]
+        S3["..."]
+    end
+
+    Ext -- "HTTP POST /mcp
+    host.docker.internal" --> Proxy
+    P1 -- "stdio
+    初始化握手+转发" --> S1
+    P2 -- "stdio
+    初始化握手+转发" --> S2
+    P3 -- "stdio
+    初始化握手+转发" --> S3
+
+    style Router fill:#dbeafe,stroke:#3b82f6
+    style Proxy fill:#dcfce7,stroke:#22c55e
+    style Stdio fill:#fef9c3,stroke:#eab308
+    style Internal fill:#eff6ff,stroke:#93c5fd
 ```
 
 ### 核心组件
@@ -97,6 +131,19 @@ class ToolResult:
 ```
 
 ## 如何添加新的MCP服务器
+
+根据场景选择接入方式：
+
+| | 方式一：内部 MCP | 方式二：外部 MCP via 代理 |
+|---|---|---|
+| **适用** | 需要自定义逻辑、调用内部 HTTP API | 直接复用开源/第三方 MCP 包 |
+| **示例** | membership、bpmn_mcp、form_mcp | paddleocr、office-word |
+| **工作量** | 需编写 Python 类 | 只需修改两个配置文件 |
+| **运行位置** | 随 Router 进程 | Host 本地进程（代理桥接） |
+
+---
+
+## 方式一：内部 MCP（自定义 Python 类）
 
 ### 步骤1：创建MCP服务器类
 
@@ -292,6 +339,86 @@ async def startup_db_client():
         logger.error(f"Failed to initialize MCP Registry: {e}")
 ```
 
+---
+
+## 方式二：外部 MCP via 代理（推荐用于第三方/开源 MCP）
+
+适用于任何支持 **stdio 模式**的 MCP 包，无需修改其源码。代理（`mcp/proxy`）负责启动进程、处理握手、并将 stdio 转换为 HTTP/SSE 供 Router 调用。
+
+### 步骤1：准备 MCP 包
+
+将第三方 MCP 包放置于 `mcp/servers/<你的服务名>/`，确保可以用 `python -m <module>` 或直接运行脚本的方式以 **stdio** 模式启动。
+
+```bash
+# 验证能以 stdio 模式启动（有输出即可，Ctrl+C 退出）
+cd mcp/servers/<你的服务名>
+python -m <module_name>
+# 或
+python server.py
+```
+
+### 步骤2：在 mcp-proxy-config.yml 中添加服务
+
+编辑 `mcp/proxy/config/mcp-proxy-config.yml`：
+
+```yaml
+servers:
+  # ... 已有服务 ...
+
+  - name: your-mcp          # 全局唯一名称，Router 用此名称引用
+    port: 9003               # 选一个未被占用的端口（9001=paddleocr, 9002=office-word）
+    cwd: ../../servers/your-mcp
+    command: ["python"]
+    args: ["-m", "your_mcp_module"]   # 或 ["server.py"]
+    env:
+      PYTHONUNBUFFERED: "1"  # 必须，确保 stdio 输出不缓冲
+      # 其他服务所需环境变量...
+```
+
+> **端口分配约定**：9001=paddleocr，9002=office-word，新服务从 9003 递增。
+
+### 步骤3：在 EXTERNAL_MCPS 中注册到 Router
+
+编辑 `docker-compose.mcp-servers.yml`，在 `mcp-router` 服务的 `EXTERNAL_MCPS` 中追加新条目：
+
+```yaml
+environment:
+  EXTERNAL_MCPS: >-
+    {
+      "paddleocr":{"transport":"http","url":"http://host.docker.internal:9001","timeout":300},
+      "office-word":{"transport":"http","url":"http://host.docker.internal:9002","timeout":60},
+      "your-mcp":{"transport":"http","url":"http://host.docker.internal:9003","timeout":60}
+    }
+```
+
+`timeout` 单位为秒，OCR 等耗时操作建议设置 120~300。
+
+### 步骤4：重启代理 + 重建 Router 容器
+
+```bash
+# 1. 停止并重启代理（Host 上运行）
+# Ctrl+C 停止现有代理，然后：
+cd mcp/proxy && python -m src
+
+# 2. 重建 Router 容器（使 EXTERNAL_MCPS 新值生效）
+docker-compose -f docker-compose.mcp-servers.yml up -d --force-recreate mcp-router
+```
+
+> ⚠️ **注意**：`docker restart` 不会更新环境变量，必须用 `--force-recreate`。
+
+### 验证
+
+```bash
+# 查看 Router 日志，确认新 MCP 已被发现
+docker logs mcp-router-dev 2>&1 | grep "your-mcp"
+
+# 期望输出：
+# Connected to HTTP MCP 'your-mcp': <server-name> v<version>
+# Discovered N tools from HTTP MCP 'your-mcp'
+```
+
+---
+
 ## 使用MCP执行命令
 
 ### 方式1：通过ExecutionEngine（推荐用于任务规划）
@@ -460,10 +587,15 @@ const res = await api.post<ExecutionResponse>('/executions/', payload);
 
 **症状**：命令返回 "MCP not found for command"
 
-**解决**：
+**解决（内部 MCP）**：
 - 检查 `src/main.py` 中是否注册了MCP
 - 验证MCP名称拼写正确
 - 检查日志确认MCP已初始化
+
+**解决（外部 MCP via 代理）**：
+- 确认代理正在运行：`curl http://localhost:9001/sse`（应返回 SSE 流）
+- 确认 `EXTERNAL_MCPS` 包含该 MCP 名称（`docker inspect mcp-router-dev` 查看环境变量）
+- Router 是否用 `--force-recreate` 重建？`docker restart` 不会更新环境变量
 
 ### 2. 工具未被发现
 
@@ -482,6 +614,22 @@ const res = await api.post<ExecutionResponse>('/executions/', payload);
 - 验证 `auth_token` 和 `tenant_id` 正确传递
 - 检查 HTTPClient 中的token刷新机制
 - 确保MCP初始化时设置了正确的credentials
+
+### 4. 外部 MCP 工具调用返回 -32602
+
+**症状**：`Tool 'xxx' error: Invalid request parameters`，甚至 `tools/list` 也报错
+
+**原因**：stdio 进程未完成 MCP 握手（`initialize` + `notifications/initialized`）
+
+**解决**：检查代理日志中是否有 `stdio handshake OK`；若没有，代理版本可能过旧，重启代理
+
+### 5. 外部 MCP 404 错误
+
+**症状**：`HTTP MCP 'xxx' request failed: 404 Not Found`
+
+**原因**：Router 使用 streamable-http（POST /mcp），但代理不支持该端点
+
+**解决**：确认 `mcp/proxy` 目录使用的是最新代码（含 `POST /mcp` 端点），重启代理
 
 ## 性能优化建议
 

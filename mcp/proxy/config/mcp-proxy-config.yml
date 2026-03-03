@@ -31,3 +31,13 @@ servers:
     env:
       PYTHONUNBUFFERED: "1"
       MCP_TRANSPORT: "stdio"
+
+  # PDF2MD MCP Server - stdio 模式（本地进程）
+  - name: pdf2md
+    port: 9003
+    cwd: ../../servers
+    command: ["/Users/kehongwei/workspace/AICMDEngine/.venv/bin/python"]
+    args: ["-m", "PDF2MD.__main__"]
+    env:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: "/Users/kehongwei/workspace/AICMDEngine/mcp/servers"
