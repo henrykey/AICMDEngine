@@ -11,24 +11,42 @@ class UnifiedVLMClient:
     """Unified OpenAI-compatible VLM client for qwen/gpt-4o/glm-4v."""
 
     def __init__(self, timeout_sec: int = 60, max_retries: int = 2) -> None:
+        import sys
+        debug_log = "/tmp/pdf2md_debug.log"
+        def log(msg):
+            with open(debug_log, "a") as f:
+                f.write(f"{msg}\n")
+            print(msg, file=sys.stderr, flush=True)
+
         self.provider = os.getenv("VLM_MODEL_PROVIDER", "qwen").strip().lower()
         self.timeout_sec = timeout_sec
         self.max_retries = max_retries
 
+        log(f"[DEBUG VLM] provider: {self.provider}")
         self.api_key = self._get_api_key()
         self.base_url = self._get_base_url()
         self.model = self._get_model_name()
 
+        log(f"[DEBUG VLM] api_key: {self.api_key[:20] if self.api_key else None}...")
+        log(f"[DEBUG VLM] base_url: {self.base_url}")
+        log(f"[DEBUG VLM] model: {self.model}")
+
         self._enabled = bool(self.api_key and self.base_url and self.model)
+        log(f"[DEBUG VLM] _enabled (before OpenAI import): {self._enabled}")
+
         self._client = None
         if self._enabled:
             try:
                 from openai import OpenAI
 
                 self._client = OpenAI(api_key=self.api_key, base_url=self.base_url)
-            except Exception:
+                log(f"[DEBUG VLM] OpenAI client created successfully")
+            except Exception as e:
                 self._enabled = False
                 self._client = None
+                log(f"[DEBUG VLM] OpenAI import/init failed: {e}")
+
+        log(f"[DEBUG VLM] Final _enabled: {self._enabled}")
 
     def _get_api_key(self) -> Optional[str]:
         key_map = {

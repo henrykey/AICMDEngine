@@ -9,7 +9,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 try:
     from .vlm_client import UnifiedVLMClient
@@ -48,7 +48,7 @@ class GBDocumentParser:
 
     def process_single_page(
         self,
-        pdf_path: str,
+        pdf_input: Union[str, bytes],
         page_num: int
     ) -> Dict[str, Any]:
         """
@@ -57,8 +57,9 @@ class GBDocumentParser:
         这是PDF2MD的核心方法，被MCP工具调用
 
         Args:
-            pdf_path: PDF文件路径
+            pdf_input: PDF文件路径或PDF字节数据（可以是完整PDF或单页PDF）
             page_num: 页码（从1开始）
+                    如果pdf_input是单页PDF，则此参数用于标识页码，不影响处理
 
         Returns:
             {
@@ -87,60 +88,108 @@ class GBDocumentParser:
             }
         """
         started = time.time()
-        resolved = self._validate_file(pdf_path)
+        resolved = self._validate_input(pdf_input)
+
+        # 检查是否是单页PDF
+        import fitz
+        doc = fitz.open(str(resolved))
+        page_count = len(doc)
+        doc.close()
 
         # 提取单页到临时PDF
         with tempfile.TemporaryDirectory(prefix="pdf2md_single_page_") as work_dir:
-            # 1. 提取单页
-            single_page_pdf = self._extract_single_page(resolved, page_num, work_dir)
+            import sys
+            import traceback
+            debug_log = "/tmp/pdf2md_debug.log"
+            def log(msg):
+                with open(debug_log, "a") as f:
+                    f.write(f"{msg}\n")
+                print(msg, file=sys.stderr, flush=True)
 
-            # 2. 渲染页面图像
-            page_image = self._render_page_image(single_page_pdf, page_num, work_dir)
+            try:
+                log(f"[DEBUG process_single_page] 开始处理第{page_num}页")
+                log(f"[DEBUG] 输入PDF页数: {page_count}")
 
-            # 3. VLM布局识别
-            layout_info = self._recognize_page_layout(page_image)
+                # 1. 提取单页（如果是多页PDF）或直接使用（如果是单页PDF）
+                # 注意：测试脚本可能已经提取了单页，所以需要智能判断
+                log(f"[DEBUG] 步骤1: 准备单页PDF")
+                if page_count == 1:
+                    # 单页PDF：直接使用（可能是测试脚本预先提取的）
+                    log(f"[DEBUG] 检测到单页PDF，直接使用")
+                    single_page_pdf = resolved
+                else:
+                    # 多页PDF：提取指定页
+                    log(f"[DEBUG] 从{page_count}页PDF中提取第{page_num}页")
+                    single_page_pdf = self._extract_single_page(resolved, page_num, work_dir)
+                log(f"[DEBUG] 单页PDF: {single_page_pdf}")
 
-            # 4. 解析单页内容
-            markdown, blocks, parser_engine = self._parse_single_page_content(single_page_pdf, work_dir)
+                # 2. 渲染页面图像
+                log(f"[DEBUG] 步骤2: 渲染页面图像")
+                page_image = self._render_page_image(single_page_pdf, page_num, work_dir)
+                log(f"[DEBUG] 页面图像已渲染: {page_image}")
 
-            # 5. 提取章节信息
-            chapters = self._extract_chapters_from_markdown(markdown)
+                # 3. VLM布局识别
+                log(f"[DEBUG] 步骤3: VLM布局识别")
+                layout_info = self._recognize_page_layout(page_image)
+                log(f"[DEBUG] 布局识别完成: page_type={layout_info.get('page_type')}")
 
-            # 6. 识别结构化元素（表/图/公式）
-            elements = self._extract_elements_from_page(markdown, page_image, work_dir)
+                # 4. 解析单页内容
+                log(f"[DEBUG] 步骤4: 解析单页内容")
+                markdown, blocks, parser_engine = self._parse_single_page_content(single_page_pdf, work_dir)
+                log(f"[DEBUG] 内容解析完成: markdown长度={len(markdown)}, engine={parser_engine}")
 
-            # 7. 生成RAG文本
-            rag_content = self._generate_rag_content(markdown, chapters, elements)
+                # 5. 提取章节信息
+                log(f"[DEBUG] 步骤5: 提取章节信息")
+                chapters = self._extract_chapters_from_markdown(markdown)
+                log(f"[DEBUG] 章节提取完成: {len(chapters)}个章节")
 
-            # 8. 生成Render MD
-            render_content = self._generate_render_content(markdown, layout_info)
+                # 6. 识别结构化元素（表/图/公式）
+                log(f"[DEBUG] 步骤6: 识别结构化元素")
+                elements = self._extract_elements_from_page(markdown, page_image, work_dir)
+                log(f"[DEBUG] 元素识别完成: {len(elements.get('tables', []))}表, {len(elements.get('figures', []))}图, {len(elements.get('formulas', []))}公式")
 
-            elapsed_ms = int((time.time() - started) * 1000)
+                # 7. 生成RAG文本
+                log(f"[DEBUG] 步骤7: 生成RAG文本")
+                rag_content = self._generate_rag_content(markdown, chapters, elements)
+                log(f"[DEBUG] RAG文本生成完成")
 
-            return {
-                "page_num": page_num,
-                "page_type": layout_info.get("page_type", "normal"),
-                "chapters": chapters,
-                "rag": {
-                    "summary": self._generate_page_summary(markdown, chapters),
-                    "content": rag_content["content"],
-                    "elements": rag_content["elements"],
-                    "keywords": self._extract_keywords(markdown)
-                },
-                "render": {
-                    "markdown": render_content
-                },
-                "elements": elements,
-                "layout": {
-                    "header": layout_info.get("header", []),
-                    "footer": layout_info.get("footer", []),
-                    "page_number": layout_info.get("page_number", "")
-                },
-                "stats": {
-                    "elapsed_ms": elapsed_ms,
-                    "parser_engine": parser_engine
+                # 8. 生成Render MD
+                log(f"[DEBUG] 步骤8: 生成Render MD")
+                render_content = self._generate_render_content(markdown, layout_info)
+                log(f"[DEBUG] Render MD生成完成")
+
+                elapsed_ms = int((time.time() - started) * 1000)
+                log(f"[DEBUG] 所有步骤完成，总耗时: {elapsed_ms}ms")
+
+                return {
+                    "page_num": page_num,
+                    "page_type": layout_info.get("page_type", "normal"),
+                    "chapters": chapters,
+                    "rag": {
+                        "summary": self._generate_page_summary(markdown, chapters),
+                        "content": rag_content["content"],
+                        "elements": rag_content["elements"],
+                        "keywords": self._extract_keywords(markdown)
+                    },
+                    "render": {
+                        "markdown": render_content
+                    },
+                    "elements": elements,
+                    "layout": {
+                        "header": layout_info.get("header", []),
+                        "footer": layout_info.get("footer", []),
+                        "page_number": layout_info.get("page_number", "")
+                    },
+                    "stats": {
+                        "elapsed_ms": elapsed_ms,
+                        "parser_engine": parser_engine
+                    }
                 }
-            }
+            except Exception as e:
+                error_detail = traceback.format_exc()
+                log(f"[ERROR] process_single_page出错: {e}")
+                log(f"[ERROR] 错误堆栈:\n{error_detail}")
+                raise
 
     def parse_standard_pdf(self, file_path: str) -> Dict[str, Any]:
         started = time.time()
@@ -404,6 +453,32 @@ class GBDocumentParser:
             return info
         except Exception as exc:
             return {"error": str(exc)}
+
+    def _validate_input(self, pdf_input: Union[str, bytes]) -> Path:
+        """验证输入，支持文件路径或PDF字节数据"""
+        import tempfile
+        import os
+
+        if isinstance(pdf_input, bytes):
+            # 将bytes保存到临时文件
+            temp_fd, temp_path = tempfile.mkstemp(suffix='.pdf')
+            try:
+                with os.fdopen(temp_fd, 'wb') as f:
+                    f.write(pdf_input)
+                    f.flush()
+                    os.fsync(f.fileno())
+                # 验证文件
+                return self._validate_file(temp_path)
+            except Exception:
+                # 清理临时文件
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+                raise
+        else:
+            # 字符串路径
+            return self._validate_file(pdf_input)
 
     def _validate_file(self, file_path: str) -> Path:
         path = Path(file_path).expanduser()
@@ -1437,15 +1512,19 @@ class GBDocumentParser:
     # ========== 单页处理辅助方法 ==========
 
     def _extract_single_page(self, pdf_path: Path, page_num: int, work_dir: str) -> Path:
-        """从PDF中提取指定页到单独的PDF文件"""
+        """从PDF中提取指定页到单独的PDF文件
+
+        Bug修复：在关闭doc之前先保存page_count，避免"document closed"错误
+        """
         import fitz  # PyMuPDF
-        
+
         output_path = Path(work_dir) / f"page_{page_num}.pdf"
-        
+
         doc = fitz.open(str(pdf_path))
-        if page_num < 1 or page_num > len(doc):
+        page_count = len(doc)  # 先保存页数，避免doc关闭后无法访问
+        if page_num < 1 or page_num > page_count:
             doc.close()
-            raise ValueError(f"页码{page_num}超出范围（1-{len(doc)}）")
+            raise ValueError(f"页码{page_num}超出范围（1-{page_count}）")
         
         # 创建新文档只包含指定页
         new_doc = fitz.open()
@@ -1497,23 +1576,68 @@ class GBDocumentParser:
 
     def _parse_single_page_content(self, pdf_path: Path, work_dir: str) -> Tuple[str, List[Dict], str]:
         """解析单页PDF内容"""
-        # 使用现有的parse方法，但只处理单页
-        markdown, blocks, warnings, parser_engine = self._parse_with_mineru(pdf_path, work_dir)
-        
-        if not markdown.strip() or not blocks:
-            fb_markdown, fb_blocks, fb_warning = self._fallback_parse_with_fitz(pdf_path)
-            warnings.extend(fb_warning)
-            if fb_markdown.strip() and fb_blocks:
-                markdown, blocks = fb_markdown, fb_blocks
-                parser_engine = "fitz-fallback"
-        
+        import sys
+        debug_log = "/tmp/pdf2md_debug.log"
+        def log(msg):
+            with open(debug_log, "a") as f:
+                f.write(f"{msg}\n")
+            print(msg, file=sys.stderr, flush=True)
+
+        log(f"[DEBUG] ========== _parse_single_page_content 开始 ==========")
+        log(f"[DEBUG] pdf_path: {pdf_path}")
+        log(f"[DEBUG] work_dir: {work_dir}")
+
+        # TODO: MinerU 暂时禁用，使用 Fitz fallback（更快更稳定）
+        # 原因：MinerU 启动较慢，对于简单场景 Fitz 足够
+        # 后续如需启用，修改 self.cfg.use_mineru 配置
+        log("[DEBUG] 使用 Fitz 解析单页PDF（MinerU 已禁用）")
+        markdown, blocks, warnings = self._fallback_parse_with_fitz(pdf_path)
+        parser_engine = "fitz-direct"
+
+        log(f"[DEBUG] Fitz 解析完成，原始 markdown 长度: {len(markdown) if markdown else 0}")
+        log(f"[DEBUG] Fitz 解析完成，blocks 数量: {len(blocks)}")
+
         markdown = self._fix_markdown_format(markdown or self._compose_markdown(blocks))
-        
-        # VLM过滤
-        if self.cfg.allow_external_vlm and self.vlm.enabled:
+
+        log(f"[DEBUG] 格式修正后 markdown 长度: {len(markdown) if markdown else 0}")
+        log(f"[DEBUG] markdown 内容预览: {repr(markdown[:100]) if markdown else 'None'}")
+
+        # 检测扫描版 PDF（没有文本内容）
+        log(f"[DEBUG] 检查VLM条件:")
+        log(f"[DEBUG]   - markdown 为空? {not markdown}")
+        log(f"[DEBUG]   - markdown.strip() 长度: {len(markdown.strip()) if markdown else 0}")
+        log(f"[DEBUG]   - allow_external_vlm: {self.cfg.allow_external_vlm}")
+        log(f"[DEBUG]   - vlm.enabled: {self.vlm.enabled}")
+
+        condition_result = (not markdown or len(markdown.strip()) < 10) and self.cfg.allow_external_vlm and self.vlm.enabled
+        log(f"[DEBUG]   - 条件结果: {condition_result}")
+
+        if condition_result:
+            log("[DEBUG] ✅ 检测到扫描版PDF，使用VLM直接识别整页内容")
+            # 渲染页面为图片
+            page_image = self._render_page_image(pdf_path, 1, work_dir)
+            log(f"[DEBUG] 页面图片已渲染: {page_image}")
+
+            # 使用 VLM 直接识别整页内容（生成 Render + RAG）
+            log(f"[DEBUG] 调用 vlm.generate_dual_mode_content...")
+            result = self.vlm.generate_dual_mode_content(str(page_image))
+            log(f"[DEBUG] VLM 调用完成，result: {result.get('success')}")
+
+            if result.get("success"):
+                markdown = result.get("render", "")
+                parser_engine = "vlm-ocr"
+                log(f"[DEBUG] ✅ VLM识别成功，生成 {len(markdown)} 字符的内容")
+            else:
+                log(f"[DEBUG] ❌ VLM识别失败: {result.get('error')}")
+        # VLM过滤（针对有文本的PDF）
+        elif self.cfg.allow_external_vlm and self.vlm.enabled:
+            log("[DEBUG] 使用VLM过滤文本PDF（非扫描版）")
             markdown = self._filter_markdown_with_vlm_layout(markdown, pdf_path, work_dir)
             markdown = self._replace_image_garbage_with_vlm_caption(markdown, pdf_path, work_dir)
-        
+        else:
+            log("[DEBUG] ⚠️ VLM 未启用或条件不满足，跳过VLM处理")
+
+        log(f"[DEBUG] ========== _parse_single_page_content 结束，返回 parser_engine={parser_engine} ==========")
         return markdown, blocks, parser_engine
 
     def _extract_chapters_from_markdown(self, markdown: str) -> List[Dict[str, Any]]:

@@ -35,9 +35,21 @@ servers:
   # PDF2MD MCP Server - stdio 模式（本地进程）
   - name: pdf2md
     port: 9003
-    cwd: ../../servers
+    cwd: ../../servers/PDF2MD
     command: ["/Users/kehongwei/workspace/AICMDEngine/.venv/bin/python"]
     args: ["-m", "PDF2MD.__main__"]
     env:
       PYTHONUNBUFFERED: "1"
       PYTHONPATH: "/Users/kehongwei/workspace/AICMDEngine/mcp/servers"
+      # VLM Configuration for Qwen
+      # TODO: 生产环境优化方案：
+      #   1. 使用环境变量或配置中心管理敏感信息（API key）
+      #   2. 将 VLM 配置移到独立的配置文件（如 config/vlm.yml）
+      #   3. 支持运行时动态加载 VLM 配置
+      # 当前：直接写死在配置文件中（仅用于开发测试）
+      VLM_MODEL_PROVIDER: "qwen"
+      QWEN_API_KEY: "sk-a67114a92fdf4964bb6a5f47beccd00d"
+      QWEN_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      QWEN_MODEL_NAME: "qwen3-vl-flash-2026-01-22"
+      PDF2MD_ALLOW_EXTERNAL_VLM: "true"
+
