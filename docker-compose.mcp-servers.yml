@@ -8,7 +8,8 @@
 # 注意:
 #   - PaddleOCR MCP: 通过本地代理（mcp/proxy）暴露 stdio 进程，监听端口 9001
 #   - Office Word MCP: 通过本地代理（mcp/proxy）暴露 stdio 进程，监听端口 9002
-#   - MCP Router 通过 http://host.docker.internal:9001/2 连接到各代理
+#   - PDF2MD MCP: 通过本地代理（mcp/proxy）暴露 stdio 进程，监听端口 9003
+#   - MCP Router 通过 http://host.docker.internal:9001/2/3 连接到各代理
 
 version: '3.8'
 
@@ -119,6 +120,82 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+
+  # PDF2MD MCP Server - HTTP/SSE 模式（可选容器部署）
+  # 优先使用本地代理（mcp/proxy）运行，此服务用于独立容器部署
+  pdf2md-mcp:
+    build:
+      context: ./mcp/servers/PDF2MD
+      dockerfile: Dockerfile
+    image: pdf2md-mcp:latest
+    profiles: ["optional"]
+    container_name: pdf2md-mcp
+    restart: unless-stopped
+    ports:
+      - "9003:9003"
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      # VLM配置（生产环境应使用.env文件或配置中心）
+      - VLM_MODEL_PROVIDER=${VLM_MODEL_PROVIDER:-qwen}
+      - QWEN_API_KEY=${QWEN_API_KEY}
+      - QWEN_BASE_URL=${QWEN_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      - QWEN_MODEL_NAME=${QWEN_MODEL_NAME:-qwen3-vl-flash-2026-01-22}
+      - PDF2MD_ALLOW_EXTERNAL_VLM=${PDF2MD_ALLOW_EXTERNAL_VLM:-true}
+    # 资源限制
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 512M
+    networks:
+      - mcp-servers-network
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9003/sse"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # PDF2MD Enhanced MCP Server - TaskFlow 模式（可选容器部署）
+  # 新版任务化单页处理服务（无 MinerU 依赖，支持动态 VLM 注入）
+  pdf2md-enhanced-mcp:
+    build:
+      context: ./mcp/servers/PDF2MDEnhanced
+      dockerfile: Dockerfile
+    image: pdf2md-enhanced-mcp:latest
+    profiles: ["optional"]
+    container_name: pdf2md-enhanced-mcp
+    restart: unless-stopped
+    ports:
+      - "9010:9010"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PDF2MD_ENH_OUTPUT_DIR=/app/data/output
+    volumes:
+      - ./mcp/servers/PDF2MDEnhanced/data/input:/app/data/input
+      - ./mcp/servers/PDF2MDEnhanced/data/output:/app/data/output
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    networks:
+      - mcp-servers-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1', 9010), 2); s.close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   # Plan2 Frontend - AIPlanner 前端
   plan2-ui:
