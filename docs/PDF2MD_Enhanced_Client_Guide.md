@@ -18,7 +18,18 @@ It focuses on:
 - MCP service name: `pdf2md-enhanced`
 - Core pattern: **task-based + page-based processing**
 - No MinerU dependency in this service path
-- VLM config must be provided dynamically by caller
+- VLM config is injected at runtime by MCP Router (from configured LLM provider)
+
+## 2.1 Default Contract (Important)
+
+To avoid large payload failures and ambiguity, default client behavior is:
+
+1. Use `start_task` + per-page `process_task_page`
+2. Keep `merge_mode=none` in `finalize_task` by default
+3. Client owns md/rag concatenation and persistence
+4. Only enable server-side merge (`markdown`/`rag`/`both`) when explicitly needed
+
+This service is designed for **small per-page responses**, not large single finalize payloads.
 
 ---
 
@@ -70,9 +81,18 @@ Client
 
 ## 5.1 Why this matters
 
-You can switch model/provider per task or even per page without server redeploy.
+You can switch model/provider at runtime in MCP Router without server redeploy.
 
-## 5.2 `vlm_config` example
+## 5.2 Router-managed injection (recommended)
+
+Recommended: do not send `vlm_config` in client tool args.
+Set MCP server -> LLM provider binding in MCP Management UI (or related API), then Router injects:
+- `start_task.vlm_defaults`
+- `process_task_page.vlm_config`
+
+Use explicit `vlm_config` in request only for temporary debugging overrides.
+
+## 5.3 `vlm_config` example (debug override only)
 
 ```json
 {
@@ -86,11 +106,11 @@ You can switch model/provider per task or even per page without server redeploy.
 }
 ```
 
-## 5.3 Priority rules
+## 5.4 Priority rules
 
 1. `process_task_page.vlm_config`
 2. `start_task.vlm_defaults`
-3. service fallback defaults (only for local debugging)
+3. service fallback defaults (local debug only)
 
 ---
 
@@ -111,15 +131,11 @@ Request payload (tool args):
     "text_chars_min": 80,
     "image_area_ratio_full_vlm": 0.55,
     "noise_ratio_full_vlm": 0.30
-  },
-  "vlm_defaults": {
-    "provider": "qwen",
-    "model": "qwen-vl-max-latest",
-    "api_key": "sk-...",
-    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"
   }
 }
 ```
+
+If MCP runs in Docker/remote and cannot access host file path, use `file_data` instead of `file_path`.
 
 Expected response:
 
@@ -139,12 +155,6 @@ Expected response:
   "task_id": "task_01J...",
   "page_no": 3,
   "policy": "auto",
-  "vlm_config": {
-    "provider": "qwen",
-    "model": "qwen-vl-max-latest",
-    "api_key": "sk-...",
-    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"
-  },
   "prev_context": {
     "current_section": "5.2",
     "open_table": null,
@@ -181,11 +191,12 @@ Expected response (simplified):
 ```json
 {
   "task_id": "task_01J...",
-  "merge_mode": "both"
+  "merge_mode": "none"
 }
 ```
 
-Expected response includes merged outputs and page stats.
+Default (`none`) returns summary/page stats only.
+Use `markdown`/`rag`/`both` only when you intentionally need server-side merged content.
 
 ---
 
@@ -302,7 +313,6 @@ for page in planned_pages:
         "task_id": task_id,
         "page_no": page,
         "policy": "auto",
-        "vlm_config": vlm_config,
         "prev_context": context,
     })
 
@@ -312,7 +322,7 @@ for page in planned_pages:
 # 2) finalize
 final = call_tool("finalize_task", {
     "task_id": task_id,
-    "merge_mode": "both"
+    "merge_mode": "none"
 })
 ```
 
@@ -333,8 +343,9 @@ final = call_tool("finalize_task", {
 2. Can process a single page end-to-end
 3. Can process multi-page task with resume
 4. Can switch VLM model/provider without server code change
-5. Can finalize and obtain merged outputs
-6. Can handle retries and partial failures safely
+5. Can finalize with `merge_mode=none` and complete client-side merge
+6. Can explicitly enable `markdown`/`rag`/`both` merge when required
+7. Can handle retries and partial failures safely
 
 ---
 

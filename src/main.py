@@ -125,6 +125,8 @@ async def startup_db_client():
                         env=mcp_config.get("env"),
                         timeout=mcp_config.get("timeout", 30)
                     )
+                    # Keep full config for runtime metadata/query/injection usage.
+                    external_mcp.external_config = mcp_config
 
                     # Initialize the external MCP (connects and discovers tools)
                     await external_mcp.initialize()

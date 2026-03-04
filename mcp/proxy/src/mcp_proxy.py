@@ -364,8 +364,39 @@ class MCPProxyManager:
             name = sc['name']
             if 'cwd' in sc and not Path(sc['cwd']).is_absolute():
                 sc['cwd'] = str(base_path / sc['cwd'])
+
+            # 为PDF2MD注入LLM环境变量（从系统环境变量读取）
+            if name == 'pdf2md':
+                sc['env'] = sc.get('env', {})
+                self._inject_llm_env_vars(sc['env'])
+
             logger.info(f"  - '{name}' on port {sc['port']}")
             self.wrappers[name] = MCPServerWrapper(name, sc)
+
+    def _inject_llm_env_vars(self, env_dict: Dict[str, str]):
+        """从系统环境变量读取LLM配置并注入到env_dict"""
+        llm_env_mapping = {
+            'VLM_MODEL_PROVIDER': 'VLM_MODEL_PROVIDER',
+            'QWEN_API_KEY': 'QWEN_API_KEY',
+            'QWEN_BASE_URL': 'QWEN_BASE_URL',
+            'QWEN_MODEL_NAME': 'QWEN_MODEL_NAME',
+            'OPENAI_API_KEY': 'OPENAI_API_KEY',
+            'OPENAI_BASE_URL': 'OPENAI_BASE_URL',
+            'OPENAI_MODEL_NAME': 'OPENAI_MODEL_NAME',
+            'ZHIPU_API_KEY': 'ZHIPU_API_KEY',
+            'ZHIPU_BASE_URL': 'ZHIPU_BASE_URL',
+            'ZHIPU_MODEL_NAME': 'ZHIPU_MODEL_NAME',
+        }
+
+        injected_count = 0
+        for env_key, os_key in llm_env_mapping.items():
+            value = os.environ.get(os_key)
+            if value:
+                env_dict[env_key] = value
+                injected_count += 1
+
+        if injected_count > 0:
+            logger.info(f"  [pdf2md] Injected {injected_count} LLM env vars from system environment")
 
     async def start_all(self):
         await asyncio.gather(*[w.start() for w in self.wrappers.values()])

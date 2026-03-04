@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import re
 import time
 from typing import Any, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class DynamicVLMClient:
@@ -25,6 +28,15 @@ class DynamicVLMClient:
             from openai import OpenAI
 
             self._client = OpenAI(api_key=self.api_key, base_url=self.base_url, default_headers=self.extra_headers)
+        logger.info(
+            "DynamicVLMClient init: enabled=%s provider=%s model=%s base_url=%s timeout=%s max_retries=%s",
+            self.enabled,
+            self.provider,
+            self.model,
+            self.base_url,
+            self.timeout_sec,
+            self.max_retries,
+        )
 
     def ensure_enabled(self) -> None:
         if not self.enabled or self._client is None:
@@ -50,7 +62,13 @@ class DynamicVLMClient:
         }
 
     def full_page_markdown(self, image_path: str) -> str:
-        prompt = "Extract page content as clean markdown. Keep structure, formulas and tables where possible."
+        prompt = "Extract page content as clean markdown. Keep structure, formulas and tables where possible. Illustrations are replaced with placeholders described in text."
+        # prompt = """
+        #     分析这页PDF，生成Render数据。
+        #     Render（展示用）：
+        #     - 识别类型（封面/目录/正文）
+        #     - 正文：表格→Markdown，插图→详细描述，公式→LaTeX
+        #     """
         return self._call_image_prompt(image_path, prompt, max_tokens=1600)
 
     def extract_region_structured(self, image_path: str) -> Dict[str, Any]:
@@ -72,6 +90,7 @@ class DynamicVLMClient:
         last_err = None
         for attempt in range(self.max_retries + 1):
             try:
+                t0 = time.time()
                 resp = self._client.chat.completions.create(
                     model=self.model,
                     messages=[
@@ -87,12 +106,27 @@ class DynamicVLMClient:
                     max_tokens=max_tokens,
                     temperature=self.temperature,
                 )
+                elapsed = time.time() - t0
+                logger.info(
+                    "VLM call ok: model=%s max_tokens=%s attempt=%s elapsed=%.2fs",
+                    self.model,
+                    max_tokens,
+                    attempt + 1,
+                    elapsed,
+                )
                 content = resp.choices[0].message.content if resp.choices else ""
                 if isinstance(content, list):
                     return "\n".join([x.get("text", "") for x in content if isinstance(x, dict)])
                 return content or ""
             except Exception as exc:
                 last_err = exc
+                logger.warning(
+                    "VLM call failed: model=%s attempt=%s/%s error=%s",
+                    self.model,
+                    attempt + 1,
+                    self.max_retries + 1,
+                    repr(exc),
+                )
                 if attempt >= self.max_retries:
                     break
                 time.sleep(0.4 * (attempt + 1))

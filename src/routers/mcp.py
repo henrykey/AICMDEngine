@@ -13,6 +13,50 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+
+async def _load_mcp_llm_map(request: Request) -> Dict[str, str]:
+    db = getattr(request.app, "mongodb", None)
+    if db is None:
+        return {}
+    try:
+        docs = await db.mcp_server_settings.find({}, {"server_name": 1, "llm_provider": 1}).to_list(length=1000)
+        return {
+            str(d.get("server_name")): str(d.get("llm_provider"))
+            for d in docs
+            if d.get("server_name") and d.get("llm_provider")
+        }
+    except Exception as exc:
+        logger.warning(f"Failed to load mcp_server_settings: {exc}")
+        return {}
+
+
+def _fallback_llm_provider_from_external_config(mcp: Any) -> Optional[str]:
+    cfg = getattr(mcp, "external_config", {}) or {}
+    provider = cfg.get("llm_provider") or cfg.get("vlm")
+    if provider:
+        return str(provider)
+    return None
+
+
+def _build_vlm_config_from_provider(request: Request, provider_name: str) -> Optional[Dict[str, Any]]:
+    manager = getattr(request.app, "provider_manager", None)
+    if manager is None:
+        return None
+    provider = manager.get_provider(provider_name)
+    if not provider:
+        return None
+    api_key = manager.config_loader.get_api_key(provider.api_key_ref)
+    if not api_key:
+        return None
+    return {
+        "provider": provider.name,
+        "model": provider.model,
+        "base_url": provider.base_url,
+        "api_key": api_key,
+        "timeout_sec": provider.timeout,
+        "temperature": provider.temperature,
+    }
+
 @router.get("/servers")
 async def list_mcp_servers(request: Request) -> Dict[str, Any]:
     """
@@ -22,6 +66,7 @@ async def list_mcp_servers(request: Request) -> Dict[str, Any]:
     if not registry:
         raise HTTPException(status_code=503, detail="MCP Registry not initialized")
 
+    llm_map = await _load_mcp_llm_map(request)
     servers_info = []
     for mcp in registry.get_all_mcps():
         try:
@@ -56,7 +101,8 @@ async def list_mcp_servers(request: Request) -> Dict[str, Any]:
                     "description": getattr(mcp, 'description', f'MCP Server: {mcp.name}'),
                     "version": getattr(mcp, 'version', '1.0.0'),
                     "author": getattr(mcp, 'author', 'Unknown'),
-                    "dependencies": getattr(mcp, 'dependencies', [])
+                    "dependencies": getattr(mcp, 'dependencies', []),
+                    "llm_provider": llm_map.get(mcp.name) or _fallback_llm_provider_from_external_config(mcp),
                 }
             }
             servers_info.append(server_info)
@@ -163,6 +209,21 @@ async def execute_mcp_tool(
     # Extract "llm" parameter if present
     llm_provider = kwargs.pop("llm", None)
 
+    # Runtime LLM binding injection for external MCPs (REST path consistency with WS path)
+    if server_name == "pdf2md-enhanced" and "vlm_config" not in kwargs and "vlm_defaults" not in kwargs:
+        llm_map = await _load_mcp_llm_map(request)
+        bound_provider = llm_map.get(server_name)
+        if not bound_provider:
+            mcp = registry.get_mcp(server_name)
+            bound_provider = _fallback_llm_provider_from_external_config(mcp) if mcp else None
+        if bound_provider:
+            vlm_config = _build_vlm_config_from_provider(request, bound_provider)
+            if vlm_config:
+                if tool_name == "start_task":
+                    kwargs["vlm_defaults"] = vlm_config
+                elif tool_name == "process_task_page":
+                    kwargs["vlm_config"] = vlm_config
+
     try:
         result = await registry.execute_command(
             mcp_name=server_name,
@@ -194,6 +255,63 @@ async def execute_mcp_tool(
                 "message": str(e)
             }
         }
+
+
+@router.get("/servers/{server_name}/llm-provider")
+async def get_server_llm_provider(server_name: str, request: Request) -> Dict[str, Any]:
+    registry = getattr(request.app, 'mcp_registry', None)
+    if not registry:
+        raise HTTPException(status_code=503, detail="MCP Registry not initialized")
+
+    mcp = registry.get_mcp(server_name)
+    if not mcp:
+        raise HTTPException(status_code=404, detail=f"MCP server '{server_name}' not found")
+
+    llm_map = await _load_mcp_llm_map(request)
+    provider = llm_map.get(server_name)
+    source = "mongodb"
+    if not provider:
+        provider = _fallback_llm_provider_from_external_config(mcp)
+        source = "external_mcps" if provider else "none"
+
+    return {"server_name": server_name, "llm_provider": provider, "source": source}
+
+
+@router.put("/servers/{server_name}/llm-provider")
+async def set_server_llm_provider(server_name: str, request: Request) -> Dict[str, Any]:
+    registry = getattr(request.app, 'mcp_registry', None)
+    if not registry:
+        raise HTTPException(status_code=503, detail="MCP Registry not initialized")
+
+    mcp = registry.get_mcp(server_name)
+    if not mcp:
+        raise HTTPException(status_code=404, detail=f"MCP server '{server_name}' not found")
+
+    payload = await request.json()
+    provider_name = (payload or {}).get("llm_provider")
+    if provider_name is not None:
+        provider_name = str(provider_name).strip() or None
+
+    manager = getattr(request.app, "provider_manager", None)
+    if provider_name:
+        if manager is None or manager.get_provider(provider_name) is None:
+            raise HTTPException(status_code=400, detail=f"LLM provider '{provider_name}' not found")
+
+    db = getattr(request.app, "mongodb", None)
+    if db is None:
+        raise HTTPException(status_code=503, detail="MongoDB not initialized")
+
+    now = datetime.now().isoformat()
+    if provider_name:
+        await db.mcp_server_settings.update_one(
+            {"server_name": server_name},
+            {"$set": {"server_name": server_name, "llm_provider": provider_name, "updated_at": now}},
+            upsert=True,
+        )
+    else:
+        await db.mcp_server_settings.delete_one({"server_name": server_name})
+
+    return {"success": True, "server_name": server_name, "llm_provider": provider_name}
 
 @router.get("/tools")
 async def list_all_tools(request: Request) -> List[Dict[str, Any]]:

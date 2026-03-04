@@ -57,7 +57,7 @@ class Settings(BaseSettings):
     mcp_required_scope: str = Field(default="mcp", env="MCP_REQUIRED_SCOPE")
 
     # External MCPs Configuration
-    external_mcps: Dict[str, Dict[str, Any]] = Field(default={}, env="EXTERNAL_MCPS")
+    external_mcps: Any = Field(default={}, env="EXTERNAL_MCPS")
 
     # Environment
     environment: str = Field(default="development", env="ENVIRONMENT")
@@ -65,14 +65,16 @@ class Settings(BaseSettings):
     @field_validator('external_mcps', mode='before')
     @classmethod
     def parse_external_mcps(cls, v: Union[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-        """Parse EXTERNAL_MCPS from JSON string or return dict."""
+        """Parse EXTERNAL_MCPS from YAML string or return dict."""
         if isinstance(v, str):
             try:
-                return json.loads(v)
-            except json.JSONDecodeError:
-                logger.warning(f"Failed to parse EXTERNAL_MCPS as JSON, using empty dict")
+                import yaml
+                result = yaml.safe_load(v)
+                return result if isinstance(result, dict) else {}
+            except Exception as e:
+                logger.warning(f"Failed to parse EXTERNAL_MCPS as YAML: {e}, using empty dict")
                 return {}
-        return v
+        return v if isinstance(v, dict) else {}
 
     class Config:
         env_file = ".env"

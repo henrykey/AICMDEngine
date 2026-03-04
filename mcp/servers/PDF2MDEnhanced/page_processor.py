@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import tempfile
 from pathlib import Path
@@ -9,6 +10,8 @@ from typing import Any, Dict, Optional, Tuple
 import fitz
 
 from .vlm_client import DynamicVLMClient
+
+logger = logging.getLogger(__name__)
 
 
 def process_page(
@@ -29,18 +32,37 @@ def process_page(
     page = doc[page_no - 1]
     metrics = _collect_metrics(page)
     mode, reasons = _decide_mode(policy, metrics, rc)
+    logger.info(
+        "process_page decision: page_no=%s mode=%s reasons=%s text_chars=%s image_ratio=%s formula_score=%s table_score=%s",
+        page_no,
+        mode,
+        reasons,
+        metrics.get("text_chars"),
+        metrics.get("image_area_ratio"),
+        metrics.get("formula_score"),
+        metrics.get("table_score"),
+    )
 
     with tempfile.TemporaryDirectory(prefix="pdf2md_enh_page_") as work_dir:
         image_path = _render_page_image(doc, page_no, Path(work_dir), dpi=rc["render_dpi"])
 
         vlm = DynamicVLMClient(vlm_config)
+        logger.info(
+            "process_page vlm_client: enabled=%s provider=%s model=%s base_url=%s timeout=%s max_retries=%s",
+            vlm.enabled,
+            vlm.provider,
+            vlm.model,
+            vlm.base_url,
+            vlm.timeout_sec,
+            vlm.max_retries,
+        )
         vlm_calls = 0
 
         if mode == "DIRECT":
             markdown = _clean_markdown(page.get_text("text") or "")
             structured = {"formulas": [], "tables": [], "figures": []}
         elif mode == "FULL_VLM":
-            markdown = vlm.full_page_markdown(str(image_path))
+            markdown = _clean_markdown(vlm.full_page_markdown(str(image_path)))
             vlm_calls += 1
             structured = vlm.extract_region_structured(str(image_path))
             vlm_calls += 1
@@ -178,7 +200,12 @@ def _render_page_image(doc: fitz.Document, page_no: int, out_dir: Path, dpi: int
 def _clean_markdown(text: str) -> str:
     text = text.replace("\r\n", "\n")
     text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
+    text = text.strip()
+    # Strip one outer markdown code fence if model wrapped full answer in ```markdown ... ```
+    m = re.match(r"^```[a-zA-Z0-9_-]*\n([\s\S]*?)\n```$", text)
+    if m:
+        text = m.group(1).strip()
+    return text
 
 
 def _extract_section(markdown: str) -> Optional[str]:

@@ -12,6 +12,7 @@ PDF2MD Enhanced MCP服务远程调用测试工具
 import asyncio
 import base64
 import json
+import re
 import time
 from pathlib import Path
 import argparse
@@ -67,6 +68,26 @@ def extract_pdf_page(pdf_path: Path, page_num: int) -> bytes:
         return single_page_doc.write()
     finally:
         doc.close()
+
+
+def extract_pdf_pages(pdf_path: Path, pages: list[int]) -> bytes:
+    doc = fitz.open(pdf_path)
+    try:
+        subset_doc = fitz.open()
+        for p in pages:
+            subset_doc.insert_pdf(doc, from_page=p - 1, to_page=p - 1)
+        return subset_doc.write()
+    finally:
+        doc.close()
+
+
+def normalize_markdown_output(text: str) -> str:
+    """Strip one outer fenced markdown/code block if present."""
+    raw = (text or "").strip()
+    m = re.match(r"^```[a-zA-Z0-9_-]*\n([\s\S]*?)\n```$", raw)
+    if m:
+        return m.group(1).strip()
+    return raw
 
 
 async def call_tool_with_retry(transport, tool_request, max_retries=2):
@@ -236,20 +257,42 @@ async def fetch_router_vlm_info(server_name: str = "pdf2md-enhanced"):
     return info
 
 
-async def run_task_pages(transport, task_name, pdf_base64, pages, policy, merge_mode, check_merge):
+async def run_task_pages(transport, task_name, pdf_path, pages, policy, merge_mode, check_merge, full_output, output_prefix):
     start_tool = "pdf2md-enhanced.start_task"
     process_tool = "pdf2md-enhanced.process_task_page"
     finalize_tool = "pdf2md-enhanced.finalize_task"
     status_tool = "pdf2md-enhanced.get_task_status"
 
     print(f"→ 调用远程工具: {start_tool}")
+    start_req_args = {
+        "task_name": task_name,
+        "file_path": str(pdf_path),
+        "pages": pages,
+    }
     start_resp = await _call_tool(
         transport,
         start_tool,
-        {"task_name": task_name, "file_data": pdf_base64, "pages": pages},
+        start_req_args,
         req_id=10,
     )
     start_data = _extract_json_from_tool_response(start_resp)
+
+    used_subset_pdf = False
+    original_pages = list(pages)
+    # Docker/remote MCP often cannot access host local path; use file_data subset transfer for remote execution.
+    if start_data and start_data.get("error") and "no such file" in str(start_data.get("error")).lower():
+        print("  ℹ️  检测到远程MCP不可访问本地路径，改用 file_data(仅请求页) 传输")
+        subset_bytes = extract_pdf_pages(pdf_path, pages)
+        subset_b64 = base64.b64encode(subset_bytes).decode("utf-8")
+        start_req_args = {
+            "task_name": task_name,
+            "file_data": subset_b64,
+            "pages": list(range(1, len(pages) + 1)),
+        }
+        start_resp = await _call_tool(transport, start_tool, start_req_args, req_id=11)
+        start_data = _extract_json_from_tool_response(start_resp)
+        used_subset_pdf = True
+
     if not start_data or start_data.get("error") or not start_data.get("task_id"):
         print("✗ start_task 失败")
         print(start_data)
@@ -260,10 +303,26 @@ async def run_task_pages(transport, task_name, pdf_base64, pages, policy, merge_
     print(f"✓ 任务已创建: {task_id}")
     print(f"  planned_pages: {planned_pages}")
 
+    page_outputs = []
+    md_file = None
+    rag_file = None
+    pages_file = None
+    if output_prefix:
+        out_prefix = Path(output_prefix)
+        out_prefix.parent.mkdir(parents=True, exist_ok=True)
+        md_file = f"{output_prefix}.md"
+        rag_file = f"{output_prefix}.jsonl"
+        pages_file = f"{output_prefix}.pages.jsonl"
+        # truncate/create
+        Path(md_file).write_text("", encoding="utf-8")
+        Path(rag_file).write_text("", encoding="utf-8")
+        Path(pages_file).write_text("", encoding="utf-8")
     prev_context = None
     for idx, page_no in enumerate(planned_pages, start=1):
-        print(f"\n→ 处理第 {page_no} 页 ({idx}/{len(planned_pages)})")
+        display_page_no = original_pages[page_no - 1] if used_subset_pdf and 1 <= page_no <= len(original_pages) else page_no
+        print(f"\n→ 处理第 {display_page_no} 页 ({idx}/{len(planned_pages)})")
         start_time = time.time()
+
         process_resp = await _call_tool(
             transport,
             process_tool,
@@ -278,11 +337,11 @@ async def run_task_pages(transport, task_name, pdf_base64, pages, policy, merge_
         elapsed = time.time() - start_time
         process_data = _extract_json_from_tool_response(process_resp)
         if not process_data or process_data.get("error"):
-            print(f"  ✗ page {page_no} 失败: {process_data}")
+            print(f"  ✗ page {display_page_no} 失败: {process_data}")
             continue
         if process_data.get("raw_text"):
             raw = str(process_data.get("raw_text", ""))
-            print(f"  ✗ page {page_no} 非结构化返回: {raw[:220]}")
+            print(f"  ✗ page {display_page_no} 非结构化返回: {raw[:220]}")
             continue
 
         page_result = process_data.get("page_result", {})
@@ -292,10 +351,38 @@ async def run_task_pages(transport, task_name, pdf_base64, pages, policy, merge_
             f"vlm_calls={decision.get('vlm_calls')} text_chars={((decision.get('metrics') or {}).get('text_chars'))}"
         )
 
-        render_text = ((page_result.get("render") or {}).get("markdown") or "")
-        rag_text = ((page_result.get("rag") or {}).get("content") or "")
-        print("  Render预览(前120):", render_text[:120].replace("\n", " "))
-        print("  RAG预览(前120):", rag_text[:120].replace("\n", " "))
+        if not output_prefix:
+            render_text = normalize_markdown_output(((page_result.get("render") or {}).get("markdown") or ""))
+            rag_text = ((page_result.get("rag") or {}).get("content") or "")
+            print("  Render预览(前120):", render_text[:120].replace("\n", " "))
+            print("  RAG预览(前120):", rag_text[:120].replace("\n", " "))
+
+        if output_prefix:
+            render_text = normalize_markdown_output(((page_result.get("render") or {}).get("markdown") or ""))
+            rag_obj = (page_result.get("rag") or {})
+            if render_text:
+                with open(md_file, "a", encoding="utf-8") as f:
+                    f.write(f"{render_text}\n\n")
+            with open(rag_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"page_no": display_page_no, "rag": rag_obj}, ensure_ascii=False) + "\n")
+            with open(pages_file, "a", encoding="utf-8") as f:
+                f.write(
+                    json.dumps(
+                        {
+                            "task_page_no": page_no,
+                            "source_page_no": display_page_no,
+                            "result": page_result,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+
+        page_outputs.append({
+            "task_page_no": page_no,
+            "source_page_no": display_page_no,
+            "result": page_result,
+        })
         prev_context = process_data.get("next_context")
 
     print(f"\n→ 调用远程工具: {status_tool}")
@@ -325,15 +412,52 @@ async def run_task_pages(transport, task_name, pdf_base64, pages, policy, merge_
 
     if merge_mode in {"markdown", "both"}:
         md = finalize_data.get("merged_markdown") or ""
-        print(f"  merged_markdown长度: {len(md)}")
-        print("  merged_markdown预览(前300):")
-        print("-" * 80)
-        print(md[:300])
-        print("-" * 80)
+        screen_output = not output_prefix  # 只有没有--out参数时才输出到屏幕
+
+        if screen_output:
+            print(f"  merged_markdown长度: {len(md)}")
+
+        if full_output:
+            if screen_output:
+                print("  merged_markdown完整内容:")
+                print("-" * 80)
+                print(md)
+                print("-" * 80)
+            if output_prefix:
+                md_file = f"{output_prefix}.md"
+                with open(md_file, 'w', encoding='utf-8') as f:
+                    f.write(md)
+                if screen_output:
+                    print(f"  ✓ 已保存MD内容到: {md_file}")
+        else:
+            if screen_output:
+                print("  merged_markdown预览(前300):")
+                print("-" * 80)
+                print(md[:300])
+                print("-" * 80)
 
     if merge_mode in {"rag", "both"}:
         rag = finalize_data.get("merged_rag") or []
-        print(f"  merged_rag条数: {len(rag)}")
+        screen_output = not output_prefix  # 只有没有--out参数时才输出到屏幕
+
+        if screen_output:
+            print(f"  merged_rag条数: {len(rag)}")
+
+        if full_output:
+            if screen_output:
+                print("  merged_rag完整内容:")
+                print("-" * 80)
+                print(json.dumps(rag, ensure_ascii=False, indent=2))
+                print("-" * 80)
+            if output_prefix:
+                rag_file = f"{output_prefix}.json"
+                with open(rag_file, 'w', encoding='utf-8') as f:
+                    json.dump(rag, f, ensure_ascii=False, indent=2)
+                if screen_output:
+                    print(f"  ✓ 已保存RAG内容到: {rag_file}")
+
+    if output_prefix:
+        print(f"✓ 已按页追加保存输出文件: {output_prefix}.md / {output_prefix}.jsonl / {output_prefix}.pages.jsonl")
 
     if check_merge:
         ok, issues = validate_merge(finalize_data, merge_mode)
@@ -345,7 +469,7 @@ async def run_task_pages(transport, task_name, pdf_base64, pages, policy, merge_
                 print(f"  - {item}")
 
 
-async def test_pdf2md_enhanced_mcp(jwt_token, page_num=None, pages=None, test_document=False, pdf_path=None, policy="auto", merge_mode="both", check_merge=False):
+async def test_pdf2md_enhanced_mcp(jwt_token, page_num=None, pages=None, test_document=False, pdf_path=None, policy="auto", merge_mode="none", check_merge=False, full_output=False, output_prefix=None):
     print("=" * 80)
     print("PDF2MD Enhanced MCP服务远程调用测试")
     print("=" * 80)
@@ -373,7 +497,8 @@ async def test_pdf2md_enhanced_mcp(jwt_token, page_num=None, pages=None, test_do
 
     ws_url = f"{MCP_ROUTER_URL}?token={jwt_token}"
     try:
-        async with websockets.connect(ws_url, max_size=2**24, ping_timeout=300, close_timeout=10) as websocket:
+        # 增加消息大小限制到20MB，支持单页PDF传输
+        async with websockets.connect(ws_url, max_size=20*1024*1024, ping_timeout=300, close_timeout=10) as websocket:
             transport = WebSocketTransport(websocket)
             print("✓ WebSocket连接成功 (JWT认证通过)")
 
@@ -392,29 +517,11 @@ async def test_pdf2md_enhanced_mcp(jwt_token, page_num=None, pages=None, test_do
             print("✓ 初始化完成")
             print()
 
-            if page_num:
-                print(f"→ 提取第{page_num}页并编码...")
-                page_data = extract_pdf_page(pdf_path, page_num)
-                page_base64 = base64.b64encode(page_data).decode('utf-8')
-                print(f"✓ 第{page_num}页编码完成 ({len(page_base64)//1024} KB)")
-                await run_task_pages(
-                    transport=transport,
-                    task_name=f"single-page-{page_num}-{int(time.time())}",
-                    pdf_base64=page_base64,
-                    pages=[1],
-                    policy=policy,
-                    merge_mode=merge_mode,
-                    check_merge=check_merge,
-                )
-                return
-
-            print("→ 读取完整PDF并编码...")
-            with open(pdf_path, 'rb') as f:
-                pdf_base64 = base64.b64encode(f.read()).decode('utf-8')
             total_pages = get_pdf_total_pages(pdf_path)
-            print(f"✓ PDF编码完成 ({len(pdf_base64)//1024} KB), total_pages={total_pages}")
 
-            if test_document:
+            if page_num:
+                target_pages = [page_num]
+            elif test_document:
                 target_pages = list(range(1, total_pages + 1))
             elif pages:
                 target_pages = [p for p in pages if 1 <= p <= total_pages]
@@ -424,11 +531,13 @@ async def test_pdf2md_enhanced_mcp(jwt_token, page_num=None, pages=None, test_do
             await run_task_pages(
                 transport=transport,
                 task_name=f"multi-page-{int(time.time())}",
-                pdf_base64=pdf_base64,
+                pdf_path=pdf_path,
                 pages=target_pages,
                 policy=policy,
                 merge_mode=merge_mode,
                 check_merge=check_merge,
+                full_output=full_output,
+                output_prefix=output_prefix,
             )
 
     except websockets.exceptions.InvalidStatusCode as e:
@@ -451,8 +560,10 @@ def main():
 示例:
   %(prog)s --page 1
   %(prog)s --pages 1,2,3 --check-merge
-  %(prog)s --document --merge-mode both
+  %(prog)s --document --merge-mode markdown
   %(prog)s --pages 1-5 --check-merge
+  %(prog)s --pages 1,2,3 --full --out result
+  %(prog)s --document --full --out output
         '''
     )
 
@@ -462,8 +573,10 @@ def main():
     parser.add_argument('--pdf-path', type=str, default=None, help='PDF文件路径')
 
     parser.add_argument('--policy', type=str, default='auto', choices=['auto', 'force_direct', 'force_vlm'], help='页处理策略')
-    parser.add_argument('--merge-mode', type=str, default='both', choices=['none', 'markdown', 'rag', 'both'], help='finalize合并模式')
+    parser.add_argument('--merge-mode', type=str, default='none', choices=['none', 'markdown', 'rag', 'both'], help='finalize合并模式（默认none，由client端拼接）')
     parser.add_argument('--check-merge', action='store_true', help='启用多页合并逻辑校验')
+    parser.add_argument('--full', action='store_true', help='输出完整结果，而不是预览')
+    parser.add_argument('--out', type=str, help='输出文件前缀（MD输出到{prefix}.md，RAG输出到{prefix}.json），设置此参数将不输出到屏幕')
 
     parser.add_argument('--username', type=str, default='admin', help='Membership API用户名')
     parser.add_argument('--password', type=str, default='admin123', help='Membership API密码')
@@ -498,6 +611,8 @@ def main():
             policy=args.policy,
             merge_mode=args.merge_mode,
             check_merge=args.check_merge,
+            full_output=args.full,
+            output_prefix=args.out,
         )
 
     asyncio.run(run_with_connection_check())

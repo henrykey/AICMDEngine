@@ -11,7 +11,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .vlm_client import UnifiedVLMClient
+try:
+    from .vlm_client import UnifiedVLMClient
+except ImportError:
+    # 直接导入（作为脚本运行时）
+    from vlm_client import UnifiedVLMClient
 
 
 @dataclass
@@ -42,6 +46,102 @@ class GBDocumentParser:
             "vlm": self.vlm.get_effective_config(),
         }
 
+    def process_single_page(
+        self,
+        pdf_path: str,
+        page_num: int
+    ) -> Dict[str, Any]:
+        """
+        处理PDF单页，返回结构化结果
+
+        这是PDF2MD的核心方法，被MCP工具调用
+
+        Args:
+            pdf_path: PDF文件路径
+            page_num: 页码（从1开始）
+
+        Returns:
+            {
+                "page_num": 18,
+                "page_type": "normal",  # cover | toc | blank | normal
+                "chapters": [...],
+                "rag": {
+                    "summary": "...",
+                    "content": "...",
+                    "elements": [...],
+                    "keywords": [...]
+                },
+                "render": {
+                    "markdown": "## 6.5 装运杆、装运螺栓或螺母\n\n..."
+                },
+                "elements": {
+                    "tables": [...],
+                    "figures": [...],
+                    "formulas": [...]
+                },
+                "layout": {
+                    "header": [...],
+                    "footer": [...],
+                    "page_number": "14"
+                }
+            }
+        """
+        started = time.time()
+        resolved = self._validate_file(pdf_path)
+
+        # 提取单页到临时PDF
+        with tempfile.TemporaryDirectory(prefix="pdf2md_single_page_") as work_dir:
+            # 1. 提取单页
+            single_page_pdf = self._extract_single_page(resolved, page_num, work_dir)
+
+            # 2. 渲染页面图像
+            page_image = self._render_page_image(single_page_pdf, page_num, work_dir)
+
+            # 3. VLM布局识别
+            layout_info = self._recognize_page_layout(page_image)
+
+            # 4. 解析单页内容
+            markdown, blocks, parser_engine = self._parse_single_page_content(single_page_pdf, work_dir)
+
+            # 5. 提取章节信息
+            chapters = self._extract_chapters_from_markdown(markdown)
+
+            # 6. 识别结构化元素（表/图/公式）
+            elements = self._extract_elements_from_page(markdown, page_image, work_dir)
+
+            # 7. 生成RAG文本
+            rag_content = self._generate_rag_content(markdown, chapters, elements)
+
+            # 8. 生成Render MD
+            render_content = self._generate_render_content(markdown, layout_info)
+
+            elapsed_ms = int((time.time() - started) * 1000)
+
+            return {
+                "page_num": page_num,
+                "page_type": layout_info.get("page_type", "normal"),
+                "chapters": chapters,
+                "rag": {
+                    "summary": self._generate_page_summary(markdown, chapters),
+                    "content": rag_content["content"],
+                    "elements": rag_content["elements"],
+                    "keywords": self._extract_keywords(markdown)
+                },
+                "render": {
+                    "markdown": render_content
+                },
+                "elements": elements,
+                "layout": {
+                    "header": layout_info.get("header", []),
+                    "footer": layout_info.get("footer", []),
+                    "page_number": layout_info.get("page_number", "")
+                },
+                "stats": {
+                    "elapsed_ms": elapsed_ms,
+                    "parser_engine": parser_engine
+                }
+            }
+
     def parse_standard_pdf(self, file_path: str) -> Dict[str, Any]:
         started = time.time()
         resolved = self._validate_file(file_path)
@@ -60,10 +160,22 @@ class GBDocumentParser:
             markdown = self._fix_markdown_format(markdown or self._compose_markdown(blocks))
 
             # 两阶段VLM处理：布局识别 + 内容过滤（如果启用）
+            print(f"[DEBUG] VLM enabled: {self.vlm.enabled}, allow_external_vlm: {self.cfg.allow_external_vlm}")
             if self.cfg.allow_external_vlm and self.vlm.enabled:
+                print(f"[DEBUG] 调用VLM布局识别过滤...")
+                markdown_before = markdown
                 markdown = self._filter_markdown_with_vlm_layout(
                     markdown, resolved, work_dir
                 )
+                print(f"[DEBUG] VLM过滤前: {len(markdown_before)} 字符, 过滤后: {len(markdown)} 字符, 减少: {len(markdown_before) - len(markdown)} 字符")
+
+                # 图像描述：用VLM描述替换图片乱码
+                print(f"[DEBUG] 调用VLM图像描述...")
+                markdown_before_images = markdown
+                markdown = self._replace_image_garbage_with_vlm_caption(
+                    markdown, resolved, work_dir
+                )
+                print(f"[DEBUG] 图像描述前: {len(markdown_before_images)} 字符, 描述后: {len(markdown)} 字符, 变化: {len(markdown) - len(markdown_before_images)} 字符")
 
             elapsed_ms = int((time.time() - started) * 1000)
             return {
@@ -727,15 +839,34 @@ class GBDocumentParser:
         }
 
         # 阶段1: 对每页进行布局识别
+        toc_pages = set()  # 记录目录页的页码
         for page_num, image_path in sorted_pages:
             try:
                 layout_info = self.vlm.recognize_layout(str(image_path))
+                page_type = layout_info.get("page_type", "normal")
 
-                # 收集页眉模式
-                for header in layout_info.get("header", []):
-                    filter_patterns["headers"].add(header)
+                print(f"[DEBUG] 第{page_num}页: page_type={page_type}")
 
-                # 收集页脚模式
+                # 如果是目录页，记录下来，并特殊处理
+                if page_type == "toc":
+                    toc_pages.add(page_num)
+                    print(f"[DEBUG] 检测到目录页: 第{page_num}页")
+
+                    # 对目录页，过滤掉页眉中的目录标题（"目 次"、"目录"等）
+                    toc_keywords = {"目 次", "目录", "contents", "table of contents"}
+                    headers = layout_info.get("header", [])
+                    for header in headers:
+                        # 只添加不是目录标题的页眉
+                        if header.lower() not in toc_keywords:
+                            filter_patterns["headers"].add(header)
+                        else:
+                            print(f"[DEBUG] 跳过目录标题: '{header}'")
+                else:
+                    # 非目录页，正常收集页眉模式
+                    for header in layout_info.get("header", []):
+                        filter_patterns["headers"].add(header)
+
+                # 收集页脚模式（所有页面都收集）
                 for footer in layout_info.get("footer", []):
                     filter_patterns["footers"].add(footer)
 
@@ -746,12 +877,19 @@ class GBDocumentParser:
 
             except Exception as e:
                 # 布局识别失败时继续处理下一页
+                print(f"[DEBUG] 第{page_num}页布局识别失败: {e}")
                 pass
+
+        if toc_pages:
+            print(f"[DEBUG] 检测到目录页: {toc_pages}")
 
         # 阶段2: 根据收集的模式过滤markdown
         if not any(filter_patterns.values()):
             # 没有识别到任何需要过滤的内容
+            print(f"[DEBUG] 没有识别到需要过滤的内容")
             return markdown
+
+        print(f"[DEBUG] 过滤模式: {filter_patterns}")
 
         lines = markdown.split('\n')
         filtered_lines = []
@@ -764,34 +902,440 @@ class GBDocumentParser:
 
             should_filter = False
 
-            # 检查是否匹配页眉
+            # 检查是否匹配页眉（使用双向包含检查）
             for header in filter_patterns["headers"]:
-                if header.lower() in stripped.lower():
+                # 检查header是否包含在line中，或line是否包含header的核心部分
+                header_lower = header.lower()
+                stripped_lower = stripped.lower()
+
+                # 完全包含
+                if header_lower in stripped_lower:
                     should_filter = True
+                    print(f"[DEBUG] 过滤页眉: '{stripped}' 匹配 '{header}'")
                     break
 
-            # 检查是否匹配页脚
+                # 检查标准编号的核心部分（如"GB/T 16749"）
+                # 提取header和line中的数字字母部分进行匹配
+                # 保留字母数字汉字，但去除常见的OCR干扰字符
+                header_core = re.sub(r'[^\w\u4e00-\u9fff]', '', header_lower)
+                line_core = re.sub(r'[^\w\u4e00-\u9fff]', '', stripped_lower)
+
+                # 进一步去除常见的中文字符干扰（如"一"可能是破折号的误识别）
+                # 只保留字母、数字和有意义的汉字（长度>1的汉字）
+                def extract_meaningful_core(text):
+                    # 提取字母数字序列
+                    alnum_parts = re.findall(r'[a-z0-9]+', text)
+                    alnum_core = ''.join(alnum_parts)
+
+                    # 提取有意义的汉字（排除单个常见字符）
+                    chinese_parts = re.findall(r'[\u4e00-\u9fff]{2,}', text)
+                    chinese_core = ''.join(chinese_parts)
+
+                    return alnum_core + chinese_core
+
+                header_core_clean = extract_meaningful_core(header_core)
+                line_core_clean = extract_meaningful_core(line_core)
+
+                # 双向匹配：header_core在line_core中 或 line_core在header_core中
+                if header_core_clean and line_core_clean:
+                    if header_core_clean in line_core_clean or line_core_clean in header_core_clean:
+                        should_filter = True
+                        print(f"[DEBUG] 过滤页眉(核心匹配): '{stripped}' 匹配 '{header}'")
+                        print(f"[DEBUG]   header_core='{header_core_clean}' line_core='{line_core_clean}'")
+                        break
+
+            # 检查是否匹配页脚（使用双向包含检查）
             if not should_filter:
                 for footer in filter_patterns["footers"]:
-                    if footer.lower() in stripped.lower():
+                    footer_lower = footer.lower()
+                    stripped_lower = stripped.lower()
+
+                    # 完全包含
+                    if footer_lower in stripped_lower:
                         should_filter = True
+                        print(f"[DEBUG] 过滤页脚: '{stripped}' 匹配 '{footer}'")
                         break
+
+                    # 核心部分匹配（双向匹配）
+                    footer_core = re.sub(r'[^\w\u4e00-\u9fff]', '', footer_lower)
+                    line_core = re.sub(r'[^\w\u4e00-\u9fff]', '', stripped_lower)
+
+                    if footer_core and line_core and len(footer_core) > 5 and len(line_core) > 5:
+                        if footer_core in line_core or line_core in footer_core:
+                            should_filter = True
+                            print(f"[DEBUG] 过滤页脚(核心匹配): '{stripped}' 匹配 '{footer}'")
+                            print(f"[DEBUG]   footer_core='{footer_core}' line_core='{line_core}'")
+                            break
 
             # 检查是否匹配页码（包括"## 第X页"格式）
             if not should_filter:
                 for page_num in filter_patterns["page_numbers"]:
                     if page_num in stripped:
                         should_filter = True
+                        print(f"[DEBUG] 过滤页码: '{stripped}' 匹配 '{page_num}'")
                         break
 
                 # 检查"## 第X页"格式
                 if re.match(r'^##\s*第\s*\d+\s*页\s*$', stripped):
                     should_filter = True
+                    print(f"[DEBUG] 过滤页码标记: '{stripped}'")
 
             if not should_filter:
                 filtered_lines.append(line)
 
+        print(f"[DEBUG] 过滤前: {len(lines)} 行, 过滤后: {len(filtered_lines)} 行")
+
         return '\n'.join(filtered_lines)
+
+    def _replace_image_garbage_with_vlm_caption(self, markdown: str, pdf_path: Path, work_dir: str) -> str:
+        """用VLM图像/表格描述替换markdown中的OCR乱码。
+
+        策略：
+        1. 先收集所有包含=的行（公式），一次性让VLM转LaTeX
+        2. 检测连续的乱码行（短行、符号多、内容无意义）
+        3. 查找上下文中的"图X"或"表X"引用
+        4. 根据是图还是表，调用不同的VLM描述
+        5. 用描述替换乱码部分
+        """
+        import re
+
+        lines = markdown.split('\n')
+
+        # 渲染页面图片（如果需要VLM描述）
+        page_images = {}
+        try:
+            page_images = self._render_page_images_to_dir(pdf_path, Path(work_dir), max_pages=None)
+        except Exception as e:
+            print(f"[DEBUG] 渲染页面图片失败: {e}")
+            return markdown
+
+        # 第一步：收集所有包含=的行（公式）
+        formula_line_indices = []
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped and '=' in stripped:
+                formula_line_indices.append(i)
+
+        # 如果有公式行，让VLM一次性识别整页的所有公式
+        all_formulas_latex = []
+        if formula_line_indices and page_images:
+            first_page = min(page_images.keys())
+            image_path = str(page_images[first_page])
+
+            print(f"[DEBUG] 检测到 {len(formula_line_indices)} 个包含等号的行")
+            print(f"[DEBUG] 调用VLM识别整页的所有公式...")
+
+            try:
+                caption = self.vlm.recognize_complex_content(image_path, "formula")
+                if caption and caption.strip():
+                    # VLM返回的公式（可能包含多个公式）
+                    all_formulas_latex.append(caption)
+                    print(f"[DEBUG] VLM识别到的公式:\n{caption}")
+            except Exception as e:
+                print(f"[DEBUG] VLM公式识别异常: {e}")
+
+        # 第二步：处理所有行
+        result_lines = []
+        formula_inserted = False  # 标记公式是否已插入
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+
+            # 公式行：只在第一次遇到时插入LaTeX公式
+            if i in formula_line_indices and all_formulas_latex and not formula_inserted:
+                # 使用VLM识别的公式（所有公式在一次调用中返回）
+                result_lines.append(f"\n$$\n{all_formulas_latex[0]}\n$$\n")
+                print(f"[DEBUG] 第{i+1}行：插入VLM识别的公式")
+                formula_inserted = True
+                continue
+            elif i in formula_line_indices and formula_inserted:
+                # 后续的公式行跳过（不再重复插入）
+                print(f"[DEBUG] 第{i+1}行：跳过（公式已插入）")
+                continue
+
+            # 新增：连续短行块检测（图片乱码特征）
+            if stripped and len(stripped) < 5:
+                # 检查是否是连续的短行块（>=5行连续短行）
+                short_block_start = i
+                short_lines_count = 0
+
+                while i < len(lines):
+                    next_line = lines[i].strip()
+                    if next_line and len(next_line) < 5:
+                        short_lines_count += 1
+                        i += 1
+                    else:
+                        break
+
+                # 如果连续短行>=5行，判定为图片/表格乱码
+                if short_lines_count >= 5:
+                    print(f"[DEBUG] 检测到短行块: {short_block_start+1}-{i}行，共{short_lines_count}行")
+
+                    # 查找前面或后面的"图X"或"表X"引用
+                    figure_name = self._find_figure_or_table_name(result_lines, short_block_start)
+
+                    if page_images:
+                        first_page = min(page_images.keys())
+                        image_path = str(page_images[first_page])
+
+                        task_type = "figure_caption"
+                        if figure_name and "表" in figure_name:
+                            task_type = "table"
+
+                        print(f"[DEBUG] 调用VLM描述第{first_page}页的{task_type}...")
+
+                        try:
+                            if task_type == "table":
+                                caption = self.vlm.recognize_complex_content(image_path, "table")
+                                if caption and caption.strip():
+                                    result_lines.append(f"\n**{figure_name}：** {caption}\n")
+                                    print(f"[DEBUG] 表格描述: {caption}")
+                                else:
+                                    result_lines.append(f"\n**{figure_name}** (表格识别失败)\n")
+                            else:
+                                caption = self.vlm.recognize_complex_content(image_path, "figure_caption")
+                                if caption and caption.strip():
+                                    result_lines.append(f"\n**{figure_name}：** {caption}\n")
+                                    print(f"[DEBUG] 图像描述: {caption}")
+                                else:
+                                    result_lines.append(f"\n**{figure_name}** (图像识别失败)\n")
+                        except Exception as e:
+                            print(f"[DEBUG] VLM描述异常: {e}")
+                            if figure_name:
+                                result_lines.append(f"\n**{figure_name}** (识别失败)\n")
+                            else:
+                                result_lines.append(f"\n**[图像]** (识别失败)\n")
+                    else:
+                        result_lines.append(f"\n**[图像]** (无可用图像)\n")
+
+                    continue
+
+            # 原有的乱码行检测（长行或符号密集行）
+            if stripped and self._is_garbage_line(stripped):
+                # 收集连续的乱码行
+                garbage_start = i
+                garbage_lines = []
+
+                while i < len(lines) and self._is_garbage_line(lines[i].strip()):
+                    garbage_lines.append(lines[i])
+                    i += 1
+
+                print(f"[DEBUG] 检测到乱码块: {garbage_start+1}-{i}行，共{len(garbage_lines)}行")
+
+                # 检查是否是公式乱码块
+                is_formula_block = self._is_formula_block(garbage_lines)
+
+                # 查找前面最近的"图X"或"表X"引用
+                figure_name = self._find_figure_or_table_name(result_lines, garbage_start)
+
+                if page_images:
+                    # 取第一个页面图像
+                    first_page = min(page_images.keys())
+                    image_path = str(page_images[first_page])
+
+                    # 如果是公式块，使用公式描述
+                    if is_formula_block:
+                        print(f"[DEBUG] 检测到公式块，使用formula描述")
+                        task_type = "formula"
+                    else:
+                        # 根据是图还是表，使用不同的描述任务
+                        task_type = "figure_caption"  # 默认为图片
+                        if figure_name and "表" in figure_name:
+                            task_type = "table"
+
+                    print(f"[DEBUG] 调用VLM描述第{first_page}页的{task_type}...")
+
+                    try:
+                        caption = self.vlm.recognize_complex_content(image_path, task_type)
+                        if caption and caption.strip():
+                            if task_type == "formula":
+                                # 公式使用LaTeX格式
+                                result_lines.append(f"\n$$\n{caption}\n$$\n")
+                                print(f"[DEBUG] 公式(LaTeX): {caption}")
+                            elif task_type == "table":
+                                result_lines.append(f"\n**{figure_name}：** {caption}\n")
+                                print(f"[DEBUG] 表格描述: {caption}")
+                            else:
+                                result_lines.append(f"\n**{figure_name}：** {caption}\n")
+                                print(f"[DEBUG] 图像描述: {caption}")
+                        else:
+                            if task_type == "formula":
+                                result_lines.append(f"\n$$\n\\text{{公式识别失败}}\n$$\n")
+                            elif figure_name:
+                                result_lines.append(f"\n**{figure_name}** (识别失败)\n")
+                            else:
+                                result_lines.append(f"\n**[图像]** (无法识别内容)\n")
+                    except Exception as e:
+                        print(f"[DEBUG] VLM描述异常: {e}")
+                        if figure_name:
+                            result_lines.append(f"\n**{figure_name}** (识别失败)\n")
+                        else:
+                            result_lines.append(f"\n**[图像]** (识别失败)\n")
+                else:
+                    result_lines.append(f"\n**[图像]** (无可用图像)\n")
+
+                continue
+
+            result_lines.append(line)
+            i += 1
+
+        return '\n'.join(result_lines)
+
+    def _find_figure_or_table_name(self, lines: List[str], current_pos: int) -> str:
+        """查找当前位置附近最近的"图X"或"表X"引用。
+
+        向前和向后查找，寻找包含"图X"或"表X"的行
+        """
+        import re
+
+        # 向前查找最多20行
+        lookback = min(20, current_pos)
+        start_idx = max(0, current_pos - lookback)
+
+        for i in range(current_pos - 1, start_idx - 1, -1):
+            if i < 0 or i >= len(lines):
+                continue
+            line = lines[i].strip()
+
+            # 查找"图 数字"或"表 数字"模式
+            figure_match = re.search(r'图\s*(\d+)', line)
+            table_match = re.search(r'表\s*(\d+)', line)
+
+            if figure_match:
+                return f"图{figure_match.group(1)}"
+            elif table_match:
+                return f"表{table_match.group(1)}"
+
+        # 向后查找最多10行
+        lookforward = min(10, len(lines) - current_pos)
+        for i in range(current_pos, min(current_pos + lookforward, len(lines))):
+            line = lines[i].strip()
+
+            # 查找"图 数字"或"表 数字"模式
+            figure_match = re.search(r'图\s*(\d+)', line)
+            table_match = re.search(r'表\s*(\d+)', line)
+
+            if figure_match:
+                return f"图{figure_match.group(1)}"
+            elif table_match:
+                return f"表{table_match.group(1)}"
+
+        return ""
+
+    def _is_garbage_line(self, line: str) -> bool:
+        """判断一行文本是否是乱码。
+
+        改进标准（更宽松）：
+        1. 短行（长度<5）且主要是符号/数字
+        2. 或者符号占比>60%
+        3. 不包含完整的中文字句（2个以上连续汉字）
+        """
+        if not line:
+            return False
+
+        # 短行判定
+        if len(line) < 5:
+            # 检查是否包含有意义的中文
+            chinese_matches = re.findall(r'[\u4e00-\u9fff]{2,}', line)
+            if chinese_matches:
+                return False  # 有连续2个以上汉字，不是乱码
+
+            # 检查是否主要是符号和数字
+            alnum_count = sum(1 for c in line if c.isalnum())
+            symbol_count = len(line) - alnum_count
+
+            # 符号占比>50% 或 纯数字/符号
+            return symbol_count / len(line) > 0.5 if len(line) > 0 else True
+
+        # 长行判定：符号占比>60%
+        symbol_chars = 0
+        has_chinese = False
+        has_long_word = False
+
+        for char in line:
+            if char in '．·~`\'"-+=|!@#$%^&*()[]{}<>?/\\,.;: 　\t\n\r':
+                symbol_chars += 1
+            elif '\u4e00' <= char <= '\u9fff':
+                has_chinese = True
+            elif char.isalpha():
+                if len(re.findall(r'[a-z]{4,}', line)) > 0:
+                    has_long_word = True
+
+        if has_chinese or has_long_word:
+            return False
+
+        return (symbol_chars / len(line)) > 0.6
+
+    def _is_formula_block(self, lines: List[str]) -> bool:
+        """判断一个文本块是否是数学公式。
+
+        公式特征（改进版，更宽松以适应OCR错误）：
+        1. 包含等号 =、≈、≠
+        2. 包含希腊字母（α, β, γ, Δ, Σ, π等）
+        3. 包含数学符号（+, -, ×, ÷, ±, ∫, √, ∑, ∏等）
+        4. 包含上标下标标记（^, _）
+        5. 变量+数字模式（OCR友好的公式特征）
+        6. 括号/方括号密度高
+        """
+        import re
+
+        if not lines:
+            return False
+
+        # 合并所有行用于分析
+        combined = ' '.join(lines)
+
+        # 检查是否包含等号或近似符号（公式的关键特征）
+        has_equality = '=' in combined or '≈' in combined or '≠' in combined
+        if not has_equality:
+            # 即使没有等号，如果有多个公式特征也可能是公式
+            pass
+
+        # 检查公式特征指标
+        formula_indicators = 0
+
+        # 有等号或近似符号，强指标
+        if has_equality:
+            formula_indicators += 2
+
+        # 希腊字母（OCR可能识别错误，降低权重）
+        greek_pattern = r'[α-ωΑ-Ω]'
+        if re.search(greek_pattern, combined):
+            formula_indicators += 2
+
+        # 数学符号（扩展：包含常见符号）
+        math_symbols = r'[+\-×÷±∫√∑∏∂∇∈∞∩∪≈≠≤≥*/]'
+        # 统计数学符号出现次数
+        math_symbol_count = len(re.findall(math_symbols, combined))
+        if math_symbol_count >= 2:
+            formula_indicators += 2
+        elif math_symbol_count >= 1:
+            formula_indicators += 1
+
+        # 分数格式（a/b 或类似）
+        if re.search(r'\w+\s*/\s*\w+', combined):
+            formula_indicators += 1
+
+        # 上标下标
+        if '^' in combined or '_' in combined:
+            formula_indicators += 1
+
+        # 括号/方括号嵌套（公式常见特征）
+        # 检测嵌套括号 ( ... ( ... ) ... ) 或 [ ... [ ... ] ... ]
+        if re.search(r'\(.+\(.+.*\)', combined) or re.search(r'\[.+\[.+.*\]', combined):
+            formula_indicators += 1
+
+        # 平方/立方等（OCR可能识别为数字2、3）
+        if re.search(r'\^2|\^3|\²|\³|\s2\s|\s3\s', combined):
+            formula_indicators += 1
+
+        # 变量+数字模式（OCR友好）：字母后紧跟数字
+        # 例如: A2, r3, m2 等
+        if re.search(r'[a-zA-Z]\s*\d', combined):
+            formula_indicators += 1
+
+        # 判定：公式指标>=1 即认为是公式（降低阈值以适应OCR）
+        return formula_indicators >= 1
 
     def _fix_markdown_format(self, markdown: str) -> str:
         md = markdown.replace("\r\n", "\n")
@@ -889,3 +1433,238 @@ class GBDocumentParser:
             return len(text.strip()) < 50
         except Exception:
             return False
+
+    # ========== 单页处理辅助方法 ==========
+
+    def _extract_single_page(self, pdf_path: Path, page_num: int, work_dir: str) -> Path:
+        """从PDF中提取指定页到单独的PDF文件"""
+        import fitz  # PyMuPDF
+        
+        output_path = Path(work_dir) / f"page_{page_num}.pdf"
+        
+        doc = fitz.open(str(pdf_path))
+        if page_num < 1 or page_num > len(doc):
+            doc.close()
+            raise ValueError(f"页码{page_num}超出范围（1-{len(doc)}）")
+        
+        # 创建新文档只包含指定页
+        new_doc = fitz.open()
+        new_doc.insert_pdf(doc, from_page=page_num-1, to_page=page_num-1)
+        new_doc.save(str(output_path))
+        new_doc.close()
+        doc.close()
+        
+        return output_path
+
+    def _render_page_image(self, pdf_path: Path, page_num: int, work_dir: str) -> Path:
+        """渲染PDF页面为图像"""
+        import fitz
+        
+        output_path = Path(work_dir) / f"page_{page_num}.png"
+        
+        doc = fitz.open(str(pdf_path))
+        page = doc[0]  # 只有一页
+        mat = fitz.Matrix(2.0, 2.0)  # 2倍缩放
+        pix = page.get_pixmap(matrix=mat)
+        pix.save(str(output_path))
+        doc.close()
+        
+        return output_path
+
+    def _recognize_page_layout(self, image_path: Path) -> Dict[str, Any]:
+        """使用VLM识别页面布局"""
+        if not self.vlm.enabled:
+            return {
+                "page_type": "normal",
+                "header": [],
+                "footer": [],
+                "page_number": "",
+                "confidence": "low"
+            }
+        
+        try:
+            layout_info = self.vlm.recognize_layout(str(image_path))
+            return layout_info
+        except Exception as e:
+            print(f"[ERROR] VLM布局识别失败: {e}")
+            return {
+                "page_type": "normal",
+                "header": [],
+                "footer": [],
+                "page_number": "",
+                "confidence": "low"
+            }
+
+    def _parse_single_page_content(self, pdf_path: Path, work_dir: str) -> Tuple[str, List[Dict], str]:
+        """解析单页PDF内容"""
+        # 使用现有的parse方法，但只处理单页
+        markdown, blocks, warnings, parser_engine = self._parse_with_mineru(pdf_path, work_dir)
+        
+        if not markdown.strip() or not blocks:
+            fb_markdown, fb_blocks, fb_warning = self._fallback_parse_with_fitz(pdf_path)
+            warnings.extend(fb_warning)
+            if fb_markdown.strip() and fb_blocks:
+                markdown, blocks = fb_markdown, fb_blocks
+                parser_engine = "fitz-fallback"
+        
+        markdown = self._fix_markdown_format(markdown or self._compose_markdown(blocks))
+        
+        # VLM过滤
+        if self.cfg.allow_external_vlm and self.vlm.enabled:
+            markdown = self._filter_markdown_with_vlm_layout(markdown, pdf_path, work_dir)
+            markdown = self._replace_image_garbage_with_vlm_caption(markdown, pdf_path, work_dir)
+        
+        return markdown, blocks, parser_engine
+
+    def _extract_chapters_from_markdown(self, markdown: str) -> List[Dict[str, Any]]:
+        """从markdown中提取章节信息"""
+        chapters = []
+        lines = markdown.split('\n')
+        
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            
+            # 匹配章节号：数字.数字 或 附录X
+            match = re.match(r'^(\d+(?:\.\d+)*)\s+(.+)$', stripped)
+            if not match:
+                # 尝试匹配附录
+                match = re.match(r'^(附录[A-Z]?)\s*(.*)$', stripped)
+            
+            if match:
+                chapter_num = match.group(1)
+                chapter_title = match.group(2) if len(match.groups()) > 1 else ""
+                
+                # 计算层级
+                level = 1
+                if '.' in chapter_num:
+                    level = chapter_num.count('.') + 1
+                elif chapter_num.startswith("附录"):
+                    level = 1
+                
+                chapters.append({
+                    "num": chapter_num,
+                    "title": chapter_title,
+                    "level": level,
+                    "line_start": i
+                })
+        
+        return chapters
+
+    def _extract_elements_from_page(
+        self,
+        markdown: str,
+        image_path: Path,
+        work_dir: str
+    ) -> Dict[str, List[Dict]]:
+        """识别页面中的结构化元素（表/图/公式）"""
+        elements = {
+            "tables": [],
+            "figures": [],
+            "formulas": []
+        }
+        
+        lines = markdown.split('\n')
+        
+        # 查找表
+        for i, line in enumerate(lines):
+            if '|' in line and line.count('|') >= 4:
+                table_match = re.search(r'(表\s*\d+[:：])', line)
+                if table_match or self._is_table_block(lines, i):
+                    table_name = self._find_figure_or_table_name(lines, i)
+                    elements["tables"].append({
+                        "id": f"table_{len(elements['tables']) + 1}",
+                        "name": table_name or f"表{len(elements['tables']) + 1}",
+                        "line": i,
+                        "content": line
+                    })
+        
+        # 查找公式
+        for i, line in enumerate(lines):
+            if '=' in line and len(line.strip()) > 5:
+                elements["formulas"].append({
+                    "id": f"formula_{len(elements['formulas']) + 1}",
+                    "name": f"公式({len(elements['formulas']) + 1})",
+                    "line": i,
+                    "content": line.strip()
+                })
+        
+        # 查找图（通过VLM描述）
+        for i, line in enumerate(lines):
+            if line.startswith("**") and "图" in line and "：" in line:
+                elements["figures"].append({
+                    "id": f"figure_{len(elements['figures']) + 1}",
+                    "name": line.split("：")[0].replace("*", "").strip(),
+                    "line": i,
+                    "caption": line
+                })
+        
+        return elements
+
+    def _is_table_block(self, lines: List[str], start_idx: int) -> bool:
+        """判断是否是表格块"""
+        count = 0
+        for i in range(start_idx, min(start_idx + 5, len(lines))):
+            if '|' in lines[i]:
+                count += 1
+        return count >= 3
+
+    def _generate_rag_content(
+        self,
+        markdown: str,
+        chapters: List[Dict],
+        elements: Dict
+    ) -> Dict[str, Any]:
+        """生成RAG内容"""
+        # 清理markdown
+        cleaned = self._clean_content_for_rag(markdown)
+        
+        # 生成元素描述
+        element_descriptions = []
+        
+        for table in elements.get("tables", []):
+            element_descriptions.append(f"{table.get('name', '表')}：表格内容")
+        
+        for figure in elements.get("figures", []):
+            element_descriptions.append(f"{figure.get('name', '图')}：图像内容")
+        
+        for formula in elements.get("formulas", []):
+            content = formula.get('content', '')
+            # 简化公式（去掉LaTeX复杂格式）
+            simplified = re.sub(r'\$.*?\$', '[公式]', content)
+            element_descriptions.append(f"{formula.get('name', '公式')}：{simplified}")
+        
+        return {
+            "content": cleaned,
+            "elements": element_descriptions
+        }
+
+    def _clean_content_for_rag(self, markdown: str) -> str:
+        """清理内容用于RAG（去除格式，保留纯文本）"""
+        # 去除markdown格式标记
+        cleaned = re.sub(r'\*\*(.+?)\*\*', r'\1', markdown)  # **bold** -> bold
+        cleaned = re.sub(r'\$(.+?)\$', r'\1', cleaned)  # $formula$ -> formula
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)  # 合并多余空行
+        return cleaned.strip()
+
+    def _generate_render_content(self, markdown: str, layout_info: Dict) -> str:
+        """生成Render内容（保留格式）"""
+        return markdown
+
+    def _generate_page_summary(self, markdown: str, chapters: List[Dict]) -> str:
+        """生成页面摘要"""
+        if chapters:
+            chapter_titles = [f"{ch['num']} {ch['title']}" for ch in chapters]
+            return f"该页包含章节：{', '.join(chapter_titles)}"
+        
+        # 如果没有章节，返回前100个字符
+        preview = markdown.strip()[:100]
+        return f"内容：{preview}..."
+
+    def _extract_keywords(self, markdown: str) -> List[str]:
+        """提取关键词"""
+        # 简单实现：提取中文术语（2-4个字的中文）
+        keywords = re.findall(r'[\u4e00-\u9fff]{2,4}', markdown)
+        
+        # 去重并限制数量
+        unique_keywords = list(set(keywords))[:20]
+        return unique_keywords

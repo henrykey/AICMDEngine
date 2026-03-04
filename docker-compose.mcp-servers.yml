@@ -29,7 +29,23 @@ services:
       PYTHONUNBUFFERED: 1
       MCP_HOST: 0.0.0.0
       MCP_PORT: 8000
-      EXTERNAL_MCPS: '{"paddleocr":{"transport":"http","url":"http://host.docker.internal:9001","timeout":300},"office-word":{"transport":"http","url":"http://host.docker.internal:9002","timeout":60},"pdf2md":{"transport":"http","url":"http://host.docker.internal:9003","timeout":300}}'
+      EXTERNAL_MCPS: |
+        paddleocr:
+          transport: http
+          url: http://host.docker.internal:9001
+          timeout: 300
+        office-word:
+          transport: http
+          url: http://host.docker.internal:9002
+          timeout: 60
+        pdf2md:
+          transport: http
+          url: http://host.docker.internal:9003
+          timeout: 300
+        pdf2md-enhanced:
+          transport: http
+          url: http://host.docker.internal:9010
+          timeout: 300
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # LLM_BASE_URL: ${LLM_BASE_URL}
       # LLM_API_KEY: ${LLM_API_KEY}
@@ -134,12 +150,12 @@ services:
     ports:
       - "9003:9003"
     env_file:
-      - .env
+      - ./mcp/servers/PDF2MD/.env
     environment:
       - PYTHONUNBUFFERED=1
       # VLM配置（生产环境应使用.env文件或配置中心）
       - VLM_MODEL_PROVIDER=${VLM_MODEL_PROVIDER:-qwen}
-      - QWEN_API_KEY=${QWEN_API_KEY}
+      - QWEN_API_KEY=sk-a67114a92fdf4964bb6a5f47beccd00d
       - QWEN_BASE_URL=${QWEN_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
       - QWEN_MODEL_NAME=${QWEN_MODEL_NAME:-qwen3-vl-flash-2026-01-22}
       - PDF2MD_ALLOW_EXTERNAL_VLM=${PDF2MD_ALLOW_EXTERNAL_VLM:-true}
@@ -154,9 +170,9 @@ services:
           memory: 512M
     networks:
       - mcp-servers-network
-    # 健康检查
+    # 健康检查 - 端口连通性检查
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9003/sse"]
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1', 9003), 2); s.close()"]
       interval: 30s
       timeout: 10s
       retries: 3

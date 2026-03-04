@@ -111,7 +111,9 @@ async def mcp_websocket_endpoint(
         "client_info": client_info,
         "jwt_token": token,  # 保存JWT token用于后续API调用
         "registry": registry,
-        "audit_logger": audit_logger
+        "audit_logger": audit_logger,
+        "provider_manager": getattr(websocket.app, "provider_manager", None),
+        "mongodb": getattr(websocket.app, "mongodb", None),
     }
 
     try:

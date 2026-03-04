@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import asyncio
+import base64
 import json
 import os
 import re
@@ -14,12 +15,41 @@ mcp = FastMCP(name="GB-Standard-Parser", mask_error_details=True)
 parser = GBDocumentParser()
 
 
+def _is_base64_pdf(s: str) -> bool:
+    """检查字符串是否是 Base64 编码的 PDF 数据"""
+    return s.startswith("JVBERi0")
+
+
 def _resolve_input_path(file_path: str) -> str:
     path = Path(file_path).expanduser()
     if path.is_absolute():
         return str(path)
     input_dir = Path(os.getenv("PDF2MD_INPUT_DIR", "./data/input")).expanduser()
     return str(input_dir.joinpath(file_path).resolve())
+
+
+def _decode_pdf_input(pdf_input: str) -> tuple[Optional[bytes], Optional[str]]:
+    """
+    解析 PDF 输入，返回 (bytes 数据，临时文件路径) 的元组
+    
+    Args:
+        pdf_input: 文件路径或 Base64 编码的 PDF 数据
+    
+    Returns:
+        (pdf_bytes, temp_path) 元组：
+        - 如果是 Base64：返回 (bytes, 临时文件路径)
+        - 如果是文件路径：返回 (None, 解析后的文件路径)
+    """
+    if _is_base64_pdf(pdf_input):
+        pdf_bytes = base64.b64decode(pdf_input)
+        temp_fd, temp_path = tempfile.mkstemp(suffix='.pdf')
+        with os.fdopen(temp_fd, 'wb') as f:
+            f.write(pdf_bytes)
+            f.flush()
+            os.fsync(f.fileno())
+        return pdf_bytes, temp_path
+    else:
+        return None, _resolve_input_path(pdf_input)
 
 
 @mcp.tool("parse_standard_pdf")
@@ -126,22 +156,31 @@ async def health_check() -> str:
 
 
 @mcp.tool("process_pdf_page")
-async def process_pdf_page(file_path: str, page_num: int) -> str:
+async def process_pdf_page(page_num: int, pdf_input: str) -> str:
     """
     处理PDF单页，返回结构化结果
 
     Args:
-        file_path: PDF文件路径
         page_num: 页码（从1开始）
+        pdf_input: PDF输入，可以是文件路径或base64编码的PDF数据
 
     Returns:
         JSON字符串，包含单页的结构化信息（chapters, rag, render, elements）
     """
     loop = asyncio.get_event_loop()
     try:
-        result = await loop.run_in_executor(
-            None, parser.process_single_page, _resolve_input_path(file_path), page_num
-        )
+        # 判断是base64还是文件路径
+        if _is_base64_pdf(pdf_input):
+            # 解码base64为bytes
+            pdf_bytes = base64.b64decode(pdf_input)
+            result = await loop.run_in_executor(
+                None, parser.process_single_page, pdf_bytes, page_num
+            )
+        else:
+            # 作为文件路径处理
+            result = await loop.run_in_executor(
+                None, parser.process_single_page, _resolve_input_path(pdf_input), page_num
+            )
         return json.dumps(result, ensure_ascii=False, indent=2)
     except Exception as exc:
         error_result = {
@@ -153,48 +192,106 @@ async def process_pdf_page(file_path: str, page_num: int) -> str:
 
 
 @mcp.tool("process_pdf_document")
-async def process_pdf_document(file_path: str, pages: Optional[List[int]] = None) -> str:
+async def process_pdf_document(file_path: Optional[str] = None, file_data: Optional[str] = None, pages: Optional[List[int]] = None) -> str:
     """
     处理整个PDF文档，返回完整结构化结果
 
     Args:
-        file_path: PDF文件路径
+        file_path: PDF文件路径（与file_data二选一）
+        file_data: base64编码的PDF数据（与file_path二选一）
         pages: 可选，指定处理的页码列表（None=全部页）
 
     Returns:
         JSON字符串，包含文档的完整结构化信息（title, toc, chapters）
     """
+    # 参数验证
+    if not file_path and not file_data:
+        return json.dumps({"success": False, "error": "必须提供file_path或file_data参数"}, ensure_ascii=False)
+    if file_path and file_data:
+        return json.dumps({"success": False, "error": "不能同时提供file_path和file_data参数"}, ensure_ascii=False)
+
     loop = asyncio.get_event_loop()
     try:
-        resolved_path = _resolve_input_path(file_path)
+        # 处理输入
+        if file_data:
+            # 解码base64
+            pdf_bytes = base64.b64decode(file_data)
+            # 使用临时文件或直接使用bytes获取总页数
+            import fitz
+            import tempfile
+            import os
 
-        # 确定要处理的页码
-        if pages is None:
+            # 创建临时文件用于获取页数
+            temp_fd, temp_path = tempfile.mkstemp(suffix='.pdf')
+            try:
+                with os.fdopen(temp_fd, 'wb') as f:
+                    f.write(pdf_bytes)
+                    f.flush()
+                    os.fsync(f.fileno())
+
+                # 获取总页数
+                doc = fitz.open(temp_path)
+                total_pages = len(doc)
+                doc.close()
+
+                # 确定要处理的页码
+                if pages is None:
+                    pages_to_process = list(range(1, total_pages + 1))
+                else:
+                    pages_to_process = pages
+
+                # 逐页处理，使用bytes输入
+                page_results = []
+                for page_num in pages_to_process:
+                    try:
+                        page_result = await loop.run_in_executor(
+                            None, parser.process_single_page, pdf_bytes, page_num
+                        )
+                        page_results.append(page_result)
+                    except Exception as e:
+                        print(f"[ERROR] 处理第{page_num}页失败: {e}")
+                        page_results.append({
+                            "page_num": page_num,
+                            "error": str(e),
+                            "page_type": "error"
+                        })
+            finally:
+                # 清理临时文件
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+        else:
+            # 文件路径模式
+            resolved_path = _resolve_input_path(file_path)
+
             # 获取总页数
             import fitz
             doc = fitz.open(resolved_path)
             total_pages = len(doc)
             doc.close()
-            pages_to_process = list(range(1, total_pages + 1))
-        else:
-            pages_to_process = pages
 
-        # 逐页处理
-        page_results = []
-        for page_num in pages_to_process:
-            try:
-                page_result = await loop.run_in_executor(
-                    None, parser.process_single_page, resolved_path, page_num
-                )
-                page_results.append(page_result)
-            except Exception as e:
-                print(f"[ERROR] 处理第{page_num}页失败: {e}")
-                # 添加错误标记
-                page_results.append({
-                    "page_num": page_num,
-                    "error": str(e),
-                    "page_type": "error"
-                })
+            # 确定要处理的页码
+            if pages is None:
+                pages_to_process = list(range(1, total_pages + 1))
+            else:
+                pages_to_process = pages
+
+            # 逐页处理
+            page_results = []
+            for page_num in pages_to_process:
+                try:
+                    page_result = await loop.run_in_executor(
+                        None, parser.process_single_page, resolved_path, page_num
+                    )
+                    page_results.append(page_result)
+                except Exception as e:
+                    print(f"[ERROR] 处理第{page_num}页失败: {e}")
+                    page_results.append({
+                        "page_num": page_num,
+                        "error": str(e),
+                        "page_type": "error"
+                    })
 
         # 聚合为文档级结果
         document_result = _aggregate_pages_to_document(page_results)

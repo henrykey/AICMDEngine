@@ -44,7 +44,7 @@ import base64
 # 配置
 MCP_ROUTER_URL = "ws://localhost:8000/mcp/v1"
 MCP_ROUTER_HTTP_URL = "http://localhost:8000"  # MCP Router的HTTP接口 (用于登录)
-PDF_PATH = Path.home() / "Documents/GB/GBT16749-2018.pdf"
+PDF_PATH = Path.home() / "Documents/GB/GB∕T 150.1~4-2024 压力容器 扫描版.pdf"
 TOKEN_FILE = "/tmp/pdf2md_token.txt"
 
 
@@ -415,11 +415,10 @@ async def test_pdf2md_mcp(jwt_token, page_num=None, pages=None, test_document=Fa
         print(f"✗ PDF文件不存在: {pdf_path}")
         return
 
-    # 读取PDF文件为base64
-    print("→ 读取PDF文件并编码为base64...")
-    with open(pdf_path, 'rb') as f:
-        pdf_base64 = base64.b64encode(f.read()).decode('utf-8')
-    print(f"✓ PDF编码完成 ({len(pdf_base64)//1024} KB)")
+    # 不使用base64，直接使用文件路径
+    print("→ 使用文件路径模式（跳过base64编码）...")
+    pdf_base64 = None  # 不使用base64
+    print(f"✓ 使用文件路径: {pdf_path}")
     print()
 
     # 通过MCP Router连接
@@ -452,13 +451,13 @@ async def test_pdf2md_mcp(jwt_token, page_num=None, pages=None, test_document=Fa
 
             # 执行测试
             if test_document:
-                await test_process_document(transport, pdf_base64=pdf_base64)
+                await test_process_document(transport, pdf_path=pdf_path)
             elif pages:
                 for page in pages:
-                    await test_process_page(transport, page, pdf_base64=pdf_base64)
+                    await test_process_page(transport, page, pdf_path=pdf_path)
                     await asyncio.sleep(0.5)  # 避免请求过快
             elif page_num:
-                await test_process_page(transport, page_num, pdf_base64=pdf_base64)
+                await test_process_page(transport, page_num, pdf_path=pdf_path)
 
     except websockets.exceptions.InvalidStatusCode as e:
         print(f"✗ WebSocket连接失败 - HTTP状态码: {e.status_code}")

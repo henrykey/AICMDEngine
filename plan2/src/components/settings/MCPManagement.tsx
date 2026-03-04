@@ -16,15 +16,23 @@ interface MCPServer {
     version?: string;
     author?: string;
     dependencies?: string[];
+    llm_provider?: string | null;
   };
+}
+
+interface LLMProvider {
+  name: string;
 }
 
 const MCPManagement = () => {
   const [servers, setServers] = useState<MCPServer[]>([]);
+  const [llmProviders, setLlmProviders] = useState<LLMProvider[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedServer, setSelectedServer] = useState<MCPServer | null>(null);
   const [showDetails, setShowDetails] = useState(false);
+  const [selectedServerLLM, setSelectedServerLLM] = useState<string>('');
+  const [savingLLM, setSavingLLM] = useState(false);
 
   // 获取 MCP 服务器列表
   const fetchServers = async () => {
@@ -46,12 +54,70 @@ const MCPManagement = () => {
     }
   };
 
+  const fetchLLMProviders = async () => {
+    try {
+      const config = getConfig();
+      const apiUrl = `${config.nlTpsApiUrl.replace('/v1', '')}/api/llm/providers`;
+      const response = await fetch(apiUrl);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch LLM providers: ${response.status} ${response.statusText}`);
+      }
+      const data = await response.json();
+      setLlmProviders(data.providers || []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unknown error');
+    }
+  };
+
+  const fetchServerLLMProvider = async (name: string) => {
+    try {
+      const config = getConfig();
+      const apiUrl = `${config.nlTpsApiUrl}/mcp/servers/${name}/llm-provider`;
+      const response = await fetch(apiUrl);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch MCP LLM provider: ${response.status} ${response.statusText}`);
+      }
+      const data = await response.json();
+      setSelectedServerLLM(data.llm_provider || '');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unknown error');
+    }
+  };
+
+  const saveServerLLMProvider = async (name: string, llmProvider: string) => {
+    try {
+      setSavingLLM(true);
+      const config = getConfig();
+      const apiUrl = `${config.nlTpsApiUrl}/mcp/servers/${name}/llm-provider`;
+      const response = await fetch(apiUrl, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ llm_provider: llmProvider || null }),
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to save MCP LLM provider: ${response.status} ${response.statusText}`);
+      }
+      await fetchServers();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unknown error');
+    } finally {
+      setSavingLLM(false);
+    }
+  };
+
   useEffect(() => {
     fetchServers();
+    fetchLLMProviders();
     // 设置定时刷新
     const interval = setInterval(fetchServers, 30000); // 每30秒刷新一次
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (selectedServer?.name) {
+      fetchServerLLMProvider(selectedServer.name);
+    }
+  }, [selectedServer?.name]);
 
   // 刷新服务器状态
   const refreshServerStatus = async (name: string) => {
@@ -265,7 +331,20 @@ const MCPManagement = () => {
         {/* 右侧：详情面板 */}
         <div className="flex-1 overflow-y-auto p-6">
           {showDetails && selectedServer ? (
-            <ServerDetails server={selectedServer} onDelete={deleteServer} onClose={() => setShowDetails(false)} getStatusColor={getStatusColor} getStatusIcon={getStatusIcon} refreshServerStatus={refreshServerStatus} toggleServer={toggleServer} />
+            <ServerDetails
+              server={selectedServer}
+              llmProviders={llmProviders}
+              selectedLLM={selectedServerLLM}
+              savingLLM={savingLLM}
+              onChangeLLM={setSelectedServerLLM}
+              onSaveLLM={saveServerLLMProvider}
+              onDelete={deleteServer}
+              onClose={() => setShowDetails(false)}
+              getStatusColor={getStatusColor}
+              getStatusIcon={getStatusIcon}
+              refreshServerStatus={refreshServerStatus}
+              toggleServer={toggleServer}
+            />
           ) : (
             <div className="flex items-center justify-center h-full text-slate-600">
               <div className="text-center">
@@ -285,6 +364,11 @@ const MCPManagement = () => {
 // 服务器详情组件
 interface ServerDetailsProps {
   server: MCPServer;
+  llmProviders: LLMProvider[];
+  selectedLLM: string;
+  savingLLM: boolean;
+  onChangeLLM: (value: string) => void;
+  onSaveLLM: (name: string, llmProvider: string) => Promise<void>;
   onDelete: (name: string) => void;
   onClose: () => void;
   getStatusColor: (status: string) => string;
@@ -293,7 +377,20 @@ interface ServerDetailsProps {
   toggleServer: (name: string, action: 'start' | 'stop') => Promise<void>;
 }
 
-const ServerDetails = ({ server, onDelete, onClose, getStatusColor, getStatusIcon, refreshServerStatus, toggleServer }: ServerDetailsProps) => (
+const ServerDetails = ({
+  server,
+  llmProviders,
+  selectedLLM,
+  savingLLM,
+  onChangeLLM,
+  onSaveLLM,
+  onDelete,
+  onClose,
+  getStatusColor,
+  getStatusIcon,
+  refreshServerStatus,
+  toggleServer,
+}: ServerDetailsProps) => (
   <div className="space-y-6">
     <div className="bg-slate-50 rounded-lg p-6 space-y-4">
       <div className="flex items-center justify-between">
@@ -350,6 +447,34 @@ const ServerDetails = ({ server, onDelete, onClose, getStatusColor, getStatusIco
           <p className="text-slate-900">{new Date(server.last_heartbeat).toLocaleString()}</p>
         </div>
       )}
+
+      <div>
+        <label className="text-sm font-semibold text-slate-700">LLM Provider</label>
+        <div className="flex items-center gap-2 mt-2">
+          <select
+            value={selectedLLM}
+            onChange={(e) => onChangeLLM(e.target.value)}
+            className="px-3 py-2 border border-slate-300 rounded-lg bg-white text-slate-900 text-sm min-w-[220px]"
+          >
+            <option value="">(Use Default / None)</option>
+            {llmProviders.map((p) => (
+              <option key={p.name} value={p.name}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={() => onSaveLLM(server.name, selectedLLM)}
+            disabled={savingLLM}
+            className="px-3 py-2 bg-indigo-500 text-white rounded-lg text-sm font-medium hover:bg-indigo-600 disabled:opacity-50"
+          >
+            {savingLLM ? 'Saving...' : 'Save'}
+          </button>
+        </div>
+        <p className="text-xs text-slate-500 mt-1">
+          Runtime binding for this MCP. Changes apply without docker restart.
+        </p>
+      </div>
 
       {server.metadata?.dependencies && server.metadata.dependencies.length > 0 && (
         <div>

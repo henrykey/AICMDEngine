@@ -222,7 +222,12 @@ class ExternalMCPServer(BaseMCPServer):
         logger.info(f"Connecting to HTTP MCP '{self.name}': {self.url}")
 
         self.http_session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=self.timeout, connect=30, sock_read=self.timeout)
+            timeout=aiohttp.ClientTimeout(total=self.timeout, connect=30, sock_read=self.timeout),
+            # Avoid "Chunk too big" on large streamable-http/SSE JSON-RPC responses
+            # (e.g. finalize_task returning merged markdown/rag for many pages).
+            read_bufsize=8 * 1024 * 1024,
+            max_line_size=8 * 1024 * 1024,
+            max_field_size=64 * 1024,
         )
 
         try:
@@ -607,7 +612,8 @@ class ExternalMCPServer(BaseMCPServer):
 
     async def _send_http_request(
         self,
-        request: Dict[str, Any]
+        request: Dict[str, Any],
+        allow_session_recover: bool = True,
     ) -> tuple:
         """向 streamable-http MCP 端点发送 JSON-RPC 请求。
 
@@ -652,6 +658,29 @@ class ExternalMCPServer(BaseMCPServer):
 
                 if resp.status != 200:
                     body = await resp.text()
+                    body_lc = body.lower()
+                    # streamable-http server重启后，旧session会失效（404 Session not found）。
+                    # 自动重建session并重试一次，避免上层直接拿到 "No response from external MCP"。
+                    should_recover = (
+                        allow_session_recover
+                        and not is_notification
+                        and not self.sse_mode
+                        and bool(self.http_session_id)
+                        and resp.status == 404
+                        and "session" in body_lc
+                        and "not found" in body_lc
+                    )
+                    if should_recover:
+                        logger.warning(
+                            "HTTP MCP '%s' session expired (404 Session not found), recovering session and retrying once",
+                            self.name,
+                        )
+                        recovered = await self._recover_streamable_http_session()
+                        if recovered:
+                            return await self._send_http_request(
+                                request,
+                                allow_session_recover=False,
+                            )
                     logger.error(
                         f"HTTP MCP '{self.name}' request failed: "
                         f"{resp.status} {body[:200]}"
@@ -682,8 +711,43 @@ class ExternalMCPServer(BaseMCPServer):
                     return None, session_id
 
         except Exception as e:
-            logger.error(f"HTTP request error for '{self.name}': {e}")
+            logger.error(
+                "HTTP request error for '%s': %s (%r)",
+                self.name,
+                e.__class__.__name__,
+                e,
+            )
             raise
+
+    async def _recover_streamable_http_session(self) -> bool:
+        """重建失效的 streamable-http session，并返回是否成功。"""
+        if self.sse_mode:
+            return False
+        old_session_id = self.http_session_id
+        self.http_session_id = None
+        try:
+            ok = await self._probe_streamable_http()
+            if ok:
+                logger.info(
+                    "HTTP MCP '%s' session recovered: %s -> %s",
+                    self.name,
+                    old_session_id or "<none>",
+                    self.http_session_id or "<none>",
+                )
+                return True
+            logger.error(
+                "HTTP MCP '%s' session recover failed: streamable-http probe returned False",
+                self.name,
+            )
+            return False
+        except Exception as err:
+            logger.error(
+                "HTTP MCP '%s' session recover failed: %s (%r)",
+                self.name,
+                err.__class__.__name__,
+                err,
+            )
+            return False
 
     async def _register_external_tool(self, tool_def: Dict[str, Any]):
         """注册外部工具到本地MCP"""

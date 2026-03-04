@@ -10,6 +10,7 @@ htmlcov/
 coverage.xml
 *.cover
 **/__pycache__
+**/data
 *.pyc
 *.pyo
 *.pyd
@@ -27,7 +28,7 @@ ENV/
 venv.bak/
 
 # Test scripts (temporary development tools)
-tests/
+tests/__pycache__
 
 
 # Git worktrees
