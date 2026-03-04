@@ -273,7 +273,7 @@ class MCPProtocolHandler:
 
         params = message.params or {}
         tool_name = params.get("name")
-        arguments = params.get("arguments", {})
+        arguments = params.get("arguments", {}) or {}
 
         if not tool_name:
             raise ValueError("Missing tool name")
@@ -286,6 +286,14 @@ class MCPProtocolHandler:
         mcp_name, tool_name = parts
 
         logger.info(f"Executing tool: {mcp_name}.{tool_name}")
+
+        # Inject per-MCP LLM provider configuration for external OCR/VLM MCPs.
+        arguments = await self._inject_external_vlm_config(
+            mcp_name=mcp_name,
+            tool_name=tool_name,
+            arguments=arguments,
+            context=context,
+        )
 
         # 执行工具（传递JWT token和tenant_id）
         try:
@@ -302,12 +310,105 @@ class MCPProtocolHandler:
                     "type": "text",
                     "text": result.content
                 }],
-                "isError": not result.success
+                "isError": bool(getattr(result, "is_error", False))
             }
 
         except Exception as e:
             logger.error(f"Tool execution error: {e}")
             raise
+
+    async def _inject_external_vlm_config(
+        self,
+        mcp_name: str,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Inject vlm_config for external MCPs from runtime MCP->LLM binding.
+        Priority:
+        1) Explicit request args (caller-provided vlm_config/vlm_defaults)
+        2) MongoDB mcp_server_settings.llm_provider
+        3) EXTERNAL_MCPS static config field (llm_provider/vlm)
+        """
+        args = dict(arguments or {})
+
+        # Respect explicit caller override.
+        if args.get("vlm_config") or args.get("vlm_defaults"):
+            logger.info(
+                "[%s.%s] caller provided VLM config directly; skip router injection",
+                mcp_name,
+                tool_name,
+            )
+            return args
+
+        # Currently only pdf2md-enhanced requires runtime injected vlm_config.
+        if mcp_name != "pdf2md-enhanced":
+            return args
+
+        provider_name = await self._resolve_mcp_llm_provider(mcp_name, context)
+        if not provider_name:
+            logger.info("[%s.%s] no MCP->LLM binding found; skip VLM injection", mcp_name, tool_name)
+            return args
+
+        provider_manager = context.get("provider_manager")
+        if provider_manager is None:
+            logger.warning(f"[{mcp_name}] provider_manager unavailable, skip VLM injection")
+            return args
+
+        provider = provider_manager.get_provider(provider_name)
+        if not provider:
+            logger.warning(f"[{mcp_name}] provider '{provider_name}' not found, skip VLM injection")
+            return args
+
+        api_key = provider_manager.config_loader.get_api_key(provider.api_key_ref)
+        if not api_key:
+            logger.warning(f"[{mcp_name}] provider '{provider_name}' api_key not available, skip VLM injection")
+            return args
+
+        vlm_config = {
+            "provider": provider.name,
+            "model": provider.model,
+            "base_url": provider.base_url,
+            "api_key": api_key,
+            "timeout_sec": provider.timeout,
+            "temperature": provider.temperature,
+        }
+
+        if tool_name == "start_task":
+            args["vlm_defaults"] = vlm_config
+        elif tool_name == "process_task_page":
+            args["vlm_config"] = vlm_config
+
+        return args
+
+    async def _resolve_mcp_llm_provider(self, mcp_name: str, context: Dict[str, Any]) -> Optional[str]:
+        mongodb = context.get("mongodb")
+        if mongodb is not None:
+            try:
+                doc = await mongodb.mcp_server_settings.find_one({"server_name": mcp_name})
+                if doc and doc.get("llm_provider"):
+                    return str(doc.get("llm_provider")).strip()
+            except Exception as exc:
+                logger.warning(f"[{mcp_name}] failed to read mcp_server_settings: {exc}")
+
+        registry = context.get("registry")
+        if registry:
+            mcp = registry.get_mcp(mcp_name)
+            cfg = getattr(mcp, "external_config", {}) if mcp else {}
+            static_provider = cfg.get("llm_provider") or cfg.get("vlm")
+            if static_provider:
+                return str(static_provider).strip()
+
+        return None
+
+    @staticmethod
+    def _mask_secret(value: str) -> str:
+        if not value:
+            return ""
+        if len(value) <= 8:
+            return "***"
+        return f"{value[:4]}***{value[-4:]}"
 
     async def _handle_resources_list(
         self,
