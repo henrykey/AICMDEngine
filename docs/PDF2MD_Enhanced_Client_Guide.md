@@ -75,6 +75,19 @@ Client
   -> finalize_task
 ```
 
+## 4.3 Multi-page Mechanism (Important)
+
+For multi-page documents, processing is still page-serial at task level:
+
+1. Create one task (`start_task`) with target page list/range
+2. Execute `process_task_page` **page by page** (recommended in order)
+3. Persist each page result immediately (append mode)
+4. Build merged outputs and indexes on client side
+
+Notes:
+- The service is task-based orchestration over single-page execution, not one-shot full-document parsing.
+- Ordered processing is strongly recommended for better cross-page context continuity.
+
 ---
 
 ## 5. Dynamic VLM Injection
@@ -198,6 +211,23 @@ Expected response (simplified):
 Default (`none`) returns summary/page stats only.
 Use `markdown`/`rag`/`both` only when you intentionally need server-side merged content.
 
+## 6.4 Required client-side post-processing
+
+When `merge_mode=none` (default), client must handle:
+
+1. Per-page persistence
+- Save each page result right after `process_task_page` returns.
+- Do not wait for whole task completion.
+
+2. Merge strategy
+- Build merged markdown from page `render.markdown` in page order.
+- Build merged rag from page `rag` objects in page order.
+
+3. Index construction (RAG)
+- Build retrieval units using page-level `rag.page_text` + `rag.elements[*].semantic_desc`.
+- Keep page/section trace fields (`page_no`, `section_path`, `element_id`) for source attribution.
+- Chunking/vectorization/vectorless indexing should be done in client pipeline (e.g., LangChain).
+
 ---
 
 ## 7. Client State Management
@@ -288,6 +318,7 @@ Backoff suggestion:
 - page-batch processing
 - incremental persistence of page outputs
 - periodic status checks
+- client-side incremental index build (avoid full-doc in-memory merge)
 
 ---
 
@@ -346,6 +377,7 @@ final = call_tool("finalize_task", {
 5. Can finalize with `merge_mode=none` and complete client-side merge
 6. Can explicitly enable `markdown`/`rag`/`both` merge when required
 7. Can handle retries and partial failures safely
+8. Can build client-side retrieval index from per-page rag outputs
 
 ---
 

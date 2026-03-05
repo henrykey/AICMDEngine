@@ -61,15 +61,27 @@ def process_page(
         if mode == "DIRECT":
             markdown = _clean_markdown(page.get_text("text") or "")
             structured = {"formulas": [], "tables": [], "figures": []}
+            rag_page_text = ""
         elif mode == "FULL_VLM":
-            markdown = _clean_markdown(vlm.full_page_markdown(str(image_path)))
-            vlm_calls += 1
-            structured = vlm.extract_region_structured(str(image_path))
-            vlm_calls += 1
+            rag_page_text = ""
+            try:
+                dual = vlm.full_page_dual_output(str(image_path))
+                markdown = _clean_markdown(dual.get("render") or "")
+                rag_obj = dual.get("rag") or {}
+                rag_page_text = str(rag_obj.get("page_text") or "").strip()
+                structured = _normalize_structured(rag_obj.get("elements"))
+                vlm_calls += 1
+            except Exception as err:
+                logger.warning("FULL_VLM dual-output failed, fallback to split calls: %r", err)
+                markdown = _clean_markdown(vlm.full_page_markdown(str(image_path)))
+                vlm_calls += 1
+                structured = vlm.extract_region_structured(str(image_path))
+                vlm_calls += 1
         else:  # REGION_VLM
             markdown = _clean_markdown(page.get_text("text") or "")
             structured = vlm.extract_region_structured(str(image_path))
             vlm_calls += 1
+            rag_page_text = ""
 
     doc.close()
 
@@ -81,7 +93,14 @@ def process_page(
         "open_formula": None,
     }
 
-    rag_content = _build_rag_content(markdown, structured)
+    rag_content = _build_rag_content(markdown, structured, rag_page_text=rag_page_text)
+
+    rag_obj = {
+        "content": rag_content,
+        "elements": structured,
+    }
+    if _should_emit_chunks(rc):
+        rag_obj["chunks"] = _build_chunks(rag_content, chunk_size=rc["chunk_size"])
 
     result = {
         "task_page_id": hashlib.sha1(f"{source_path}:{page_no}".encode("utf-8")).hexdigest()[:16],
@@ -93,11 +112,7 @@ def process_page(
             "vlm_calls": vlm_calls,
         },
         "render": {"markdown": markdown},
-        "rag": {
-            "content": rag_content,
-            "chunks": _build_chunks(rag_content, chunk_size=rc["chunk_size"]),
-            "elements": structured,
-        },
+        "rag": rag_obj,
         "elements": {
             "tables": structured.get("tables", []),
             "formulas": structured.get("formulas", []),
@@ -119,6 +134,9 @@ def _routing_defaults(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "table_score_region_vlm": float(c.get("table_score_region_vlm", 0.20)),
         "render_dpi": int(c.get("render_dpi", 220)),
         "chunk_size": int(c.get("chunk_size", 700)),
+        "enable_chunks": bool(c.get("enable_chunks", False)),
+        "chunk_policy": str(c.get("chunk_policy", "disabled")),
+        "task_total_pages": int(c.get("__task_total_pages", 1)),
     }
 
 
@@ -216,8 +234,9 @@ def _extract_section(markdown: str) -> Optional[str]:
     return None
 
 
-def _build_rag_content(markdown: str, structured: Dict[str, Any]) -> str:
-    parts = [markdown.strip()] if markdown.strip() else []
+def _build_rag_content(markdown: str, structured: Dict[str, Any], rag_page_text: str = "") -> str:
+    base = rag_page_text.strip() or markdown.strip()
+    parts = [base] if base else []
 
     formulas = structured.get("formulas") or []
     if formulas:
@@ -232,6 +251,34 @@ def _build_rag_content(markdown: str, structured: Dict[str, Any]) -> str:
         parts.append("[FIGURES]\n" + "\n".join([str(x).strip() for x in figures if str(x).strip()]))
 
     return "\n\n".join([p for p in parts if p])
+
+
+def _normalize_structured(value: Any) -> Dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+
+    def _as_list(name: str) -> list[str]:
+        v = raw.get(name)
+        if isinstance(v, list):
+            return [str(x).strip() for x in v if str(x).strip()]
+        return []
+
+    return {
+        "formulas": _as_list("formulas"),
+        "tables": _as_list("tables"),
+        "figures": _as_list("figures"),
+    }
+
+
+def _should_emit_chunks(rc: Dict[str, Any]) -> bool:
+    if not rc.get("enable_chunks", False):
+        return False
+    policy = str(rc.get("chunk_policy", "disabled")).strip().lower()
+    total_pages = int(rc.get("task_total_pages", 1))
+    if policy == "single_page_dev":
+        return total_pages == 1
+    if policy == "multi_page_batch":
+        return total_pages > 1
+    return False
 
 
 def _build_chunks(text: str, chunk_size: int = 700) -> list[dict[str, Any]]:

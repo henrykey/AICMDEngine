@@ -71,6 +71,41 @@ class DynamicVLMClient:
         #     """
         return self._call_image_prompt(image_path, prompt, max_tokens=1600)
 
+    def full_page_dual_output(self, image_path: str) -> Dict[str, Any]:
+        """
+        One-call dual dataset extraction for FULL_VLM mode.
+        Expected JSON:
+        {
+          "render": "<markdown>",
+          "rag": {
+            "page_text": "<plain text for retrieval>",
+            "elements": {
+              "formulas": [ ... ],
+              "tables": [ ... ],
+              "figures": [ ... ]
+            }
+          }
+        }
+        """
+        prompt = (
+            "Analyze this PDF page and return strict JSON only, no markdown fence, no explanations.\n"
+            "You must output exactly keys: render, rag.\n"
+            "Rules:\n"
+            "1) Remove page number, header, footer, and footnotes from BOTH render and rag.\n"
+            "2) render: clean markdown for display; keep headings/paragraphs/list/table/formula. "
+            "Tables as markdown tables, formulas as LaTeX.\n"
+            "3) rag.page_text: plain retrieval text summary of page body (no header/footer/page number/footnotes).\n"
+            "4) rag.elements: object with keys formulas/tables/figures, each value is list of semantic descriptions.\n"
+            "5) No base64 image output.\n"
+            "Output schema:\n"
+            "{\"render\":\"...\",\"rag\":{\"page_text\":\"...\",\"elements\":{\"formulas\":[],\"tables\":[],\"figures\":[]}}}"
+        )
+        text = self._call_image_prompt(image_path, prompt, max_tokens=2200)
+        data = self._extract_json(text)
+        if not data:
+            raise ValueError("dual output json parse failed")
+        return self._normalize_dual_payload(data)
+
     def extract_region_structured(self, image_path: str) -> Dict[str, Any]:
         prompt = (
             "Extract formulas, tables and figure captions from this page and return strict JSON keys: "
@@ -148,3 +183,34 @@ class DynamicVLMClient:
             except Exception:
                 return None
         return None
+
+    def _normalize_dual_payload(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        render = data.get("render")
+        render_text = render if isinstance(render, str) else ""
+
+        rag = data.get("rag")
+        rag_obj = rag if isinstance(rag, dict) else {}
+        page_text = rag_obj.get("page_text")
+        page_text_str = page_text if isinstance(page_text, str) else ""
+
+        elements_raw = rag_obj.get("elements")
+        elements_obj = elements_raw if isinstance(elements_raw, dict) else {}
+
+        def _as_str_list(v: Any) -> list[str]:
+            if isinstance(v, list):
+                return [str(x).strip() for x in v if str(x).strip()]
+            return []
+
+        normalized_elements = {
+            "formulas": _as_str_list(elements_obj.get("formulas")),
+            "tables": _as_str_list(elements_obj.get("tables")),
+            "figures": _as_str_list(elements_obj.get("figures")),
+        }
+
+        return {
+            "render": render_text,
+            "rag": {
+                "page_text": page_text_str,
+                "elements": normalized_elements,
+            },
+        }

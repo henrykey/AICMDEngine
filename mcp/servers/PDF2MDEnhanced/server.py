@@ -68,6 +68,9 @@ async def process_task_page(
         await loop.run_in_executor(None, manager.update_page_running, task_id, page_no)
 
         task = manager.get_task(task_id)
+        effective_routing_config = dict(routing_config or {})
+        # Internal context for page processor policy decisions.
+        effective_routing_config["__task_total_pages"] = len(task.planned_pages)
         result = await asyncio.wait_for(
             loop.run_in_executor(
                 None,
@@ -76,7 +79,7 @@ async def process_task_page(
                 page_no,
                 policy,
                 effective_vlm_config,
-                routing_config,
+                effective_routing_config,
                 prev_context,
             ),
             timeout=PAGE_TIMEOUT_SEC,

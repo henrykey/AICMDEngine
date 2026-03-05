@@ -1,377 +1,328 @@
-# PDF2MD TaskFlow - Enhanced Design Specification
+# PDF2MD Enhanced - Design & Implementation Specification
 
-## 1. Naming and Positioning
+## 1. Scope
 
-- Product name: **PDF2MD TaskFlow**
-- MCP service name: **`pdf2md-enhanced`**
-- Positioning: task-oriented, page-by-page PDF understanding service for DocIntel, with resumable processing and dynamic VLM injection.
+- Service name: `pdf2md-enhanced`
+- Positioning: task-based, page-by-page PDF understanding service
+- Primary goal: produce stable per-page `render` + `rag` outputs for client-side knowledge-base construction
+- Deployment: MCP server behind MCP Router (HTTP streamable transport)
 
-This replaces the previous "lite" direction and aligns with the requirement of an **enhanced** PDF2MD architecture.
-
----
-
-## 2. Background and Problem Statement
-
-Current PDF2MD logic is mixed:
-- Multiple pathways (legacy + v2 tools)
-- MinerU and Fitz paths coexist with inconsistent behavior
-- Scan/text decision is too coarse in some branches
-- Task identity and cross-page continuity are weak for large documents and multi-client concurrency
-
-DocIntel PaddleOCR already uses task-based resumable processing. PDF2MD should follow the same operational pattern.
+This document is the implementation baseline for PDF2MD Enhanced v2.
 
 ---
 
-## 3. Core Requirements
+## 2. Core Principles
 
-## 3.1 Functional Requirements
+1. Default is page-level processing
+- Parse unit is always one page.
+- Multi-page work is orchestration over many single-page calls.
 
-1. **Single-page processing as core unit**
-- Every actual parse operation is page-scoped.
-- Supports one page at a time or many pages through task orchestration.
+2. Client owns merge/chunk/index by default
+- MCP returns per-page atomic results.
+- Client (LangChain pipeline) handles cross-page merge, chunking, embedding/vectorless indexing.
 
-2. **Task concept (mandatory)**
-- Client starts a task with name and page range/list.
-- Pages are processed independently but linked by task context.
-- Must support checkpoint/resume and retry by page.
+3. Server-side merge is opt-in only
+- `finalize_task` default `merge_mode=none`.
+- `markdown|rag|both` only when explicitly requested.
 
-3. **No MinerU dependency in new service**
-- Remove MinerU from the new service execution path.
-- Keep Fitz/PyMuPDF for PDF reading, text-layer extraction, rendering, geometry.
-- OCR/semantic extraction depends on external VLM only when needed.
+4. No MinerU in enhanced path
+- Use Fitz/PyMuPDF for page reading, text layer, rendering, geometry.
+- OCR/understanding by external VLM only.
 
-4. **Dynamic VLM configuration injection (mandatory)**
-- VLM config provided by caller per request/task.
-- No fixed provider/model/api key hardcoded in service runtime.
-- Supports OpenAI-compatible providers (Qwen, GPT-4o, GLM-4V, etc.).
-
-5. **Cross-page RAG continuity**
-- Return per-page RAG and Markdown.
-- Keep/return task context for chapter/table/formula continuation across pages.
-
-6. **Large PDF support**
-- Page-level idempotency
-- Partial completion
-- Resume after interruption
-- Memory-safe streaming/persisting of page results
-
-## 3.2 Non-Functional Requirements
-
-1. **Docker-first deployment**
-- Single container deployable service
-- Stateless mode by default; optional external state backend
-
-2. **Concurrency safety**
-- Multiple tasks from multiple clients must be isolated
-- Task ID used as namespace for state, cache, and logs
-
-3. **Observability**
-- Page-level metrics and routing decisions must be returned and logged
-- Each page result includes decision details (`DIRECT`, `REGION_VLM`, `FULL_VLM`)
-
-4. **Deterministic behavior**
-- Same input page + same config => same result (best effort)
-- Controlled retries and timeout policies
+5. VLM configuration is runtime injected
+- Router injects provider/model/base_url/key at call time.
+- No hardcoded provider binding in service.
 
 ---
 
-## 4. High-Level Architecture
+## 3. End-to-End Workflow
 
-```text
-Client (DocIntel)
-  -> MCP Router
-    -> pdf2md-enhanced MCP service
-       - task manager
-       - page router (direct vs vlm)
-       - page processor
-       - optional state store (redis/sqlite)
-       - result store (filesystem/object storage)
-```
+1. `health_check`
+2. `start_task`
+3. loop `process_task_page` for each planned page
+4. optional `retry_failed_pages`
+5. `get_task_status`
+6. `finalize_task` (default `none`)
 
-Key principle:
-- **Direct text extraction first** for digital-text pages
-- **VLM only when needed** (scan page or region enhancement)
+Recommended production behavior:
+- Persist each page result immediately when `process_task_page` returns.
+- Do not wait until task end to write output files.
 
 ---
 
-## 5. MCP Tool Contract
+## 4. Tool Contract
 
-## 5.1 Required Tools
+## 4.1 Required tools
 
 1. `start_task`
 - Input:
   - `task_name: str`
-  - `file_path: str` OR `file_data: base64`
+  - `file_path: str` or `file_data: base64` (mutually exclusive)
   - `pages: list[int] | null`
   - `routing_config: object | null`
-  - `vlm_defaults: object | null` (optional defaults, can still be overridden per page)
+  - `vlm_defaults: object | null` (injected by Router)
 - Output:
-  - `task_id`
-  - `total_pages`
-  - `planned_pages`
-  - `created_at`
+  - `task_id`, `task_name`, `total_pages`, `planned_pages`, `created_at`
 
 2. `process_task_page`
 - Input:
   - `task_id: str`
   - `page_no: int`
-  - `vlm_config: object` (dynamic injected; required unless policy=force_direct)
-  - `policy: "auto" | "force_direct" | "force_vlm"`
+  - `policy: auto|force_direct|force_vlm`
   - `prev_context: object | null`
+  - `vlm_config: object | null` (injected by Router)
 - Output:
+  - `task_id`, `page_no`
   - `page_result`
   - `next_context`
-  - `decision`
-  - `metrics`
+  - `vlm` (provider/model/base_url actually used)
 
-3. `finalize_task`
+3. `get_task_status`
+- Output:
+  - `state`, `completed_pages`, `failed_pages`, `pending_pages`, `progress`
+
+4. `retry_failed_pages`
+
+5. `finalize_task`
 - Input:
-  - `task_id: str`
-  - `merge_mode: "none" | "markdown" | "rag" | "both"`
+  - `merge_mode: none|markdown|rag|both`
+- Default:
+  - `none`
 - Output:
-  - `summary`
-  - `merged_markdown` (optional)
-  - `merged_rag` (optional)
-  - `page_stats`
-
-4. `get_task_status`
-- Input: `task_id`
-- Output:
-  - `state`
-  - `completed_pages`
-  - `failed_pages`
-  - `pending_pages`
-  - `progress`
-
-5. `retry_failed_pages`
-- Input: `task_id`, `pages | null`
-- Output: retry schedule/result
+  - `summary` always
+  - merged payload only if explicitly requested
 
 6. `health_check`
-- Output: service health, backend availability, version
 
-## 5.2 Optional Tools
+## 4.2 Optional tools
 
-1. `cancel_task`
-2. `get_page_result`
-3. `list_tasks`
-4. `cleanup_task`
-
----
-
-## 6. Page Routing Strategy (Improved)
-
-Replace the old coarse threshold (`chars < 10`) with a metric-driven router.
-
-## 6.1 Signals from Fitz
-
-For each page:
-- `text_chars`: non-whitespace text length
-- `text_blocks`: count of text blocks
-- `image_area_ratio`: total image area / page area
-- `drawing_density`: vector drawing count or normalized density
-- `noise_ratio`: mojibake/garbled character ratio
-- `formula_score`: formula marker score (`=`, `∑`, `∫`, superscript patterns, LaTeX-like fragments)
-- `table_score`: table structure score (alignment/separators/grid hints)
-
-## 6.2 Decision Modes
-
-1. `DIRECT`
-- Reliable text-layer page
-- Use fitz text extraction and light cleanup only
-
-2. `REGION_VLM`
-- Text is usable but formulas/tables/figures need enhancement
-- Extract text directly + VLM on selected regions
-
-3. `FULL_VLM`
-- Scan-like page or text-layer unusable
-- Render full page image and VLM OCR/structure extraction
-
-## 6.3 Suggested Initial Rules
-
-- If `text_chars < 80` and `image_area_ratio > 0.55` -> `FULL_VLM`
-- Else if `noise_ratio > 0.30` -> `FULL_VLM`
-- Else if `formula_score >= threshold` or `table_score >= threshold` -> `REGION_VLM`
-- Else -> `DIRECT`
-
-All thresholds must be configurable via `routing_config`.
+- `cancel_task`
+- `get_page_result`
+- `list_tasks`
+- `cleanup_task`
 
 ---
 
-## 7. Dynamic VLM Injection
+## 5. Page Routing Strategy
 
-## 7.1 Per-page injected config
+Router decides one of:
+- `DIRECT`: text layer reliable, no VLM call
+- `REGION_VLM`: text layer usable, VLM for structure enhancement
+- `FULL_VLM`: scan-like/unreliable text, full-page VLM extraction
 
-`vlm_config` schema:
-- `provider`
-- `model`
-- `api_key`
-- `base_url`
-- `timeout_sec` (optional)
-- `max_retries` (optional)
-- `temperature` (optional)
-- `extra_headers` (optional)
+Signals (from Fitz):
+- `text_chars`, `text_blocks`, `image_area_ratio`, `noise_ratio`, `formula_score`, `table_score`
 
-No persistent server-side binding to one provider/model.
-
-## 7.2 Priority
-
-1. `process_task_page.vlm_config`
-2. `start_task.vlm_defaults`
-3. service env fallback (optional, for local debugging only)
+Configurable thresholds via `routing_config`.
 
 ---
 
-## 8. Task and State Model
+## 6. FULL_VLM Optimization (Mandatory)
 
-## 8.1 Task Entity
+Current issue in many implementations: `FULL_VLM` often does two VLM calls (markdown + structured extraction).
 
-- `task_id`
-- `task_name`
-- `source_ref`
-- `total_pages`
-- `planned_pages`
-- `created_at`, `updated_at`
-- `status`: `created|running|partial_failed|completed|failed|cancelled`
-
-## 8.2 Page Entity
-
-- `task_id`, `page_no`
-- `status`: `pending|running|completed|failed`
-- `decision_mode`
-- `md_result`
-- `rag_result`
-- `elements`
-- `context_out`
-- `error`
-- `attempts`
-
-## 8.3 Context Entity (cross-page)
-
-- `current_section`
-- `open_table`
-- `open_formula`
-- `keywords_window`
-- `carry_over_text`
-
----
-
-## 9. Resume / Retry / Idempotency
-
-1. `process_task_page` must be idempotent by `(task_id, page_no, config_hash)`
-2. Resume should only process `pending/failed` pages
-3. Retry policy:
-- transient errors: bounded retries with backoff
-- deterministic parsing errors: fail-fast with structured error
-
----
-
-## 10. Output Schema (Per Page)
+Target implementation:
+- In `FULL_VLM`, perform **one VLM call** and return dual dataset in one strict JSON payload:
 
 ```json
 {
-  "task_id": "...",
-  "page_no": 12,
-  "decision": {
-    "mode": "DIRECT|REGION_VLM|FULL_VLM",
-    "reasons": ["text_chars_low", "image_ratio_high"],
-    "metrics": {
-      "text_chars": 34,
-      "image_area_ratio": 0.73,
-      "noise_ratio": 0.41,
-      "formula_score": 0.12,
-      "table_score": 0.08
-    },
-    "vlm_calls": 1
-  },
-  "render": {"markdown": "..."},
+  "render": "...markdown...",
   "rag": {
-    "content": "...",
-    "chunks": [],
-    "elements": []
-  },
-  "elements": {
-    "tables": [],
-    "formulas": [],
-    "figures": []
-  },
-  "next_context": {}
+    "page_text": "...plain retrieval text...",
+    "elements": [
+      {
+        "id": "p14_t1",
+        "type": "table",
+        "anchor": "表1",
+        "semantic_desc": "...",
+        "raw_markdown": "..."
+      },
+      {
+        "id": "p14_f2",
+        "type": "formula",
+        "semantic_desc": "...",
+        "latex": "..."
+      }
+    ]
+  }
 }
 ```
 
----
+Fallback rule:
+- If strict JSON parse fails, fallback to legacy split path.
 
-## 11. Docker Deployment Requirements
-
-1. Service image includes:
-- Python runtime
-- `pymupdf` (fitz)
-- MCP runtime libraries
-- OpenAI-compatible client library
-
-2. No MinerU models or runtime required.
-
-3. Runtime mounts:
-- input directory (optional)
-- output/task result directory
-- optional state backend config
-
-4. Runtime config:
-- concurrency limits
-- timeout defaults
-- logging level
+Benefits:
+- lower latency/cost
+- stronger consistency between render/rag
+- less prompt drift across calls
 
 ---
 
-## 12. Compatibility with DocIntel
+## 7. Output Normalization Rules
 
-1. Align with PaddleOCR task-style operation:
-- start task
-- process page(s)
-- query status
-- finalize/merge
+Applied per page before returning to client:
 
-2. Frontend can treat PDF2MD TaskFlow as another task engine with page-level progress.
+1. Remove wrapper fences
+- Strip one outer code fence like ```` ```markdown ... ``` ````.
 
-3. Existing multi-process orchestration can isolate by `task_id` with no cross-task contamination.
+2. Remove noisy layout content
+- Remove page number, header, footer, footnotes (including footnote index/text).
+- This rule must be in prompt and can be reinforced by post-cleaning.
 
----
-
-## 13. Security and Compliance
-
-1. Never persist plaintext API key in task state/result logs.
-2. Mask keys in logs and diagnostics.
-3. Enforce max page count and max image size to prevent abuse.
-4. Provide configurable redaction for sensitive output.
+3. Keep content semantics
+- Keep tables/formulas/figures as meaningful content.
+- Do not drop section titles or standard references in body.
 
 ---
 
-## 14. Migration Plan
+## 8. VLM Prompt Requirements
 
-1. Keep current `PDF2MD` service unchanged during migration.
-2. Introduce new `pdf2md-enhanced` service in parallel.
-3. A/B verify per-page outputs on representative documents.
-4. Switch router binding after acceptance.
-5. Deprecate legacy tools after stabilization.
+Dual-output prompt must explicitly enforce:
 
----
-
-## 15. Implementation Phases
-
-1. Phase 1: skeleton + task tools + direct extraction path
-2. Phase 2: page router + full VLM mode
-3. Phase 3: region-level VLM enhancement + cross-page context
-4. Phase 4: finalize/merge + retry/resume hardening + metrics
-5. Phase 5: production tuning and rollout
+- Produce `render` and `rag` together in one JSON.
+- Remove `页号/页眉/页脚/注脚` in both datasets.
+- No base64 image output.
+- Formula as LaTeX for render; semantic meaning for rag.
+- Table as Markdown/HTML for render; semantic summary for rag.
 
 ---
 
-## 16. Acceptance Criteria
+## 9. Data Model for Next-Stage RAG
 
-1. Can process a 500+ page PDF via task workflow without memory explosion.
-2. Resume works after interruption at arbitrary page.
-3. Decision mode is explicit and traceable for every processed page.
-4. VLM provider/model can be changed per request without code change.
-5. No MinerU dependency in runtime path.
+Per-page canonical record (from MCP):
 
+```json
+{
+  "task_id": "task_xxx",
+  "doc_id": "gb150_2024",
+  "page_no": 14,
+  "section_path": ["5", "5.4", "5.4.1"],
+  "render": {
+    "markdown": "..."
+  },
+  "rag": {
+    "page_text": "...",
+    "elements": [
+      {
+        "id": "p14_t1",
+        "type": "table|formula|figure",
+        "anchor": "表1",
+        "semantic_desc": "...",
+        "raw_markdown": "...",
+        "latex": "...",
+        "keywords": ["..."]
+      }
+    ]
+  },
+  "trace": {
+    "source_page_no": 14,
+    "model": "qwen...",
+    "provider": "multmode"
+  }
+}
+```
+
+Notes:
+- `chunks` are **not mandatory** in MCP output.
+- `chunks` are recommended to be generated by client pipeline.
+
+---
+
+## 10. Responsibilities Split
+
+MCP responsibilities:
+- parse single page
+- produce normalized per-page `render` + `rag`
+- maintain task/page states
+
+Client responsibilities:
+- incremental persistence (append per page)
+- cross-page merge
+- chunking strategy
+- embedding/vectorless indexing
+- retrieval/rerank policy
+
+This split is required for flexibility and avoids oversized server responses.
+
+---
+
+## 11. File Transport Rules
+
+`start_task` input policy:
+
+1. same host/shared FS:
+- use `file_path`
+
+2. docker/remote MCP cannot access host file:
+- use `file_data` (base64)
+- recommended optimization: send subset PDF for selected pages
+
+---
+
+## 12. finalize_task Policy
+
+Default:
+- `merge_mode=none`
+- return summary only
+
+Explicit modes:
+- `markdown`: include merged markdown
+- `rag`: include merged rag
+- `both`: include both
+
+Warning:
+- `markdown/rag/both` can create large payloads and may hit transport limits.
+
+---
+
+## 13. Observability & Error Handling
+
+Required logs:
+- task create/start/end
+- page decision mode
+- per-page latency
+- VLM used (`provider/model/base_url` masked key)
+
+Retry policy:
+- retryable: timeout, 429, transient 5xx
+- non-retryable: schema errors, invalid credentials, page out of range
+
+Page timeout:
+- enforce page-level timeout and mark page failed deterministically
+
+---
+
+## 14. Implementation Checklist
+
+1. Prompt layer
+- [x] update dual-output prompt with header/footer/page-number/footnote removal
+- [x] enforce strict JSON output
+
+2. FULL_VLM execution
+- [x] implement one-call dual-output method
+- [x] keep fallback for parse failure
+
+3. Result schema
+- [ ] align per-page result with canonical record
+- [ ] include `trace` and stable element ids
+
+4. finalize behavior
+- [ ] keep `merge_mode=none` default
+- [ ] avoid large payload by default
+
+5. Client integration
+- [ ] append-per-page persistence in test/client scripts
+- [ ] client-side chunk/index pipeline (LangChain)
+
+6. Documentation
+- [ ] keep client guide synchronized with this design
+
+---
+
+## 15. Acceptance Criteria
+
+1. For multi-page run, client receives and persists each page result incrementally.
+2. `merge_mode=none` completes without large payload transfer.
+3. FULL_VLM uses one VLM call for dual output in normal path.
+4. Output no longer contains page number/header/footer/footnote in render/rag.
+5. RAG elements are semantically usable for downstream chunking/indexing.

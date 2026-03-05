@@ -16,6 +16,7 @@ import re
 import time
 from pathlib import Path
 import argparse
+from typing import Any, Dict, List
 
 import aiohttp
 import fitz
@@ -88,6 +89,114 @@ def normalize_markdown_output(text: str) -> str:
     if m:
         return m.group(1).strip()
     return raw
+
+
+def _extract_keywords(text: str, limit: int = 6) -> List[str]:
+    words = re.findall(r"[A-Za-z][A-Za-z0-9_\\-]{1,}|[\u4e00-\u9fff]{2,8}", text or "")
+    seen = set()
+    out = []
+    for w in words:
+        k = w.strip()
+        if not k:
+            continue
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(k)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _build_canonical_page_record(
+    task_id: str,
+    doc_id: str,
+    source_page_no: int,
+    page_result: Dict[str, Any],
+    next_context: Dict[str, Any],
+    vlm_meta: Dict[str, Any],
+) -> Dict[str, Any]:
+    render_markdown = normalize_markdown_output(((page_result.get("render") or {}).get("markdown") or ""))
+    rag_obj = page_result.get("rag") or {}
+    page_text = str(rag_obj.get("content") or "").strip() or render_markdown
+
+    section = str((next_context or {}).get("current_section") or "").strip()
+    section_path = section.split(".") if section else []
+
+    elements_block = (rag_obj.get("elements") or {}) if isinstance(rag_obj, dict) else {}
+    formulas = elements_block.get("formulas") or []
+    tables = elements_block.get("tables") or []
+    figures = elements_block.get("figures") or []
+
+    flat_elements: List[Dict[str, Any]] = []
+    refs: List[str] = []
+
+    for idx, val in enumerate(tables, start=1):
+        text = str(val).strip()
+        if not text:
+            continue
+        eid = f"p{source_page_no}_t{idx}"
+        refs.append(eid)
+        flat_elements.append(
+            {
+                "id": eid,
+                "type": "table",
+                "anchor": None,
+                "raw_markdown": text,
+                "semantic_desc": text[:400],
+                "keywords": _extract_keywords(text),
+            }
+        )
+
+    for idx, val in enumerate(formulas, start=1):
+        text = str(val).strip()
+        if not text:
+            continue
+        eid = f"p{source_page_no}_f{idx}"
+        refs.append(eid)
+        flat_elements.append(
+            {
+                "id": eid,
+                "type": "formula",
+                "anchor": None,
+                "latex": text,
+                "semantic_desc": text[:280],
+                "keywords": _extract_keywords(text),
+            }
+        )
+
+    for idx, val in enumerate(figures, start=1):
+        text = str(val).strip()
+        if not text:
+            continue
+        eid = f"p{source_page_no}_g{idx}"
+        refs.append(eid)
+        flat_elements.append(
+            {
+                "id": eid,
+                "type": "figure",
+                "anchor": None,
+                "semantic_desc": text[:400],
+                "keywords": _extract_keywords(text),
+            }
+        )
+
+    return {
+        "task_id": task_id,
+        "doc_id": doc_id,
+        "page_no": source_page_no,
+        "section_path": section_path,
+        "page_text": page_text,
+        "elements": flat_elements,
+        # chunks are intentionally not generated here; chunking is client-pipeline responsibility.
+        "trace": {
+            "source_page_no": source_page_no,
+            "source_offsets": [],
+            "model": (vlm_meta or {}).get("model"),
+            "provider": (vlm_meta or {}).get("provider"),
+            "base_url": (vlm_meta or {}).get("base_url"),
+        },
+    }
 
 
 async def call_tool_with_retry(transport, tool_request, max_retries=2):
@@ -310,6 +419,7 @@ async def run_task_pages(transport, task_name, pdf_path, pages, policy, merge_mo
     if output_prefix:
         out_prefix = Path(output_prefix)
         out_prefix.parent.mkdir(parents=True, exist_ok=True)
+        doc_id = Path(pdf_path).stem
         md_file = f"{output_prefix}.md"
         rag_file = f"{output_prefix}.jsonl"
         pages_file = f"{output_prefix}.pages.jsonl"
@@ -360,11 +470,20 @@ async def run_task_pages(transport, task_name, pdf_path, pages, policy, merge_mo
         if output_prefix:
             render_text = normalize_markdown_output(((page_result.get("render") or {}).get("markdown") or ""))
             rag_obj = (page_result.get("rag") or {})
+            next_ctx = process_data.get("next_context") or {}
+            canonical = _build_canonical_page_record(
+                task_id=task_id,
+                doc_id=doc_id,
+                source_page_no=display_page_no,
+                page_result=page_result,
+                next_context=next_ctx,
+                vlm_meta=(process_data.get("vlm") or {}),
+            )
             if render_text:
                 with open(md_file, "a", encoding="utf-8") as f:
                     f.write(f"{render_text}\n\n")
             with open(rag_file, "a", encoding="utf-8") as f:
-                f.write(json.dumps({"page_no": display_page_no, "rag": rag_obj}, ensure_ascii=False) + "\n")
+                f.write(json.dumps(canonical, ensure_ascii=False) + "\n")
             with open(pages_file, "a", encoding="utf-8") as f:
                 f.write(
                     json.dumps(
