@@ -16,6 +16,7 @@ OUTPUT_DIR = os.getenv("PDF2MD_ENH_OUTPUT_DIR", "./data/output")
 PAGE_TIMEOUT_SEC = int(os.getenv("PDF2MD_ENH_PAGE_TIMEOUT_SEC", "280"))
 VLM_CALL_TIMEOUT_CAP_SEC = int(os.getenv("PDF2MD_ENH_VLM_CALL_TIMEOUT_CAP_SEC", "90"))
 VLM_MAX_RETRIES_CAP = int(os.getenv("PDF2MD_ENH_VLM_MAX_RETRIES_CAP", "0"))
+VLM_MAX_TOKENS_CAP = int(os.getenv("PDF2MD_ENH_VLM_MAX_TOKENS_CAP", "16384"))
 logger = logging.getLogger(__name__)
 
 mcp = FastMCP(name="pdf2md-enhanced", mask_error_details=True)
@@ -110,6 +111,7 @@ def _vlm_runtime_info(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "provider": c.get("provider"),
         "model": c.get("model"),
         "base_url": c.get("base_url"),
+        "max_tokens": c.get("max_tokens"),
     }
 
 
@@ -120,6 +122,7 @@ def _normalize_vlm_config(cfg: Optional[Dict[str, Any]]) -> Optional[Dict[str, A
     c = dict(cfg)
     raw_timeout = c.get("timeout_sec", 60)
     raw_retries = c.get("max_retries", 2)
+    raw_max_tokens = c.get("max_tokens", 4096)
     try:
         timeout_sec = int(raw_timeout)
     except Exception:
@@ -128,11 +131,16 @@ def _normalize_vlm_config(cfg: Optional[Dict[str, Any]]) -> Optional[Dict[str, A
         max_retries = int(raw_retries)
     except Exception:
         max_retries = 2
+    try:
+        max_tokens = int(raw_max_tokens)
+    except Exception:
+        max_tokens = 4096
 
     # Avoid conflicting budgets: per-call timeout/retries must fit page timeout.
     timeout_cap = max(20, min(VLM_CALL_TIMEOUT_CAP_SEC, max(20, PAGE_TIMEOUT_SEC // 3)))
     c["timeout_sec"] = min(timeout_sec, timeout_cap)
     c["max_retries"] = max(0, min(max_retries, VLM_MAX_RETRIES_CAP))
+    c["max_tokens"] = max(512, min(max_tokens, VLM_MAX_TOKENS_CAP))
     return c
 
 

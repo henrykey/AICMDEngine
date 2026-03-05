@@ -55,6 +55,7 @@ def _build_vlm_config_from_provider(request: Request, provider_name: str) -> Opt
         "api_key": api_key,
         "timeout_sec": provider.timeout,
         "temperature": provider.temperature,
+        "max_tokens": provider.max_tokens,
     }
 
 @router.get("/servers")

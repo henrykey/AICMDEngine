@@ -10,6 +10,7 @@ PDF2MD Enhanced MCP服务远程调用测试工具
 """
 
 import asyncio
+import ast
 import base64
 import json
 import re
@@ -108,6 +109,235 @@ def _extract_keywords(text: str, limit: int = 6) -> List[str]:
     return out
 
 
+def _normalize_section_path(section: str) -> List[str]:
+    raw = (section or "").strip()
+    if not raw:
+        return []
+    # e.g. 5.5.2.3 -> ["5", "5.5", "5.5.2", "5.5.2.3"]
+    parts = [p for p in raw.split(".") if p]
+    out: List[str] = []
+    for i in range(1, len(parts) + 1):
+        out.append(".".join(parts[:i]))
+    return out
+
+
+def _clean_page_text_for_rag(text: str) -> str:
+    s = (text or "").replace("\r\n", "\n").strip()
+    if not s:
+        return s
+    # Remove synthetic markers appended by legacy rag builder.
+    s = re.sub(r"\n*\[(FORMULAS|TABLES|FIGURES)\]\n[\s\S]*$", "", s, flags=re.IGNORECASE)
+    lines = [ln.rstrip() for ln in s.splitlines()]
+
+    def _is_header_footer_line(line: str) -> bool:
+        t = line.strip()
+        if not t:
+            return False
+        # Typical standards header, e.g. GB/T 150.1—2024
+        if re.match(r"^[A-Z]{1,6}\s*/?\s*[A-Z]?\s*\d+(?:\.\d+)?\s*[—-]\s*\d{4}$", t):
+            return True
+        # Standalone page number.
+        if re.match(r"^\d{1,4}$", t):
+            return True
+        return False
+
+    # Trim top/bottom noisy lines only.
+    while lines and _is_header_footer_line(lines[0]):
+        lines.pop(0)
+    while lines and _is_header_footer_line(lines[-1]):
+        lines.pop()
+
+    s = "\n".join(lines).strip()
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s
+
+
+def _clean_render_markdown(text: str) -> str:
+    s = normalize_markdown_output(text or "")
+    if not s:
+        return s
+    lines = [ln.rstrip() for ln in s.splitlines()]
+
+    def _is_header_footer_line(line: str) -> bool:
+        t = line.strip()
+        if not t:
+            return False
+        if re.match(r"^[A-Z]{1,6}\s*/?\s*[A-Z]?\s*\d+(?:\.\d+)?\s*[—-]\s*\d{4}$", t):
+            return True
+        if re.match(r"^\d{1,4}$", t):
+            return True
+        return False
+
+    # remove matched header/footer lines anywhere in markdown output
+    cleaned = [ln for ln in lines if not _is_header_footer_line(ln)]
+    s = "\n".join(cleaned).strip()
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s
+
+
+def _normalize_figure_desc(value: Any) -> str:
+    s = str(value or "").strip()
+    if not s:
+        return ""
+    # Handle stringified dict: "{'description': '...'}"
+    if s.startswith("{") and s.endswith("}"):
+        try:
+            obj = ast.literal_eval(s)
+            if isinstance(obj, dict):
+                d = obj.get("description")
+                if d:
+                    return str(d).strip()
+        except Exception:
+            pass
+    return s
+
+
+def _parse_markdown_table_to_array(table_text: str) -> tuple[List[str], List[List[str]]]:
+    """
+    Parse markdown table into (columns, raw_array).
+    - columns: header row
+    - raw_array: data rows only
+    """
+    lines = [ln.strip() for ln in (table_text or "").splitlines() if ln.strip()]
+    table_lines = [ln for ln in lines if "|" in ln]
+    if not table_lines:
+        return [], []
+
+    def _split_row(line: str) -> List[str]:
+        row = line.strip()
+        if row.startswith("|"):
+            row = row[1:]
+        if row.endswith("|"):
+            row = row[:-1]
+        return [c.strip() for c in row.split("|")]
+
+    rows = [_split_row(ln) for ln in table_lines]
+    if not rows:
+        return [], []
+
+    columns = rows[0]
+    data_rows = rows[1:]
+    if data_rows:
+        sep = data_rows[0]
+        # markdown separator row: --- / :---: / ---:
+        if all(re.fullmatch(r":?-{3,}:?", (x or "").strip()) for x in sep):
+            data_rows = data_rows[1:]
+
+    return columns, data_rows
+
+
+def _extract_markdown_tables(markdown: str) -> List[str]:
+    lines = (markdown or "").splitlines()
+    out: List[str] = []
+    i = 0
+    n = len(lines)
+    sep_re = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
+    while i < n - 1:
+        if "|" in lines[i] and sep_re.match(lines[i + 1] or ""):
+            start = i
+            j = i + 2
+            while j < n and "|" in (lines[j] or ""):
+                j += 1
+            block = "\n".join([ln.rstrip() for ln in lines[start:j] if ln.strip()]).strip()
+            if block:
+                out.append(block)
+            i = j
+            continue
+        i += 1
+    return out
+
+
+def _extract_formulas_from_markdown(markdown: str) -> List[str]:
+    text = markdown or ""
+    found = re.findall(r"\$\$([\s\S]+?)\$\$|\$([^$\n]+)\$", text)
+    out: List[str] = []
+    seen = set()
+    for g1, g2 in found:
+        f = (g1 or g2 or "").strip()
+        if not f:
+            continue
+        if f in seen:
+            continue
+        seen.add(f)
+        out.append(f)
+    return out
+
+
+def _extract_figures_from_markdown(markdown: str) -> List[str]:
+    text = markdown or ""
+    out: List[str] = []
+    seen = set()
+
+    for m in re.findall(r"\[FIGURE:\s*([^\]]+)\]", text, flags=re.IGNORECASE):
+        t = m.strip()
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+
+    for m in re.findall(r"\*\[(.*?)\]\*", text):
+        t = m.strip()
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+
+    return out
+
+
+def _strip_markdown_tables(markdown: str) -> str:
+    text = markdown or ""
+    for tbl in _extract_markdown_tables(text):
+        text = text.replace(tbl, "")
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text
+
+
+def _normalize_table_value(value: Any) -> tuple[List[str], List[List[str]], str]:
+    """
+    Accept table value in multiple forms and normalize to:
+    (columns, raw_array, semantic_desc)
+    supported:
+    - markdown string table
+    - dict: {"header":[...], "rows":[...]}
+    - stringified dict of above
+    """
+    if isinstance(value, dict):
+        header = value.get("header") or value.get("columns") or []
+        rows = value.get("rows") or value.get("raw_array") or []
+        columns = [str(x).strip() for x in header if str(x).strip()]
+        raw_array = []
+        for row in rows if isinstance(rows, list) else []:
+            if isinstance(row, list):
+                raw_array.append([str(x).strip() for x in row])
+        semantic_desc = (
+            f"表格包含{len(raw_array)}行"
+            + (f"，主要列为：{'、'.join(columns[:5])}" if columns else "")
+        )
+        return columns, raw_array, semantic_desc
+
+    text = str(value or "").strip()
+    if not text:
+        return [], [], ""
+
+    # stringified dict case
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            obj = ast.literal_eval(text)
+            if isinstance(obj, dict):
+                return _normalize_table_value(obj)
+        except Exception:
+            pass
+
+    columns, raw_array = _parse_markdown_table_to_array(text)
+    if columns or raw_array:
+        semantic_desc = (
+            f"表格包含{len(raw_array)}行"
+            + (f"，主要列为：{'、'.join(columns[:5])}" if columns else "")
+        )
+    else:
+        semantic_desc = text[:400]
+    return columns, raw_array, semantic_desc
+
+
 def _build_canonical_page_record(
     task_id: str,
     doc_id: str,
@@ -116,24 +346,31 @@ def _build_canonical_page_record(
     next_context: Dict[str, Any],
     vlm_meta: Dict[str, Any],
 ) -> Dict[str, Any]:
-    render_markdown = normalize_markdown_output(((page_result.get("render") or {}).get("markdown") or ""))
+    render_markdown = _clean_render_markdown(((page_result.get("render") or {}).get("markdown") or ""))
     rag_obj = page_result.get("rag") or {}
-    page_text = str(rag_obj.get("content") or "").strip() or render_markdown
+    page_text_raw = str(rag_obj.get("page_text") or "").strip() or _strip_markdown_tables(render_markdown)
+    page_text = _clean_page_text_for_rag(page_text_raw)
 
     section = str((next_context or {}).get("current_section") or "").strip()
-    section_path = section.split(".") if section else []
+    section_path = _normalize_section_path(section)
 
     elements_block = (rag_obj.get("elements") or {}) if isinstance(rag_obj, dict) else {}
-    formulas = elements_block.get("formulas") or []
-    tables = elements_block.get("tables") or []
-    figures = elements_block.get("figures") or []
+    model_formulas = elements_block.get("formulas") or []
+    model_tables = elements_block.get("tables") or []
+    model_figures = elements_block.get("figures") or []
+
+    # Canonical RAG reconstruction rule:
+    # Prefer deterministic extraction from render markdown; fallback to model rag.elements.
+    tables = _extract_markdown_tables(render_markdown) or model_tables
+    formulas = _extract_formulas_from_markdown(render_markdown) or model_formulas
+    figures = _extract_figures_from_markdown(render_markdown) or model_figures
 
     flat_elements: List[Dict[str, Any]] = []
     refs: List[str] = []
 
     for idx, val in enumerate(tables, start=1):
-        text = str(val).strip()
-        if not text:
+        columns, raw_array, semantic_desc = _normalize_table_value(val)
+        if not columns and not raw_array and not semantic_desc:
             continue
         eid = f"p{source_page_no}_t{idx}"
         refs.append(eid)
@@ -142,9 +379,10 @@ def _build_canonical_page_record(
                 "id": eid,
                 "type": "table",
                 "anchor": None,
-                "raw_markdown": text,
-                "semantic_desc": text[:400],
-                "keywords": _extract_keywords(text),
+                "columns": columns,
+                "raw_array": raw_array,
+                "semantic_desc": semantic_desc,
+                "keywords": _extract_keywords(" ".join(columns) + " " + semantic_desc),
             }
         )
 
@@ -166,7 +404,7 @@ def _build_canonical_page_record(
         )
 
     for idx, val in enumerate(figures, start=1):
-        text = str(val).strip()
+        text = _normalize_figure_desc(val)
         if not text:
             continue
         eid = f"p{source_page_no}_g{idx}"
@@ -366,7 +604,19 @@ async def fetch_router_vlm_info(server_name: str = "pdf2md-enhanced"):
     return info
 
 
-async def run_task_pages(transport, task_name, pdf_path, pages, policy, merge_mode, check_merge, full_output, output_prefix):
+async def run_task_pages(
+    transport,
+    task_name,
+    pdf_path,
+    pages,
+    policy,
+    merge_mode,
+    check_merge,
+    full_output,
+    output_prefix,
+    render_dpi=220,
+    debug_layout_probe=False,
+):
     start_tool = "pdf2md-enhanced.start_task"
     process_tool = "pdf2md-enhanced.process_task_page"
     finalize_tool = "pdf2md-enhanced.finalize_task"
@@ -421,12 +671,12 @@ async def run_task_pages(transport, task_name, pdf_path, pages, policy, merge_mo
         out_prefix.parent.mkdir(parents=True, exist_ok=True)
         doc_id = Path(pdf_path).stem
         md_file = f"{output_prefix}.md"
-        rag_file = f"{output_prefix}.jsonl"
-        pages_file = f"{output_prefix}.pages.jsonl"
+        rag_file = f"{output_prefix}.json"
+        pages_file = f"{output_prefix}.pages.json"
         # truncate/create
         Path(md_file).write_text("", encoding="utf-8")
-        Path(rag_file).write_text("", encoding="utf-8")
-        Path(pages_file).write_text("", encoding="utf-8")
+        Path(rag_file).write_text("[]", encoding="utf-8")
+        Path(pages_file).write_text("[]", encoding="utf-8")
     prev_context = None
     for idx, page_no in enumerate(planned_pages, start=1):
         display_page_no = original_pages[page_no - 1] if used_subset_pdf and 1 <= page_no <= len(original_pages) else page_no
@@ -440,6 +690,10 @@ async def run_task_pages(transport, task_name, pdf_path, pages, policy, merge_mo
                 "task_id": task_id,
                 "page_no": page_no,
                 "policy": policy,
+                "routing_config": {
+                    "render_dpi": int(render_dpi),
+                    "debug_layout_probe": bool(debug_layout_probe),
+                },
                 "prev_context": prev_context,
             },
             req_id=1000 + page_no,
@@ -462,13 +716,13 @@ async def run_task_pages(transport, task_name, pdf_path, pages, policy, merge_mo
         )
 
         if not output_prefix:
-            render_text = normalize_markdown_output(((page_result.get("render") or {}).get("markdown") or ""))
+            render_text = _clean_render_markdown(((page_result.get("render") or {}).get("markdown") or ""))
             rag_text = ((page_result.get("rag") or {}).get("content") or "")
             print("  Render预览(前120):", render_text[:120].replace("\n", " "))
             print("  RAG预览(前120):", rag_text[:120].replace("\n", " "))
 
         if output_prefix:
-            render_text = normalize_markdown_output(((page_result.get("render") or {}).get("markdown") or ""))
+            render_text = _clean_render_markdown(((page_result.get("render") or {}).get("markdown") or ""))
             rag_obj = (page_result.get("rag") or {})
             next_ctx = process_data.get("next_context") or {}
             canonical = _build_canonical_page_record(
@@ -482,20 +736,32 @@ async def run_task_pages(transport, task_name, pdf_path, pages, policy, merge_mo
             if render_text:
                 with open(md_file, "a", encoding="utf-8") as f:
                     f.write(f"{render_text}\n\n")
-            with open(rag_file, "a", encoding="utf-8") as f:
-                f.write(json.dumps(canonical, ensure_ascii=False) + "\n")
-            with open(pages_file, "a", encoding="utf-8") as f:
-                f.write(
-                    json.dumps(
-                        {
-                            "task_page_no": page_no,
-                            "source_page_no": display_page_no,
-                            "result": page_result,
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n"
-                )
+            # Incremental pretty-json write (rewrite full array each page for readability)
+            rag_arr = []
+            pages_arr = []
+            try:
+                rag_arr = json.loads(Path(rag_file).read_text(encoding="utf-8"))
+                if not isinstance(rag_arr, list):
+                    rag_arr = []
+            except Exception:
+                rag_arr = []
+            try:
+                pages_arr = json.loads(Path(pages_file).read_text(encoding="utf-8"))
+                if not isinstance(pages_arr, list):
+                    pages_arr = []
+            except Exception:
+                pages_arr = []
+
+            rag_arr.append(canonical)
+            pages_arr.append(
+                {
+                    "task_page_no": page_no,
+                    "source_page_no": display_page_no,
+                    "result": page_result,
+                }
+            )
+            Path(rag_file).write_text(json.dumps(rag_arr, ensure_ascii=False, indent=2), encoding="utf-8")
+            Path(pages_file).write_text(json.dumps(pages_arr, ensure_ascii=False, indent=2), encoding="utf-8")
 
         page_outputs.append({
             "task_page_no": page_no,
@@ -576,7 +842,7 @@ async def run_task_pages(transport, task_name, pdf_path, pages, policy, merge_mo
                     print(f"  ✓ 已保存RAG内容到: {rag_file}")
 
     if output_prefix:
-        print(f"✓ 已按页追加保存输出文件: {output_prefix}.md / {output_prefix}.jsonl / {output_prefix}.pages.jsonl")
+        print(f"✓ 已按页增量保存输出文件: {output_prefix}.md / {output_prefix}.json / {output_prefix}.pages.json")
 
     if check_merge:
         ok, issues = validate_merge(finalize_data, merge_mode)
@@ -588,7 +854,20 @@ async def run_task_pages(transport, task_name, pdf_path, pages, policy, merge_mo
                 print(f"  - {item}")
 
 
-async def test_pdf2md_enhanced_mcp(jwt_token, page_num=None, pages=None, test_document=False, pdf_path=None, policy="auto", merge_mode="none", check_merge=False, full_output=False, output_prefix=None):
+async def test_pdf2md_enhanced_mcp(
+    jwt_token,
+    page_num=None,
+    pages=None,
+    test_document=False,
+    pdf_path=None,
+    policy="auto",
+    merge_mode="none",
+    check_merge=False,
+    full_output=False,
+    output_prefix=None,
+    render_dpi=220,
+    debug_layout_probe=False,
+):
     print("=" * 80)
     print("PDF2MD Enhanced MCP服务远程调用测试")
     print("=" * 80)
@@ -608,6 +887,8 @@ async def test_pdf2md_enhanced_mcp(jwt_token, page_num=None, pages=None, test_do
     print(f"policy: {policy}")
     print(f"merge_mode: {merge_mode}")
     print(f"check_merge: {check_merge}")
+    print(f"render_dpi: {render_dpi}")
+    print(f"debug_layout_probe: {debug_layout_probe}")
     print()
 
     if not pdf_path.exists():
@@ -657,6 +938,8 @@ async def test_pdf2md_enhanced_mcp(jwt_token, page_num=None, pages=None, test_do
                 check_merge=check_merge,
                 full_output=full_output,
                 output_prefix=output_prefix,
+                render_dpi=render_dpi,
+                debug_layout_probe=debug_layout_probe,
             )
 
     except websockets.exceptions.InvalidStatusCode as e:
@@ -692,6 +975,8 @@ def main():
     parser.add_argument('--pdf-path', type=str, default=None, help='PDF文件路径')
 
     parser.add_argument('--policy', type=str, default='auto', choices=['auto', 'force_direct', 'force_vlm'], help='页处理策略')
+    parser.add_argument('--render-dpi', type=int, default=220, help='渲染页图DPI（默认220，建议220-300）')
+    parser.add_argument('--debug-layout-probe', action='store_true', help='仅测试：启用recognize_layout探针并回传到decision.layout_probe')
     parser.add_argument('--merge-mode', type=str, default='none', choices=['none', 'markdown', 'rag', 'both'], help='finalize合并模式（默认none，由client端拼接）')
     parser.add_argument('--check-merge', action='store_true', help='启用多页合并逻辑校验')
     parser.add_argument('--full', action='store_true', help='输出完整结果，而不是预览')
@@ -732,6 +1017,8 @@ def main():
             check_merge=args.check_merge,
             full_output=args.full,
             output_prefix=args.out,
+            render_dpi=args.render_dpi,
+            debug_layout_probe=args.debug_layout_probe,
         )
 
     asyncio.run(run_with_connection_check())

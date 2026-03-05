@@ -58,6 +58,13 @@ def process_page(
         )
         vlm_calls = 0
 
+        layout_probe = None
+        if rc.get("debug_layout_probe"):
+            try:
+                layout_probe = vlm.recognize_layout(str(image_path))
+            except Exception as exc:
+                layout_probe = {"error": str(exc)}
+
         if mode == "DIRECT":
             markdown = _clean_markdown(page.get_text("text") or "")
             structured = {"formulas": [], "tables": [], "figures": []}
@@ -73,10 +80,18 @@ def process_page(
                 vlm_calls += 1
             except Exception as err:
                 logger.warning("FULL_VLM dual-output failed, fallback to split calls: %r", err)
-                markdown = _clean_markdown(vlm.full_page_markdown(str(image_path)))
-                vlm_calls += 1
-                structured = vlm.extract_region_structured(str(image_path))
-                vlm_calls += 1
+                # Default strategy: one VLM call per page in FULL_VLM.
+                # If dual-output parsing fails, avoid second VLM call by default.
+                markdown = ""
+                if rc.get("full_vlm_retry_markdown", False):
+                    markdown = _clean_markdown(vlm.full_page_markdown(str(image_path)))
+                    vlm_calls += 1
+                # Optional legacy split behavior for debugging only.
+                if rc.get("full_vlm_split_extract", False):
+                    structured = vlm.extract_region_structured(str(image_path))
+                    vlm_calls += 1
+                else:
+                    structured = {"formulas": [], "tables": [], "figures": []}
         else:  # REGION_VLM
             markdown = _clean_markdown(page.get_text("text") or "")
             structured = vlm.extract_region_structured(str(image_path))
@@ -93,7 +108,11 @@ def process_page(
         "open_formula": None,
     }
 
+    # Table reliability strategy:
+    # prefer parsing from render markdown; fallback to VLM tables; final fallback to placeholders.
+    structured["tables"] = _select_rag_tables(markdown, structured.get("tables") or [])
     rag_content = _build_rag_content(markdown, structured, rag_page_text=rag_page_text)
+    table_source = _detect_table_source(markdown, structured)
 
     rag_obj = {
         "content": rag_content,
@@ -110,6 +129,8 @@ def process_page(
             "reasons": reasons,
             "metrics": metrics,
             "vlm_calls": vlm_calls,
+            "table_source": table_source,
+            "layout_probe": layout_probe,
         },
         "render": {"markdown": markdown},
         "rag": rag_obj,
@@ -137,6 +158,9 @@ def _routing_defaults(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "enable_chunks": bool(c.get("enable_chunks", False)),
         "chunk_policy": str(c.get("chunk_policy", "disabled")),
         "task_total_pages": int(c.get("__task_total_pages", 1)),
+        "debug_layout_probe": bool(c.get("debug_layout_probe", False)),
+        "full_vlm_split_extract": bool(c.get("full_vlm_split_extract", False)),
+        "full_vlm_retry_markdown": bool(c.get("full_vlm_retry_markdown", False)),
     }
 
 
@@ -223,6 +247,7 @@ def _clean_markdown(text: str) -> str:
     m = re.match(r"^```[a-zA-Z0-9_-]*\n([\s\S]*?)\n```$", text)
     if m:
         text = m.group(1).strip()
+    text = _strip_layout_noise_lines(text)
     return text
 
 
@@ -235,7 +260,7 @@ def _extract_section(markdown: str) -> Optional[str]:
 
 
 def _build_rag_content(markdown: str, structured: Dict[str, Any], rag_page_text: str = "") -> str:
-    base = rag_page_text.strip() or markdown.strip()
+    base = _strip_layout_noise_lines(rag_page_text.strip() or markdown.strip())
     parts = [base] if base else []
 
     formulas = structured.get("formulas") or []
@@ -253,6 +278,29 @@ def _build_rag_content(markdown: str, structured: Dict[str, Any], rag_page_text:
     return "\n\n".join([p for p in parts if p])
 
 
+def _strip_layout_noise_lines(text: str) -> str:
+    if not text:
+        return text
+    lines = [ln.rstrip() for ln in text.splitlines()]
+    cleaned = [ln for ln in lines if not _is_header_footer_line(ln)]
+    out = "\n".join(cleaned).strip()
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out
+
+
+def _is_header_footer_line(line: str) -> bool:
+    t = (line or "").strip()
+    if not t:
+        return False
+    # Typical standards header: GB/T 150.1—2024
+    if re.match(r"^[A-Z]{1,6}\s*/?\s*[A-Z]?\s*\d+(?:\.\d+)?\s*[—-]\s*\d{4}$", t):
+        return True
+    # Standalone page number.
+    if re.match(r"^\d{1,4}$", t):
+        return True
+    return False
+
+
 def _normalize_structured(value: Any) -> Dict[str, Any]:
     raw = value if isinstance(value, dict) else {}
 
@@ -264,9 +312,101 @@ def _normalize_structured(value: Any) -> Dict[str, Any]:
 
     return {
         "formulas": _as_list("formulas"),
-        "tables": _as_list("tables"),
+        "tables": _normalize_table_candidates(_as_list("tables")),
         "figures": _as_list("figures"),
     }
+
+
+def _normalize_table_candidates(vlm_tables: list[str]) -> list[str]:
+    out: list[str] = []
+    for t in vlm_tables:
+        s = str(t or "").strip()
+        if not s:
+            continue
+        if s.startswith("{") and s.endswith("}"):
+            try:
+                import ast
+
+                obj = ast.literal_eval(s)
+                if isinstance(obj, dict):
+                    header = obj.get("header") or obj.get("columns") or []
+                    rows = obj.get("rows") or obj.get("raw_array") or []
+                    if isinstance(header, list) and header:
+                        lines = ["| " + " | ".join([str(x).strip() for x in header]) + " |"]
+                        lines.append("| " + " | ".join(["---"] * len(header)) + " |")
+                        if isinstance(rows, list):
+                            for row in rows:
+                                if isinstance(row, list):
+                                    cells = [str(x).strip() for x in row]
+                                    if len(cells) < len(header):
+                                        cells = cells + [""] * (len(header) - len(cells))
+                                    lines.append("| " + " | ".join(cells[: len(header)]) + " |")
+                        s = "\n".join(lines).strip()
+            except Exception:
+                pass
+        if s:
+            out.append(s)
+    return out
+
+
+def _detect_table_source(markdown: str, structured: Dict[str, Any]) -> str:
+    parsed = _extract_markdown_tables(markdown)
+    if parsed:
+        return "render_markdown"
+    if structured.get("tables"):
+        first = str((structured.get("tables") or [""])[0])
+        if first.startswith("[TABLE_PLACEHOLDER]"):
+            return "placeholder"
+        return "vlm"
+    return "none"
+
+
+def _select_rag_tables(markdown: str, vlm_tables: list[str]) -> list[str]:
+    parsed = _extract_markdown_tables(markdown)
+    if parsed:
+        return parsed
+    if vlm_tables:
+        return [str(x).strip() for x in vlm_tables if str(x).strip()]
+    anchors = _extract_table_anchors(markdown)
+    return [f"[TABLE_PLACEHOLDER] {a}: table structure unavailable; see original page." for a in anchors]
+
+
+def _extract_markdown_tables(markdown: str) -> list[str]:
+    lines = (markdown or "").splitlines()
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+    sep_re = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
+    while i < n - 1:
+        if "|" in lines[i] and sep_re.match(lines[i + 1] or ""):
+            start = i
+            j = i + 2
+            while j < n and "|" in (lines[j] or ""):
+                j += 1
+            block = "\n".join([ln.rstrip() for ln in lines[start:j] if ln.strip()]).strip()
+            if block:
+                out.append(block)
+            i = j
+            continue
+        i += 1
+    return out
+
+
+def _extract_table_anchors(markdown: str) -> list[str]:
+    anchors: list[str] = []
+    for ln in (markdown or "").splitlines():
+        t = ln.strip()
+        if not t:
+            continue
+        if re.match(r"^(表|Table)\s*[A-Za-z]?(?:\.\d+)+", t, flags=re.IGNORECASE):
+            anchors.append(t[:120])
+    seen = set()
+    uniq = []
+    for a in anchors:
+        if a not in seen:
+            seen.add(a)
+            uniq.append(a)
+    return uniq
 
 
 def _should_emit_chunks(rc: Dict[str, Any]) -> bool:

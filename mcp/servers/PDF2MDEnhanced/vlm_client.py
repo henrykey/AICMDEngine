@@ -19,6 +19,7 @@ class DynamicVLMClient:
         self.base_url = str(cfg.get("base_url") or "").strip()
         self.timeout_sec = int(cfg.get("timeout_sec", 60))
         self.max_retries = int(cfg.get("max_retries", 2))
+        self.max_tokens = int(cfg.get("max_tokens", 4096))
         self.temperature = float(cfg.get("temperature", 0.1))
         self.extra_headers = cfg.get("extra_headers") or {}
 
@@ -29,13 +30,14 @@ class DynamicVLMClient:
 
             self._client = OpenAI(api_key=self.api_key, base_url=self.base_url, default_headers=self.extra_headers)
         logger.info(
-            "DynamicVLMClient init: enabled=%s provider=%s model=%s base_url=%s timeout=%s max_retries=%s",
+            "DynamicVLMClient init: enabled=%s provider=%s model=%s base_url=%s timeout=%s max_retries=%s max_tokens=%s",
             self.enabled,
             self.provider,
             self.model,
             self.base_url,
             self.timeout_sec,
             self.max_retries,
+            self.max_tokens,
         )
 
     def ensure_enabled(self) -> None:
@@ -48,7 +50,7 @@ class DynamicVLMClient:
             "page_type(header/footer/page_number/content_summary/confidence). "
             "page_type in [normal,toc,cover,blank]."
         )
-        text = self._call_image_prompt(image_path, prompt, max_tokens=700)
+        text = self._call_image_prompt(image_path, prompt, max_tokens=min(self.max_tokens, 1200))
         data = self._extract_json(text)
         if data:
             return data
@@ -69,7 +71,7 @@ class DynamicVLMClient:
         #     - 识别类型（封面/目录/正文）
         #     - 正文：表格→Markdown，插图→详细描述，公式→LaTeX
         #     """
-        return self._call_image_prompt(image_path, prompt, max_tokens=1600)
+        return self._call_image_prompt(image_path, prompt, max_tokens=self.max_tokens)
 
     def full_page_dual_output(self, image_path: str) -> Dict[str, Any]:
         """
@@ -78,31 +80,93 @@ class DynamicVLMClient:
         {
           "render": "<markdown>",
           "rag": {
-            "page_text": "<plain text for retrieval>",
+            "page_text": "<verbatim body text for retrieval>",
             "elements": {
               "formulas": [ ... ],
               "tables": [ ... ],
-              "figures": [ ... ]
+              "illustrations": [ ... ]
             }
           }
         }
         """
+        
+        # prompt = """
+        #     You are a technical document analyst. Process the input page image and output ONLY a valid JSON object with no extra text, markdown fences, or explanations.
+
+        #     Required keys: "render", "rag".
+
+        #     Rules:
+        #     1. IGNORE ALL NON-CONTENT ARTIFACTS:
+        #     - Watermarks (e.g., faint background text/logo)
+        #     - Headers (top-aligned text, e.g., standard numbers)
+        #     - Footers (bottom-aligned text, including page numbers)
+        #     - Footnote markers (e.g., *, †, [1]) AND their associated footnote text
+        #     - Decorative borders or icons
+
+        #     2. render (for human display):
+        #     - Output clean Markdown containing ONLY:
+        #             • Tables → full markdown tables (preserve all visible rows/columns)
+        #             • Formulas → exact LaTeX expressions
+        #             • Figures → placeholder blocks: "[FIGURE: <concise textual description>]"
+        #             Description must include: shape/type (e.g., "schematic", "cross-section"), key labels (e.g., "D", "R ≥ 0.25D"), and context (e.g., "in泄放系数 table")
+        #     - DO NOT include headings, paragraphs, lists, or prose — VLM cannot reliably reconstruct layout from image alone.
+
+        #     3. rag (for retrieval/indexing):
+        #     - rag.page_text: raw body text AFTER removing all ignored artifacts above. If none remains, use "".
+        #     - rag.elements:
+        #             • formulas: list of {"latex": "...", "context": "location hint (e.g., 'below Note 2')"}
+        #             • tables: list of {"title": "Table X.Y", "description": "brief purpose", "data": [...] or "markdown string"}
+        #             • figures: list of {"id": "Fig.X.Y", "description": "concise technical description"}  
+        #             → Note: "figures" means numbered/labeled technical diagrams (e.g., schematics, cross-sections), NOT decorative art.
+
+        #     4. STRICT CONSTRAINTS:
+        #     - Never output base64 images.
+        #     - If content is partially occluded, include visible parts and mark missing cells as "..." (do not omit rows/columns).
+        #     - If uncertain, output empty string/array — NO HALLUCINATION.
+        #     - JSON must be parseable; no trailing commas, no extra fields.
+
+        #     Output schema (exact):
+        #     {
+        #         "render": "string",
+        #         "rag": {
+        #             "page_text": "string",
+        #             "elements": {
+        #             "formulas": [{"latex": "...", "context": "..."}],
+        #             "tables": [{"title": "...", "description": "...", "data": [...] or "string"}],
+        #             "figures": [{"id": "...", "description": "..."}]
+        #             }
+        #         }
+        #     }
+        # """
         prompt = (
             "Analyze this PDF page and return strict JSON only, no markdown fence, no explanations.\n"
             "You must output exactly keys: render, rag.\n"
             "Rules:\n"
-            "1) Remove page number, header, footer, and footnotes from BOTH render and rag.\n"
+            "1) Ignore and exclude all non-content artifacts: watermarks, headers, footers, page numbers, and footnote markers from BOTH render and rag. Focus only on the main technical content — tables, figures, formulas, and body text\n"
             "2) render: clean markdown for display; keep headings/paragraphs/list/table/formula. "
-            "Tables as markdown tables, formulas as LaTeX.\n"
-            "3) rag.page_text: plain retrieval text summary of page body (no header/footer/page number/footnotes).\n"
+            "Tables as markdown tables, formulas as LaTeX. "
+            "Figures are represented by placeholder blocks using textual descriptions.\n"
+            "3) rag.page_text: verbatim body text for retrieval (not a summary), after removing header/footer/page number/footnotes.\n"
             "4) rag.elements: object with keys formulas/tables/figures, each value is list of semantic descriptions.\n"
             "5) No base64 image output.\n"
+            "6) If extraction is uncertain for any field, return empty string/empty array for that field; never output invalid JSON.\n"
             "Output schema:\n"
             "{\"render\":\"...\",\"rag\":{\"page_text\":\"...\",\"elements\":{\"formulas\":[],\"tables\":[],\"figures\":[]}}}"
         )
-        text = self._call_image_prompt(image_path, prompt, max_tokens=2200)
+        text = self._call_image_prompt(image_path, prompt, max_tokens=self.max_tokens)
         data = self._extract_json(text)
         if not data:
+            # Fallback rule: if render markdown can be recovered from partial/truncated JSON,
+            # treat it as usable output and let downstream rebuild RAG from render.
+            recovered_render = self._recover_render_from_broken_json(text)
+            if recovered_render:
+                return {
+                    "render": recovered_render,
+                    "rag": {
+                        "page_text": "",
+                        "elements": {"formulas": [], "tables": [], "figures": []},
+                    },
+                }
             raise ValueError("dual output json parse failed")
         return self._normalize_dual_payload(data)
 
@@ -111,7 +175,7 @@ class DynamicVLMClient:
             "Extract formulas, tables and figure captions from this page and return strict JSON keys: "
             "formulas(list of latex strings), tables(list of markdown tables), figures(list of captions)."
         )
-        text = self._call_image_prompt(image_path, prompt, max_tokens=1800)
+        text = self._call_image_prompt(image_path, prompt, max_tokens=self.max_tokens)
         data = self._extract_json(text)
         if data:
             return data
@@ -184,6 +248,51 @@ class DynamicVLMClient:
                 return None
         return None
 
+    def _recover_render_from_broken_json(self, text: str) -> str:
+        """
+        Recover "render" field from non-parseable/truncated JSON text.
+        Returns empty string when recovery fails or content is too short to trust.
+        """
+        if not text:
+            return ""
+        # Case 1: model ignored JSON schema and returned plain markdown/text directly.
+        direct = self._maybe_direct_markdown(text)
+        if direct:
+            return direct
+        m = re.search(r'"render"\s*:\s*"((?:\\.|[^"\\])*)"', text, re.S)
+        if not m:
+            return ""
+        raw = m.group(1)
+        try:
+            render = json.loads(f'"{raw}"')
+        except Exception:
+            return ""
+        render = (render or "").strip()
+        # Heuristic: avoid using tiny/fragmented render blocks as "complete".
+        if len(render) < 120:
+            return ""
+        return render
+
+    def _maybe_direct_markdown(self, text: str) -> str:
+        s = (text or "").strip()
+        if not s:
+            return ""
+        # Strip one outer markdown fence when present.
+        if s.startswith("```"):
+            lines = s.splitlines()
+            if lines:
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            s = "\n".join(lines).strip()
+        if len(s) < 120:
+            return ""
+        # If the model ignored JSON and returned long free-form content directly,
+        # still accept it as render to keep single-call semantics.
+        if s.startswith("{") and s.endswith("}"):
+            return ""
+        return s
+
     def _normalize_dual_payload(self, data: Dict[str, Any]) -> Dict[str, Any]:
         render = data.get("render")
         render_text = render if isinstance(render, str) else ""
@@ -201,10 +310,11 @@ class DynamicVLMClient:
                 return [str(x).strip() for x in v if str(x).strip()]
             return []
 
+        illustrations = _as_str_list(elements_obj.get("illustrations")) or _as_str_list(elements_obj.get("figures"))
         normalized_elements = {
             "formulas": _as_str_list(elements_obj.get("formulas")),
             "tables": _as_str_list(elements_obj.get("tables")),
-            "figures": _as_str_list(elements_obj.get("figures")),
+            "figures": illustrations,
         }
 
         return {

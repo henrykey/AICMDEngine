@@ -373,6 +373,7 @@ class MCPProtocolHandler:
             "api_key": api_key,
             "timeout_sec": provider.timeout,
             "temperature": provider.temperature,
+            "max_tokens": provider.max_tokens,
         }
 
         if tool_name == "start_task":
