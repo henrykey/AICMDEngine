@@ -11,6 +11,7 @@ coverage.xml
 *.cover
 **/__pycache__
 **/data
+**/test
 *.pyc
 *.pyo
 *.pyd

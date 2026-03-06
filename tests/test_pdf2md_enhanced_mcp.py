@@ -43,14 +43,40 @@ class WebSocketTransport:
 
 
 def parse_pages_arg(pages_str):
+    if not pages_str or not str(pages_str).strip():
+        return []
+
+    normalized = str(pages_str).strip()
+    normalized = normalized.replace("，", ",")
+    normalized = normalized.replace("—", "-").replace("–", "-").replace("－", "-")
+
     pages = []
-    for part in pages_str.split(','):
-        part = part.strip()
-        if '-' in part:
-            start, end = part.split('-')
-            pages.extend(range(int(start), int(end) + 1))
-        else:
-            pages.append(int(part))
+    for part in normalized.split(","):
+        token = part.strip()
+        if not token:
+            continue
+
+        m = re.fullmatch(r"(\d+)\s*-\s*(\d+)", token)
+        if m:
+            start = int(m.group(1))
+            end = int(m.group(2))
+            if start <= 0 or end <= 0:
+                raise ValueError(f"invalid page range (must be >=1): {token}")
+            if start <= end:
+                pages.extend(range(start, end + 1))
+            else:
+                pages.extend(range(end, start + 1))
+            continue
+
+        if re.fullmatch(r"\d+", token):
+            page = int(token)
+            if page <= 0:
+                raise ValueError(f"invalid page number (must be >=1): {token}")
+            pages.append(page)
+            continue
+
+        raise ValueError(f"invalid --pages token: {token}")
+
     return sorted(set(pages))
 
 
@@ -81,6 +107,12 @@ def extract_pdf_pages(pdf_path: Path, pages: list[int]) -> bytes:
         return subset_doc.write()
     finally:
         doc.close()
+
+
+def split_pages_for_file_data(pages: List[int], batch_size: int = 40) -> List[List[int]]:
+    if not pages:
+        return []
+    return [pages[i:i + batch_size] for i in range(0, len(pages), batch_size)]
 
 
 def normalize_markdown_output(text: str) -> str:
@@ -457,6 +489,9 @@ async def call_tool_with_retry(transport, tool_request, max_retries=2):
                 continue
             return {'error': {'code': -1, 'message': f'Timeout after {max_retries} retries'}}
         except Exception as e:
+            emsg = str(e).lower()
+            if "1009" in emsg or "message too big" in emsg:
+                return {"error": {"code": 1009, "message": f"WebSocket message too big: {e}"}}
             if attempt < max_retries:
                 print(f"  ⚠️  错误: {e}，重试 {attempt + 1}/{max_retries}...")
                 await asyncio.sleep(2)
@@ -475,6 +510,11 @@ async def _call_tool(transport, tool_name, args, req_id):
 
 
 def _extract_json_from_tool_response(response):
+    if isinstance(response, dict) and response.get("error"):
+        err = response.get("error")
+        if isinstance(err, dict):
+            return {"error": err.get("message") or str(err)}
+        return {"error": str(err)}
     if 'result' not in response:
         return None
     result_obj = response.get("result", {})
@@ -616,6 +656,7 @@ async def run_task_pages(
     output_prefix,
     render_dpi=220,
     debug_layout_probe=False,
+    append_output=False,
 ):
     start_tool = "pdf2md-enhanced.start_task"
     process_tool = "pdf2md-enhanced.process_task_page"
@@ -640,6 +681,26 @@ async def run_task_pages(
     original_pages = list(pages)
     # Docker/remote MCP often cannot access host local path; use file_data subset transfer for remote execution.
     if start_data and start_data.get("error") and "no such file" in str(start_data.get("error")).lower():
+        if len(pages) > 40:
+            batches = split_pages_for_file_data(pages, batch_size=40)
+            print(f"  ℹ️  页数较多({len(pages)}页)，自动分批传输: {len(batches)} 批")
+            for idx, batch in enumerate(batches, start=1):
+                print(f"\n=== 分批 {idx}/{len(batches)}: pages {batch[0]}-{batch[-1]} ===")
+                await run_task_pages(
+                    transport=transport,
+                    task_name=f"{task_name}-b{idx}",
+                    pdf_path=pdf_path,
+                    pages=batch,
+                    policy=policy,
+                    merge_mode=merge_mode,
+                    check_merge=check_merge,
+                    full_output=full_output,
+                    output_prefix=output_prefix,
+                    render_dpi=render_dpi,
+                    debug_layout_probe=debug_layout_probe,
+                    append_output=(append_output or idx > 1),
+                )
+            return
         print("  ℹ️  检测到远程MCP不可访问本地路径，改用 file_data(仅请求页) 传输")
         subset_bytes = extract_pdf_pages(pdf_path, pages)
         subset_b64 = base64.b64encode(subset_bytes).decode("utf-8")
@@ -673,10 +734,11 @@ async def run_task_pages(
         md_file = f"{output_prefix}.md"
         rag_file = f"{output_prefix}.json"
         pages_file = f"{output_prefix}.pages.json"
-        # truncate/create
-        Path(md_file).write_text("", encoding="utf-8")
-        Path(rag_file).write_text("[]", encoding="utf-8")
-        Path(pages_file).write_text("[]", encoding="utf-8")
+        # truncate/create (only first batch)
+        if not append_output:
+            Path(md_file).write_text("", encoding="utf-8")
+            Path(rag_file).write_text("[]", encoding="utf-8")
+            Path(pages_file).write_text("[]", encoding="utf-8")
     prev_context = None
     for idx, page_no in enumerate(planned_pages, start=1):
         display_page_no = original_pages[page_no - 1] if used_subset_pdf and 1 <= page_no <= len(original_pages) else page_no
@@ -735,6 +797,8 @@ async def run_task_pages(
             )
             if render_text:
                 with open(md_file, "a", encoding="utf-8") as f:
+                    if len(planned_pages) > 1:
+                        f.write(f"<!-- page:{display_page_no} -->\n")
                     f.write(f"{render_text}\n\n")
             # Incremental pretty-json write (rewrite full array each page for readability)
             rag_arr = []
@@ -867,6 +931,7 @@ async def test_pdf2md_enhanced_mcp(
     output_prefix=None,
     render_dpi=220,
     debug_layout_probe=False,
+    ws_max_mb=100,
 ):
     print("=" * 80)
     print("PDF2MD Enhanced MCP服务远程调用测试")
@@ -889,6 +954,7 @@ async def test_pdf2md_enhanced_mcp(
     print(f"check_merge: {check_merge}")
     print(f"render_dpi: {render_dpi}")
     print(f"debug_layout_probe: {debug_layout_probe}")
+    print(f"ws_max_mb: {ws_max_mb}")
     print()
 
     if not pdf_path.exists():
@@ -897,8 +963,12 @@ async def test_pdf2md_enhanced_mcp(
 
     ws_url = f"{MCP_ROUTER_URL}?token={jwt_token}"
     try:
-        # 增加消息大小限制到20MB，支持单页PDF传输
-        async with websockets.connect(ws_url, max_size=20*1024*1024, ping_timeout=300, close_timeout=10) as websocket:
+        async with websockets.connect(
+            ws_url,
+            max_size=int(ws_max_mb) * 1024 * 1024,
+            ping_timeout=300,
+            close_timeout=10,
+        ) as websocket:
             transport = WebSocketTransport(websocket)
             print("✓ WebSocket连接成功 (JWT认证通过)")
 
@@ -977,6 +1047,7 @@ def main():
     parser.add_argument('--policy', type=str, default='auto', choices=['auto', 'force_direct', 'force_vlm'], help='页处理策略')
     parser.add_argument('--render-dpi', type=int, default=220, help='渲染页图DPI（默认220，建议220-300）')
     parser.add_argument('--debug-layout-probe', action='store_true', help='仅测试：启用recognize_layout探针并回传到decision.layout_probe')
+    parser.add_argument('--ws-max-mb', type=int, default=100, help='WebSocket最大消息大小(MB)，大页范围建议>=100')
     parser.add_argument('--merge-mode', type=str, default='none', choices=['none', 'markdown', 'rag', 'both'], help='finalize合并模式（默认none，由client端拼接）')
     parser.add_argument('--check-merge', action='store_true', help='启用多页合并逻辑校验')
     parser.add_argument('--full', action='store_true', help='输出完整结果，而不是预览')
@@ -1019,6 +1090,7 @@ def main():
             output_prefix=args.out,
             render_dpi=args.render_dpi,
             debug_layout_probe=args.debug_layout_probe,
+            ws_max_mb=args.ws_max_mb,
         )
 
     asyncio.run(run_with_connection_check())

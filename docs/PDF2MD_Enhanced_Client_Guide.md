@@ -193,7 +193,7 @@ Expected response (simplified):
     "vlm_calls": 1
   },
   "render": {"markdown": "..."},
-  "rag": {"content": "...", "chunks": [], "elements": []},
+  "rag": {"content": "...", "elements": {"tables": [], "formulas": [], "illustrations": []}},
   "elements": {"tables": [], "formulas": [], "figures": []},
   "next_context": {"current_section": "5.3"}
 }
@@ -224,9 +224,11 @@ When `merge_mode=none` (default), client must handle:
 - Build merged rag from page `rag` objects in page order.
 
 3. Index construction (RAG)
-- Build retrieval units using page-level `rag.page_text` + `rag.elements[*].semantic_desc`.
+- Build retrieval units using page-level verbatim body text (`page_text`/`rag.page_text`) + `elements[*].semantic_desc`.
 - Keep page/section trace fields (`page_no`, `section_path`, `element_id`) for source attribution.
 - Chunking/vectorization/vectorless indexing should be done in client pipeline (e.g., LangChain).
+- For table elements, persist structured `columns + raw_array` (not `raw_markdown`).
+- For illustrations, use placeholder descriptions in markdown and persist semantic descriptions in elements.
 
 ---
 
