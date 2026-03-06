@@ -45,7 +45,7 @@ services:
         pdf2md-enhanced:
           transport: http
           url: http://host.docker.internal:9010
-          timeout: 300
+          timeout: 1300
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # LLM_BASE_URL: ${LLM_BASE_URL}
       # LLM_API_KEY: ${LLM_API_KEY}
@@ -193,6 +193,8 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - PDF2MD_ENH_OUTPUT_DIR=/app/data/output
+      - PDF2MD_ENH_PAGE_TIMEOUT_SEC=1260
+      - PDF2MD_ENH_VLM_CALL_TIMEOUT_CAP_SEC=1200
     volumes:
       - ./mcp/servers/PDF2MDEnhanced/data/input:/app/data/input
       - ./mcp/servers/PDF2MDEnhanced/data/output:/app/data/output

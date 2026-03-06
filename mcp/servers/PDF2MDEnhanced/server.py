@@ -14,7 +14,8 @@ from .task_manager import TaskManager
 
 OUTPUT_DIR = os.getenv("PDF2MD_ENH_OUTPUT_DIR", "./data/output")
 PAGE_TIMEOUT_SEC = int(os.getenv("PDF2MD_ENH_PAGE_TIMEOUT_SEC", "280"))
-VLM_CALL_TIMEOUT_CAP_SEC = int(os.getenv("PDF2MD_ENH_VLM_CALL_TIMEOUT_CAP_SEC", "90"))
+VLM_CALL_TIMEOUT_CAP_SEC = int(os.getenv("PDF2MD_ENH_VLM_CALL_TIMEOUT_CAP_SEC", "1200"))
+PAGE_TIMEOUT_GUARD_SEC = int(os.getenv("PDF2MD_ENH_PAGE_TIMEOUT_GUARD_SEC", "20"))
 VLM_MAX_RETRIES_CAP = int(os.getenv("PDF2MD_ENH_VLM_MAX_RETRIES_CAP", "0"))
 VLM_MAX_TOKENS_CAP = int(os.getenv("PDF2MD_ENH_VLM_MAX_TOKENS_CAP", "16384"))
 logger = logging.getLogger(__name__)
@@ -65,6 +66,7 @@ async def process_task_page(
     loop = asyncio.get_event_loop()
     effective_vlm_config = _normalize_vlm_config(vlm_config)
     vlm_used = _vlm_runtime_info(effective_vlm_config)
+    page_timeout_sec = _resolve_page_timeout(effective_vlm_config)
     try:
         await loop.run_in_executor(None, manager.update_page_running, task_id, page_no)
 
@@ -83,7 +85,7 @@ async def process_task_page(
                 effective_routing_config,
                 prev_context,
             ),
-            timeout=PAGE_TIMEOUT_SEC,
+            timeout=page_timeout_sec,
         )
         await loop.run_in_executor(None, manager.update_page_result, task_id, page_no, result)
         res = {
@@ -94,9 +96,14 @@ async def process_task_page(
             "vlm": vlm_used,
         }
     except asyncio.TimeoutError:
-        msg = f"process_task_page timeout after {PAGE_TIMEOUT_SEC}s"
+        msg = f"process_task_page timeout after {page_timeout_sec}s"
         await loop.run_in_executor(None, manager.update_page_failed, task_id, page_no, msg)
-        logger.warning("process_task_page timeout: task_id=%s page_no=%s", task_id, page_no)
+        logger.warning(
+            "process_task_page timeout: task_id=%s page_no=%s timeout=%ss",
+            task_id,
+            page_no,
+            page_timeout_sec,
+        )
         res = {"task_id": task_id, "page_no": page_no, "error": msg, "vlm": vlm_used}
     except Exception as exc:
         await loop.run_in_executor(None, manager.update_page_failed, task_id, page_no, str(exc))
@@ -136,12 +143,32 @@ def _normalize_vlm_config(cfg: Optional[Dict[str, Any]]) -> Optional[Dict[str, A
     except Exception:
         max_tokens = 4096
 
-    # Avoid conflicting budgets: per-call timeout/retries must fit page timeout.
-    timeout_cap = max(20, min(VLM_CALL_TIMEOUT_CAP_SEC, max(20, PAGE_TIMEOUT_SEC // 3)))
-    c["timeout_sec"] = min(timeout_sec, timeout_cap)
+    # Default behavior: honor provider-injected timeout_sec.
+    # Optional cap still available via env; non-positive cap means "disabled".
+    timeout_cap = int(VLM_CALL_TIMEOUT_CAP_SEC)
+    if timeout_cap > 0:
+        c["timeout_sec"] = max(20, min(timeout_sec, timeout_cap))
+    else:
+        c["timeout_sec"] = max(20, timeout_sec)
     c["max_retries"] = max(0, min(max_retries, VLM_MAX_RETRIES_CAP))
     c["max_tokens"] = max(512, min(max_tokens, VLM_MAX_TOKENS_CAP))
     return c
+
+
+def _resolve_page_timeout(cfg: Optional[Dict[str, Any]]) -> int:
+    """
+    Ensure page timeout is never smaller than VLM timeout budget.
+    Effective timeout = max(static PAGE_TIMEOUT_SEC, vlm.timeout_sec + guard).
+    """
+    c = cfg or {}
+    raw_vlm_timeout = c.get("timeout_sec", 60)
+    try:
+        vlm_timeout = int(raw_vlm_timeout)
+    except Exception:
+        vlm_timeout = 60
+    vlm_timeout = max(20, vlm_timeout)
+    guard = max(5, int(PAGE_TIMEOUT_GUARD_SEC))
+    return max(int(PAGE_TIMEOUT_SEC), vlm_timeout + guard)
 
 
 @mcp.tool("get_task_status")
