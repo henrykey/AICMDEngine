@@ -193,11 +193,15 @@ Expected response (simplified):
     "vlm_calls": 1
   },
   "render": {"markdown": "..."},
-  "rag": {"content": "...", "elements": {"tables": [], "formulas": [], "illustrations": []}},
+  "rag": {"content": "...", "elements": {"tables": [], "formulas": [], "figures": []}},
   "elements": {"tables": [], "formulas": [], "figures": []},
   "next_context": {"current_section": "5.3"}
 }
 ```
+
+Optional notes:
+- markdown may contain layout comments like `<!-- Table (x1, y1, x2, y2) -->`.
+- keep or drop these comments based on your downstream pipeline needs.
 
 ## 6.3 Finalize task
 
@@ -228,7 +232,12 @@ When `merge_mode=none` (default), client must handle:
 - Keep page/section trace fields (`page_no`, `section_path`, `element_id`) for source attribution.
 - Chunking/vectorization/vectorless indexing should be done in client pipeline (e.g., LangChain).
 - For table elements, persist structured `columns + raw_array` (not `raw_markdown`).
-- For illustrations, use placeholder descriptions in markdown and persist semantic descriptions in elements.
+- For figures, use placeholder descriptions in markdown and persist semantic descriptions in elements.
+
+4. Large/wide table handling
+- Server may replace unstable large table body with `[TABLE_PLACEHOLDER] ...`.
+- This is expected behavior for robustness.
+- Client should treat placeholder text as semantic retrieval content and keep page-level trace.
 
 ---
 
@@ -321,6 +330,12 @@ Backoff suggestion:
 - incremental persistence of page outputs
 - periodic status checks
 - client-side incremental index build (avoid full-doc in-memory merge)
+
+4. Useful routing overrides (when needed)
+- `render_rotate_deg`: rotate rendered page image for landscape-heavy sections
+- `full_vlm_retry_markdown`: keep enabled in production for stability
+- `large_table_placeholder_enabled`: keep enabled for scanned standards
+- `large_table_min_cols/min_rows/min_cells`: tune if your documents have many wide tables
 
 ---
 

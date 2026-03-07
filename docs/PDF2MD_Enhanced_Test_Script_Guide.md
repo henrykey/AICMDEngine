@@ -49,6 +49,7 @@ python tests/test_pdf2md_enhanced_mcp.py --pages 1,2,5,10 --full --out docs/test
 处理策略：
 - `--policy auto|force_direct|force_vlm`（默认 `auto`）
 - `--render-dpi <int>`（默认 `220`）
+- `--render-rotate-deg <int>`（默认 `0`，可用 `-90/90/180/270`）
 
 重试：
 - `--page-retries <int>`：每页失败后重试次数（默认 `0`）
@@ -65,6 +66,18 @@ file_data 传输模式（当远程容器无法访问本地 `file_path` 时生效
   - `0`（默认）：自适应二分拆批（若 1009 超包，自动 1/2、1/2/2...）
   - `>0`：固定批大小
 
+FULL_VLM 兜底：
+- `--full-vlm-retry-markdown / --no-full-vlm-retry-markdown`
+  - 默认开启（建议保持开启）
+- `--full-vlm-split-extract`
+  - 默认关闭，仅调试用
+
+大表占位策略：
+- `--large-table-placeholder / --no-large-table-placeholder`（默认开启）
+- `--large-table-min-cols <int>`（默认 `12`）
+- `--large-table-min-rows <int>`（默认 `16`）
+- `--large-table-min-cells <int>`（默认 `180`）
+
 ## 4. 推荐命令
 
 推荐（稳定优先，逐页传输）：
@@ -76,7 +89,9 @@ python tests/test_pdf2md_enhanced_mcp.py \
   --file-data-mode single \
   --page-retries 2 \
   --render-dpi 220 \
-  --retry-render-dpi 300
+  --retry-render-dpi 300 \
+  --full-vlm-retry-markdown \
+  --large-table-placeholder
 ```
 
 批量+自动拆分（速度优先，仍可避免超包）：
@@ -109,6 +124,10 @@ python tests/test_pdf2md_enhanced_mcp.py \
 现在多页 `.md` 默认写入页标记：
 `<!-- page:N -->`  
 如果没有，确认使用了最新脚本版本并传入 `--out`。
+
+### Q4: 输出里出现 `<!-- Table (x1, y1, x2, y2) -->`
+这是表区域坐标注释（布局定位信息），不是正文错误。  
+可保留用于后续区域级处理；若仅做阅读展示，也可在 client 侧清理。
 
 ## 6. 与 RAG 构建的关系
 
