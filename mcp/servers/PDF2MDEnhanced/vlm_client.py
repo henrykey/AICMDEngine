@@ -139,21 +139,20 @@ class DynamicVLMClient:
         #     }
         # """
         prompt = (
-            "Analyze this PDF page and return strict JSON only, no markdown fence, no explanations.\n"
-            "You must output exactly keys: render, rag.\n"
+            "Analyze this PDF page and return strict JSON only.\n"
+            "Output keys exactly: render, rag.\n"
             "Rules:\n"
-            "1) Ignore and exclude all non-content artifacts: watermarks, headers, footers, page numbers, and footnote markers from BOTH render and rag. Focus only on the main technical content — tables, figures, formulas, and body text\n"
-            "2) render: clean markdown for display; keep headings/paragraphs/list/table/formula. "
-            "Tables as markdown tables, formulas as LaTeX. "
-            "Figures are represented by placeholder blocks using textual descriptions.\n"
-            "3) rag.page_text: verbatim body text for retrieval (not a summary), after removing header/footer/page number/footnotes.\n"
-            "4) rag.elements: object with keys formulas/tables/figures, each value is list of semantic descriptions.\n"
-            "5) No base64 image output.\n"
-            "6) If extraction is uncertain for any field, return empty string/empty array for that field; never output invalid JSON.\n"
-            "Output schema:\n"
-            "{\"render\":\"...\",\"rag\":{\"page_text\":\"...\",\"elements\":{\"formulas\":[],\"tables\":[],\"figures\":[]}}}"
+            "1) Remove watermarks, headers, footers, page numbers, footnotes.\n"
+            "2) render: markdown for display; keep headings/paragraphs/lists/tables/formulas. "
+            "Tables in markdown; formulas in LaTeX; figures as [FIGURE: description].\n"
+            "3) rag.page_text: plain body text for retrieval (can be empty if uncertain).\n"
+            "4) rag.elements: {formulas:[], tables:[], figures:[]} with short semantic items only.\n"
+            "5) If uncertain, use empty string/empty arrays. No extra text outside JSON.\n"
+            "Schema:\n"
+            "{\"render\":\"...\",\"rag\":{\"page_text\":\"\",\"elements\":{\"formulas\":[],\"tables\":[],\"figures\":[]}}}"
         )
-        text = self._call_image_prompt(image_path, prompt, max_tokens=self.max_tokens)
+        # Keep dual-output bounded; very large outputs increase timeout/parse-failure risk.
+        text = self._call_image_prompt(image_path, prompt, max_tokens=min(self.max_tokens, 4096))
         data = self._extract_json(text)
         if not data:
             # Fallback rule: if render markdown can be recovered from partial/truncated JSON,
@@ -287,9 +286,9 @@ class DynamicVLMClient:
             s = "\n".join(lines).strip()
         if len(s) < 120:
             return ""
-        # If the model ignored JSON and returned long free-form content directly,
-        # still accept it as render to keep single-call semantics.
-        if s.startswith("{") and s.endswith("}"):
+        # If content still looks like JSON (including truncated JSON),
+        # do not treat it as direct markdown.
+        if s.startswith("{"):
             return ""
         return s
 

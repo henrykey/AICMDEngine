@@ -115,13 +115,78 @@ def split_pages_for_file_data(pages: List[int], batch_size: int = 40) -> List[Li
     return [pages[i:i + batch_size] for i in range(0, len(pages), batch_size)]
 
 
+def is_message_too_big_error(data: Any) -> bool:
+    if not isinstance(data, dict):
+        return False
+    msg = str(data.get("error") or "").lower()
+    return ("1009" in msg) or ("message too big" in msg) or ("too big" in msg)
+
+
 def normalize_markdown_output(text: str) -> str:
     """Strip one outer fenced markdown/code block if present."""
     raw = (text or "").strip()
+    raw = _unwrap_render_json(raw)
     m = re.match(r"^```[a-zA-Z0-9_-]*\n([\s\S]*?)\n```$", raw)
     if m:
         return m.group(1).strip()
     return raw
+
+
+def _unwrap_render_json(text: str) -> str:
+    """
+    Defensive normalization:
+    if render content is accidentally returned as {"render":"...","rag":...},
+    extract render string for markdown output.
+    """
+    s = (text or "").strip()
+    if not s or not s.startswith("{"):
+        return s
+
+    try:
+        obj = json.loads(s)
+        if isinstance(obj, dict):
+            render = obj.get("render")
+            if isinstance(render, str) and render.strip():
+                return render.strip()
+    except Exception:
+        pass
+
+    m = re.search(r'"render"\s*:\s*"((?:\\.|[^"\\])*)"', s, re.S)
+    if m:
+        raw = m.group(1)
+        try:
+            decoded = json.loads(f'"{raw}"')
+            if isinstance(decoded, str) and decoded.strip():
+                return decoded.strip()
+        except Exception:
+            pass
+    # Truncated JSON fallback: recover prefix payload after {"render":" ...
+    prefix = '{"render":"'
+    if s.startswith(prefix):
+        tail = s[len(prefix):]
+        for sep in ('","rag":', '","elements":', '"}'):
+            i = tail.find(sep)
+            if i >= 0:
+                tail = tail[:i]
+                break
+        tail = tail.strip().rstrip('"')
+        if tail:
+            try:
+                decoded = json.loads(f'"{tail}"')
+                if isinstance(decoded, str) and decoded.strip():
+                    return decoded.strip()
+            except Exception:
+                # Best-effort unescape for malformed/truncated json strings.
+                decoded = (
+                    tail.replace("\\r\\n", "\n")
+                    .replace("\\n", "\n")
+                    .replace("\\t", "\t")
+                    .replace('\\"', '"')
+                    .replace("\\\\", "\\")
+                ).strip()
+                if decoded:
+                    return decoded
+    return s
 
 
 def _extract_keywords(text: str, limit: int = 6) -> List[str]:
@@ -157,6 +222,10 @@ def _clean_page_text_for_rag(text: str) -> str:
     s = (text or "").replace("\r\n", "\n").strip()
     if not s:
         return s
+    s = normalize_markdown_output(s)
+    # Remove common noisy placeholder lines produced by VLM.
+    s = re.sub(r"^\*?\s*Illustration Placeholder:.*$", "", s, flags=re.IGNORECASE | re.MULTILINE)
+    s = re.sub(r"^\*?\s*Figure Placeholder:.*$", "", s, flags=re.IGNORECASE | re.MULTILINE)
     # Remove synthetic markers appended by legacy rag builder.
     s = re.sub(r"\n*\[(FORMULAS|TABLES|FIGURES)\]\n[\s\S]*$", "", s, flags=re.IGNORECASE)
     lines = [ln.rstrip() for ln in s.splitlines()]
@@ -349,6 +418,9 @@ def _normalize_table_value(value: Any) -> tuple[List[str], List[List[str]], str]
     text = str(value or "").strip()
     if not text:
         return [], [], ""
+    if text.startswith("[TABLE_PLACEHOLDER]"):
+        desc = text[len("[TABLE_PLACEHOLDER]"):].strip(" ：:")
+        return [], [], (desc or "该表为大表/横向表的语义占位。")
 
     # stringified dict case
     if text.startswith("{") and text.endswith("}"):
@@ -366,8 +438,19 @@ def _normalize_table_value(value: Any) -> tuple[List[str], List[List[str]], str]
             + (f"，主要列为：{'、'.join(columns[:5])}" if columns else "")
         )
     else:
-        semantic_desc = text[:400]
+        semantic_desc = _to_cn_table_desc(text)
     return columns, raw_array, semantic_desc
+
+
+def _to_cn_table_desc(text: str) -> str:
+    s = str(text or "").strip()
+    if not s:
+        return "该表为页面中的结构化表格。"
+    # Keep a short, Chinese-first semantic description for downstream RAG.
+    # Original foreign-language detail is intentionally not used as canonical semantic_desc.
+    if re.search(r"[\u4e00-\u9fff]", s):
+        return s[:240]
+    return "该表为页面中的结构化表格，包含可检索字段与数值信息。"
 
 
 def _build_canonical_page_record(
@@ -655,8 +738,19 @@ async def run_task_pages(
     full_output,
     output_prefix,
     render_dpi=220,
+    render_rotate_deg=0,
     debug_layout_probe=False,
     append_output=False,
+    page_retries=0,
+    retry_render_dpi=0,
+    file_data_mode="single",
+    file_data_batch_size=40,
+    full_vlm_retry_markdown=True,
+    full_vlm_split_extract=False,
+    large_table_placeholder=True,
+    large_table_min_cols=12,
+    large_table_min_rows=16,
+    large_table_min_cells=180,
 ):
     start_tool = "pdf2md-enhanced.start_task"
     process_tool = "pdf2md-enhanced.process_task_page"
@@ -679,11 +773,43 @@ async def run_task_pages(
 
     used_subset_pdf = False
     original_pages = list(pages)
-    # Docker/remote MCP often cannot access host local path; use file_data subset transfer for remote execution.
+    # Docker/remote MCP often cannot access host local path; fallback to file_data transfer.
     if start_data and start_data.get("error") and "no such file" in str(start_data.get("error")).lower():
-        if len(pages) > 40:
-            batches = split_pages_for_file_data(pages, batch_size=40)
-            print(f"  ℹ️  页数较多({len(pages)}页)，自动分批传输: {len(batches)} 批")
+        mode = (file_data_mode or "single").strip().lower()
+        if mode == "single" and len(pages) > 1:
+            print(f"  ℹ️  file_data单页模式：{len(pages)}页将逐页单独传输")
+            for idx, single_page in enumerate(pages, start=1):
+                print(f"\n=== 单页任务 {idx}/{len(pages)}: page {single_page} ===")
+                await run_task_pages(
+                    transport=transport,
+                    task_name=f"{task_name}-p{single_page}",
+                    pdf_path=pdf_path,
+                    pages=[single_page],
+                    policy=policy,
+                    merge_mode=merge_mode,
+                    check_merge=check_merge,
+                    full_output=full_output,
+                    output_prefix=output_prefix,
+                    render_dpi=render_dpi,
+                    render_rotate_deg=render_rotate_deg,
+                    debug_layout_probe=debug_layout_probe,
+                    append_output=(append_output or idx > 1),
+                    page_retries=page_retries,
+                    retry_render_dpi=retry_render_dpi,
+                    file_data_mode="single",
+                    file_data_batch_size=file_data_batch_size,
+                    full_vlm_retry_markdown=full_vlm_retry_markdown,
+                    full_vlm_split_extract=full_vlm_split_extract,
+                    large_table_placeholder=large_table_placeholder,
+                    large_table_min_cols=large_table_min_cols,
+                    large_table_min_rows=large_table_min_rows,
+                    large_table_min_cells=large_table_min_cells,
+                )
+            return
+
+        if mode == "batch" and int(file_data_batch_size) > 0 and len(pages) > int(file_data_batch_size):
+            batches = split_pages_for_file_data(pages, batch_size=int(file_data_batch_size))
+            print(f"  ℹ️  file_data批量模式：{len(pages)}页自动分批为 {len(batches)} 批 (batch_size={file_data_batch_size})")
             for idx, batch in enumerate(batches, start=1):
                 print(f"\n=== 分批 {idx}/{len(batches)}: pages {batch[0]}-{batch[-1]} ===")
                 await run_task_pages(
@@ -697,10 +823,24 @@ async def run_task_pages(
                     full_output=full_output,
                     output_prefix=output_prefix,
                     render_dpi=render_dpi,
+                    render_rotate_deg=render_rotate_deg,
                     debug_layout_probe=debug_layout_probe,
                     append_output=(append_output or idx > 1),
+                    page_retries=page_retries,
+                    retry_render_dpi=retry_render_dpi,
+                    file_data_mode=mode,
+                    file_data_batch_size=file_data_batch_size,
+                    full_vlm_retry_markdown=full_vlm_retry_markdown,
+                    full_vlm_split_extract=full_vlm_split_extract,
+                    large_table_placeholder=large_table_placeholder,
+                    large_table_min_cols=large_table_min_cols,
+                    large_table_min_rows=large_table_min_rows,
+                    large_table_min_cells=large_table_min_cells,
                 )
             return
+
+        if len(pages) > 1:
+            print(f"  ℹ️  检测到远程MCP不可访问本地路径，改用 file_data 批量传输 ({len(pages)} 页)")
         print("  ℹ️  检测到远程MCP不可访问本地路径，改用 file_data(仅请求页) 传输")
         subset_bytes = extract_pdf_pages(pdf_path, pages)
         subset_b64 = base64.b64encode(subset_bytes).decode("utf-8")
@@ -712,6 +852,70 @@ async def run_task_pages(
         start_resp = await _call_tool(transport, start_tool, start_req_args, req_id=11)
         start_data = _extract_json_from_tool_response(start_resp)
         used_subset_pdf = True
+        if is_message_too_big_error(start_data):
+            if mode == "batch":
+                if len(pages) <= 1:
+                    print("✗ 单页file_data仍超出WebSocket消息限制，请提高 --ws-max-mb 或改为可访问本地路径模式")
+                    print(start_data)
+                    return
+                mid = max(1, len(pages) // 2)
+                left = pages[:mid]
+                right = pages[mid:]
+                print(f"  ⚠️  file_data消息过大，自动二分重试: {left[0]}-{left[-1]} / {right[0]}-{right[-1]}")
+                await run_task_pages(
+                    transport=transport,
+                    task_name=f"{task_name}-h1",
+                    pdf_path=pdf_path,
+                    pages=left,
+                    policy=policy,
+                    merge_mode=merge_mode,
+                    check_merge=check_merge,
+                    full_output=full_output,
+                    output_prefix=output_prefix,
+                    render_dpi=render_dpi,
+                    render_rotate_deg=render_rotate_deg,
+                    debug_layout_probe=debug_layout_probe,
+                    append_output=append_output,
+                    page_retries=page_retries,
+                    retry_render_dpi=retry_render_dpi,
+                    file_data_mode=mode,
+                    file_data_batch_size=0,
+                    full_vlm_retry_markdown=full_vlm_retry_markdown,
+                    full_vlm_split_extract=full_vlm_split_extract,
+                    large_table_placeholder=large_table_placeholder,
+                    large_table_min_cols=large_table_min_cols,
+                    large_table_min_rows=large_table_min_rows,
+                    large_table_min_cells=large_table_min_cells,
+                )
+                await run_task_pages(
+                    transport=transport,
+                    task_name=f"{task_name}-h2",
+                    pdf_path=pdf_path,
+                    pages=right,
+                    policy=policy,
+                    merge_mode=merge_mode,
+                    check_merge=check_merge,
+                    full_output=full_output,
+                    output_prefix=output_prefix,
+                    render_dpi=render_dpi,
+                    render_rotate_deg=render_rotate_deg,
+                    debug_layout_probe=debug_layout_probe,
+                    append_output=True,
+                    page_retries=page_retries,
+                    retry_render_dpi=retry_render_dpi,
+                    file_data_mode=mode,
+                    file_data_batch_size=0,
+                    full_vlm_retry_markdown=full_vlm_retry_markdown,
+                    full_vlm_split_extract=full_vlm_split_extract,
+                    large_table_placeholder=large_table_placeholder,
+                    large_table_min_cols=large_table_min_cols,
+                    large_table_min_rows=large_table_min_rows,
+                    large_table_min_cells=large_table_min_cells,
+                )
+                return
+            print("✗ 单页file_data仍超出WebSocket消息限制，请提高 --ws-max-mb 或改为可访问本地路径模式")
+            print(start_data)
+            return
 
     if not start_data or start_data.get("error") or not start_data.get("task_id"):
         print("✗ start_task 失败")
@@ -743,25 +947,52 @@ async def run_task_pages(
     for idx, page_no in enumerate(planned_pages, start=1):
         display_page_no = original_pages[page_no - 1] if used_subset_pdf and 1 <= page_no <= len(original_pages) else page_no
         print(f"\n→ 处理第 {display_page_no} 页 ({idx}/{len(planned_pages)})")
-        start_time = time.time()
+        process_data = None
+        elapsed = 0.0
+        max_attempts = max(1, int(page_retries) + 1)
+        for attempt in range(max_attempts):
+            attempt_no = attempt + 1
+            use_retry_dpi = attempt > 0 and int(retry_render_dpi or 0) > 0
+            active_dpi = int(retry_render_dpi) if use_retry_dpi else int(render_dpi)
+            if attempt > 0:
+                print(f"  ↻ 重试 {attempt_no}/{max_attempts} (render_dpi={active_dpi})")
 
-        process_resp = await _call_tool(
-            transport,
-            process_tool,
-            {
-                "task_id": task_id,
-                "page_no": page_no,
-                "policy": policy,
-                "routing_config": {
-                    "render_dpi": int(render_dpi),
-                    "debug_layout_probe": bool(debug_layout_probe),
+            start_time = time.time()
+            process_resp = await _call_tool(
+                transport,
+                process_tool,
+                {
+                    "task_id": task_id,
+                    "page_no": page_no,
+                    "policy": policy,
+                    "routing_config": {
+                        "render_dpi": active_dpi,
+                        "render_rotate_deg": int(render_rotate_deg),
+                        "source_page_no": int(display_page_no),
+                        "debug_layout_probe": bool(debug_layout_probe),
+                        "full_vlm_retry_markdown": bool(full_vlm_retry_markdown),
+                        "full_vlm_split_extract": bool(full_vlm_split_extract),
+                        "large_table_placeholder_enabled": bool(large_table_placeholder),
+                        "large_table_min_cols": int(large_table_min_cols),
+                        "large_table_min_rows": int(large_table_min_rows),
+                        "large_table_min_cells": int(large_table_min_cells),
+                    },
+                    "prev_context": prev_context,
                 },
-                "prev_context": prev_context,
-            },
-            req_id=1000 + page_no,
-        )
-        elapsed = time.time() - start_time
-        process_data = _extract_json_from_tool_response(process_resp)
+                req_id=1000 + page_no + attempt,
+            )
+            elapsed = time.time() - start_time
+            process_data = _extract_json_from_tool_response(process_resp)
+
+            if process_data and not process_data.get("error") and not process_data.get("raw_text"):
+                break
+
+            if attempt < max_attempts - 1:
+                err_preview = process_data.get("error") if isinstance(process_data, dict) else process_data
+                print(f"  ⚠️ page {display_page_no} 第{attempt_no}次失败，准备重试: {err_preview}")
+                await asyncio.sleep(1.5)
+                continue
+
         if not process_data or process_data.get("error"):
             print(f"  ✗ page {display_page_no} 失败: {process_data}")
             continue
@@ -930,8 +1161,19 @@ async def test_pdf2md_enhanced_mcp(
     full_output=False,
     output_prefix=None,
     render_dpi=220,
+    render_rotate_deg=0,
     debug_layout_probe=False,
     ws_max_mb=100,
+    page_retries=0,
+    retry_render_dpi=0,
+    file_data_mode="single",
+    file_data_batch_size=40,
+    full_vlm_retry_markdown=True,
+    full_vlm_split_extract=False,
+    large_table_placeholder=True,
+    large_table_min_cols=12,
+    large_table_min_rows=16,
+    large_table_min_cells=180,
 ):
     print("=" * 80)
     print("PDF2MD Enhanced MCP服务远程调用测试")
@@ -953,8 +1195,17 @@ async def test_pdf2md_enhanced_mcp(
     print(f"merge_mode: {merge_mode}")
     print(f"check_merge: {check_merge}")
     print(f"render_dpi: {render_dpi}")
+    print(f"render_rotate_deg: {render_rotate_deg}")
     print(f"debug_layout_probe: {debug_layout_probe}")
     print(f"ws_max_mb: {ws_max_mb}")
+    print(f"page_retries: {page_retries}")
+    print(f"retry_render_dpi: {retry_render_dpi}")
+    print(f"file_data_mode: {file_data_mode}")
+    print(f"file_data_batch_size: {file_data_batch_size}")
+    print(f"full_vlm_retry_markdown: {full_vlm_retry_markdown}")
+    print(f"full_vlm_split_extract: {full_vlm_split_extract}")
+    print(f"large_table_placeholder: {large_table_placeholder}")
+    print(f"large_table_min_cols/rows/cells: {large_table_min_cols}/{large_table_min_rows}/{large_table_min_cells}")
     print()
 
     if not pdf_path.exists():
@@ -1009,7 +1260,18 @@ async def test_pdf2md_enhanced_mcp(
                 full_output=full_output,
                 output_prefix=output_prefix,
                 render_dpi=render_dpi,
+                render_rotate_deg=render_rotate_deg,
                 debug_layout_probe=debug_layout_probe,
+                page_retries=page_retries,
+                retry_render_dpi=retry_render_dpi,
+                file_data_mode=file_data_mode,
+                file_data_batch_size=file_data_batch_size,
+                full_vlm_retry_markdown=full_vlm_retry_markdown,
+                full_vlm_split_extract=full_vlm_split_extract,
+                large_table_placeholder=large_table_placeholder,
+                large_table_min_cols=large_table_min_cols,
+                large_table_min_rows=large_table_min_rows,
+                large_table_min_cells=large_table_min_cells,
             )
 
     except websockets.exceptions.InvalidStatusCode as e:
@@ -1046,8 +1308,19 @@ def main():
 
     parser.add_argument('--policy', type=str, default='auto', choices=['auto', 'force_direct', 'force_vlm'], help='页处理策略')
     parser.add_argument('--render-dpi', type=int, default=220, help='渲染页图DPI（默认220，建议220-300）')
+    parser.add_argument('--render-rotate-deg', type=int, default=0, help='渲染图旋转角度（度，默认0；90/180/270）')
     parser.add_argument('--debug-layout-probe', action='store_true', help='仅测试：启用recognize_layout探针并回传到decision.layout_probe')
     parser.add_argument('--ws-max-mb', type=int, default=100, help='WebSocket最大消息大小(MB)，大页范围建议>=100')
+    parser.add_argument('--page-retries', type=int, default=0, help='每页失败后的重试次数（默认0，不重试）')
+    parser.add_argument('--retry-render-dpi', type=int, default=0, help='重试时使用的render_dpi（默认0表示与--render-dpi相同）')
+    parser.add_argument('--file-data-mode', type=str, default='single', choices=['single', 'batch'], help='file_data传输模式：single=逐页单独传输(默认)，batch=多页打包传输')
+    parser.add_argument('--file-data-batch-size', type=int, default=0, help='file_data批量模式下每批页数；0=自动自适应二分拆批')
+    parser.add_argument('--full-vlm-retry-markdown', action=argparse.BooleanOptionalAction, default=True, help='FULL_VLM失败后是否追加一次full_page_markdown调用（默认开启）')
+    parser.add_argument('--full-vlm-split-extract', action='store_true', help='FULL_VLM失败后追加一次extract_region_structured调用')
+    parser.add_argument('--large-table-placeholder', action=argparse.BooleanOptionalAction, default=True, help='是否将大表/横向表替换为语义占位（默认开启）')
+    parser.add_argument('--large-table-min-cols', type=int, default=12, help='触发大表占位的最小列数阈值')
+    parser.add_argument('--large-table-min-rows', type=int, default=16, help='触发大表占位的最小行数阈值')
+    parser.add_argument('--large-table-min-cells', type=int, default=180, help='触发大表占位的最小单元格数阈值')
     parser.add_argument('--merge-mode', type=str, default='none', choices=['none', 'markdown', 'rag', 'both'], help='finalize合并模式（默认none，由client端拼接）')
     parser.add_argument('--check-merge', action='store_true', help='启用多页合并逻辑校验')
     parser.add_argument('--full', action='store_true', help='输出完整结果，而不是预览')
@@ -1089,8 +1362,19 @@ def main():
             full_output=args.full,
             output_prefix=args.out,
             render_dpi=args.render_dpi,
+            render_rotate_deg=args.render_rotate_deg,
             debug_layout_probe=args.debug_layout_probe,
             ws_max_mb=args.ws_max_mb,
+            page_retries=args.page_retries,
+            retry_render_dpi=args.retry_render_dpi,
+            file_data_mode=args.file_data_mode,
+            file_data_batch_size=args.file_data_batch_size,
+            full_vlm_retry_markdown=args.full_vlm_retry_markdown,
+            full_vlm_split_extract=args.full_vlm_split_extract,
+            large_table_placeholder=args.large_table_placeholder,
+            large_table_min_cols=args.large_table_min_cols,
+            large_table_min_rows=args.large_table_min_rows,
+            large_table_min_cells=args.large_table_min_cells,
         )
 
     asyncio.run(run_with_connection_check())
