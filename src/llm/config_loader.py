@@ -8,6 +8,7 @@ import os
 import yaml
 import logging
 from pathlib import Path
+from src.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -221,7 +222,7 @@ class LLMConfigLoader:
         configs = {}
 
         try:
-            db = db_client.nl_tps  # Use the main database
+            db = db_client[settings.database_name]
             collection = db.llm_providers
 
             documents = await collection.find({}).to_list(None)

@@ -2,11 +2,14 @@
 import asyncio
 import os
 from motor.motor_asyncio import AsyncIOMotorClient
+from dotenv import load_dotenv
 from src.services.mock_data import get_membership_commands
 
+load_dotenv()
+
 async def seed():
-    uri = "mongodb://jnuc2"
-    db_name = "nl_tps"
+    uri = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
+    db_name = os.getenv("DATABASE_NAME", "nl_tps")
     client = AsyncIOMotorClient(uri)
     db = client[db_name]
 

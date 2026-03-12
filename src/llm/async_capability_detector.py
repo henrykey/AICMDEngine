@@ -8,6 +8,7 @@ import logging
 from datetime import datetime
 from typing import Dict, Any
 from .capability_detector import CapabilityDetector
+from src.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +96,7 @@ class AsyncCapabilityDetector:
             logger.warning("No database client, skipping status update")
             return
 
-        db = self.provider_manager.db_client.nl_tps
+        db = self.provider_manager.db_client[settings.database_name]
         collection = db.llm_providers
 
         update_data = {
@@ -121,7 +122,7 @@ class AsyncCapabilityDetector:
             logger.warning("No database client, skipping capability update")
             return
 
-        db = self.provider_manager.db_client.nl_tps
+        db = self.provider_manager.db_client[settings.database_name]
         collection = db.llm_providers
 
         update_data = {

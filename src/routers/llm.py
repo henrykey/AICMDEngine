@@ -8,6 +8,7 @@ import logging
 
 from src.llm.config_loader import LLMConfig
 from src.llm.async_capability_detector import AsyncCapabilityDetector
+from src.core.config import settings
 from .websocket import NotificationService
 
 logger = logging.getLogger(__name__)
@@ -97,7 +98,7 @@ async def create_provider(
             logger.info(f"[{name}] Update data keys: {provider.keys()}")
 
             if manager.db_client:
-                db = manager.db_client.nl_tps
+                db = manager.db_client[settings.database_name]
                 collection = db.llm_providers
 
                 # Handle capabilities_mode switching
@@ -172,7 +173,7 @@ async def create_provider(
 
             # Save to database
             if manager.db_client:
-                db = manager.db_client.nl_tps
+                db = manager.db_client[settings.database_name]
                 collection = db.llm_providers
                 await collection.insert_one(provider)
 
@@ -232,7 +233,7 @@ async def update_provider(
 
         # Update in MongoDB
         if manager.db_client:
-            db = manager.db_client.nl_tps
+            db = manager.db_client[settings.database_name]
             collection = db.llm_providers
 
             # Handle capabilities_mode switching
@@ -321,7 +322,7 @@ async def delete_provider(
 
         # Delete from MongoDB
         if manager.db_client:
-            db = manager.db_client.nl_tps
+            db = manager.db_client[settings.database_name]
             collection = db.llm_providers
             result = await collection.delete_one({"name": name})
 

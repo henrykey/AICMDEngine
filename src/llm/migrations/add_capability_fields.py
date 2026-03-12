@@ -21,8 +21,9 @@ async def upgrade():
     """Add capability fields to existing providers"""
     # Connect to MongoDB
     mongo_uri = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
+    database_name = os.getenv("DATABASE_NAME", "nl_tps")
     client = AsyncIOMotorClient(mongo_uri)
-    db = client.nl_tps
+    db = client[database_name]
     collection = db.llm_providers
 
     try:

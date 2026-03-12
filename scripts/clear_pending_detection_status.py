@@ -30,8 +30,9 @@ async def clear_pending_status():
     """Clear pending status from providers that already have capabilities"""
 
     mongo_uri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017')
+    database_name = os.getenv('DATABASE_NAME', 'nl_tps')
     client = AsyncIOMotorClient(mongo_uri)
-    db = client.nl_tps
+    db = client[database_name]
     collection = db.llm_providers
 
     # Find all providers with pending status

@@ -46,6 +46,11 @@ services:
           transport: http
           url: http://host.docker.internal:9010
           timeout: 1300
+        pageindex:
+          transport: http
+          url: http://host.docker.internal:9011
+          timeout: 1300
+          llm_provider: multmode
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # LLM_BASE_URL: ${LLM_BASE_URL}
       # LLM_API_KEY: ${LLM_API_KEY}
@@ -112,12 +117,12 @@ services:
     container_name: office-word-mcp
     restart: unless-stopped
     ports:
-      - "9004:9004"
+      - "9002:9002"
     environment:
       - PYTHONUNBUFFERED=1
       - MCP_TRANSPORT=sse
       - MCP_HOST=0.0.0.0
-      - MCP_PORT=9004
+      - MCP_PORT=9002
     # 资源限制
     deploy:
       resources:
@@ -131,7 +136,7 @@ services:
       - mcp-servers-network
     # 健康检查
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9004/sse"]
+      test: ["CMD", "curl", "-f", "http://localhost:9002/sse"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -210,6 +215,29 @@ services:
       - mcp-servers-network
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1', 9010), 2); s.close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # PageIndex MCP Server - Vectorless page index builder
+  pageindex-mcp:
+    build:
+      context: ./mcp/servers/PageIndex
+      dockerfile: Dockerfile
+    image: pageindex-mcp:latest
+    profiles: ["optional"]
+    container_name: pageindex-mcp
+    restart: unless-stopped
+    ports:
+      - "9011:9011"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PAGEINDEX_VLM_CALL_TIMEOUT_CAP_SEC=1200
+    networks:
+      - mcp-servers-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1', 9011), 2); s.close()"]
       interval: 30s
       timeout: 10s
       retries: 3

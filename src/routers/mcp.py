@@ -211,7 +211,20 @@ async def execute_mcp_tool(
     llm_provider = kwargs.pop("llm", None)
 
     # Runtime LLM binding injection for external MCPs (REST path consistency with WS path)
-    if server_name == "pdf2md-enhanced" and "vlm_config" not in kwargs and "vlm_defaults" not in kwargs:
+    server_vlm_targets = {
+        "pdf2md-enhanced": {
+            "default_key": "vlm_config",
+            "skip_if_present": ["vlm_config", "vlm_defaults"],
+            "tool_keys": {"start_task": "vlm_defaults", "process_task_page": "vlm_config"},
+        },
+        "pageindex": {
+            "default_key": "vlm_config",
+            "skip_if_present": ["vlm_config"],
+            "tool_keys": {"build_index_from_pdf": "vlm_config", "build_index_from_markdown": "vlm_config", "build": "vlm_config"},
+        },
+    }
+    inject_cfg = server_vlm_targets.get(server_name)
+    if inject_cfg and not any(k in kwargs for k in inject_cfg["skip_if_present"]):
         llm_map = await _load_mcp_llm_map(request)
         bound_provider = llm_map.get(server_name)
         if not bound_provider:
@@ -220,10 +233,8 @@ async def execute_mcp_tool(
         if bound_provider:
             vlm_config = _build_vlm_config_from_provider(request, bound_provider)
             if vlm_config:
-                if tool_name == "start_task":
-                    kwargs["vlm_defaults"] = vlm_config
-                elif tool_name == "process_task_page":
-                    kwargs["vlm_config"] = vlm_config
+                inject_key = inject_cfg["tool_keys"].get(tool_name, inject_cfg["default_key"])
+                kwargs[inject_key] = vlm_config
 
     try:
         result = await registry.execute_command(
