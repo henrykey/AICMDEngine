@@ -297,12 +297,14 @@ class MCPProtocolHandler:
 
         # 执行工具（传递JWT token和tenant_id）
         try:
+            effective_arguments = dict(arguments)
+            effective_arguments.setdefault("auth_token", jwt_token)
+            effective_arguments.setdefault("tenant_id", tenant_id)
+
             result = await registry.execute_command(
                 mcp_name=mcp_name,
                 tool_name=tool_name,
-                auth_token=jwt_token,  # 传递JWT token
-                tenant_id=tenant_id,   # 传递tenant_id
-                **arguments
+                **effective_arguments
             )
 
             return {
