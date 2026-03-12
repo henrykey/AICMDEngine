@@ -76,7 +76,7 @@ def process_page(
                 layout_probe = {"error": str(exc)}
 
         if mode == "DIRECT":
-            markdown = _clean_markdown(page.get_text("text") or "")
+            markdown = _build_direct_markdown(page)
             structured = {"formulas": [], "tables": [], "figures": []}
             rag_page_text = ""
         elif mode == "FULL_VLM":
@@ -115,12 +115,22 @@ def process_page(
                     raise RuntimeError("full_vlm_no_render_recovered")
         else:  # REGION_VLM
             markdown = _clean_markdown(page.get_text("text") or "")
-            structured = vlm.extract_region_structured(str(image_path))
+            structured = _normalize_structured(vlm.extract_region_structured(str(image_path)))
             vlm_calls += 1
+            markdown = _merge_region_vlm_markdown(markdown, structured)
             rag_page_text = ""
 
     doc.close()
 
+    markdown = _rebuild_render_tables_from_structured(markdown, structured)
+    if rc.get("render_cleanup_with_llm", True) and _has_table_residual_noise(markdown) and vlm.enabled:
+        try:
+            cleaned = _clean_markdown(vlm.cleanup_markdown_table_noise(markdown))
+            if cleaned and _extract_markdown_tables(cleaned):
+                markdown = cleaned
+                vlm_calls += 1
+        except Exception as exc:
+            logger.warning("render cleanup with llm failed: %r", exc)
     markdown, table_placeholders = _replace_large_tables_with_placeholders(markdown, display_page_no, rc)
     current_section = _extract_section(markdown) or (prev_context or {}).get("current_section")
     next_context = {
@@ -189,6 +199,7 @@ def _routing_defaults(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         # Default ON: complex pages often return invalid/empty dual JSON.
         # Markdown retry avoids hard-failing pages when render can still be recovered.
         "full_vlm_retry_markdown": bool(c.get("full_vlm_retry_markdown", True)),
+        "render_cleanup_with_llm": bool(c.get("render_cleanup_with_llm", True)),
         "large_table_placeholder_enabled": bool(c.get("large_table_placeholder_enabled", True)),
         "large_table_min_cols": int(c.get("large_table_min_cols", 12)),
         "large_table_min_rows": int(c.get("large_table_min_rows", 16)),
@@ -220,7 +231,31 @@ def _collect_metrics(page: fitz.Page) -> Dict[str, Any]:
     noise_ratio = noise_chars / max(len(text), 1)
 
     formula_hits = len(re.findall(r"[=∑∫√^_±≤≥≈πλμΔ]\s*", text))
-    formula_score = min(1.0, formula_hits / 40.0)
+    formula_block_hits = 0
+    try:
+        raw = page.get_text("dict") or {}
+        for block in raw.get("blocks", []):
+            if block.get("type") != 0:
+                continue
+            line_texts = []
+            for line in block.get("lines", []):
+                spans = [str(span.get("text") or "").strip() for span in line.get("spans", [])]
+                joined = " ".join([s for s in spans if s]).strip()
+                if joined:
+                    line_texts.append(joined)
+            if not line_texts:
+                continue
+            short_lines = sum(1 for item in line_texts if len(re.sub(r"\s+", "", item)) <= 3)
+            symbolic_hits = sum(
+                len(re.findall(r"[=∑∫√^_±≤≥≈πλμΔση\[\]\(\)/]", item))
+                for item in line_texts
+            )
+            if short_lines >= 4 and symbolic_hits >= 5:
+                formula_block_hits += 1
+    except Exception:
+        formula_block_hits = 0
+
+    formula_score = min(1.0, (formula_hits + formula_block_hits * 10) / 40.0)
 
     table_line_hits = 0
     for line in text.splitlines():
@@ -229,6 +264,12 @@ def _collect_metrics(page: fitz.Page) -> Dict[str, Any]:
         if "|" in line:
             table_line_hits += 1
     table_score = min(1.0, table_line_hits / 20.0)
+    native_table_count = 0
+    try:
+        finder = page.find_tables()
+        native_table_count = len(list(finder.tables)) if finder else 0
+    except Exception:
+        native_table_count = 0
 
     return {
         "text_chars": text_chars,
@@ -237,7 +278,9 @@ def _collect_metrics(page: fitz.Page) -> Dict[str, Any]:
         "drawing_density": round(drawing_density, 4),
         "noise_ratio": round(noise_ratio, 4),
         "formula_score": round(formula_score, 4),
+        "formula_block_hits": formula_block_hits,
         "table_score": round(table_score, 4),
+        "native_table_count": native_table_count,
     }
 
 
@@ -283,6 +326,44 @@ def _render_page_image(
     return out
 
 
+def _build_direct_markdown(page: fitz.Page) -> str:
+    table_items = _extract_direct_table_items(page)
+    table_rects = [item["bbox"] for item in table_items]
+    blocks = page.get_text("blocks") or []
+    items: list[tuple[float, float, str]] = []
+
+    for block in blocks:
+        if len(block) < 5:
+            continue
+        x0, y0, x1, y1, text = block[:5]
+        raw_text = str(text or "").strip()
+        if not raw_text:
+            continue
+        rect = fitz.Rect(x0, y0, x1, y1)
+        if _is_noise_block(raw_text, rect, page.rect):
+            continue
+        if any(_overlap_ratio(rect, table_rect) >= 0.45 for table_rect in table_rects):
+            continue
+        cleaned = _clean_markdown(_trim_section_tail(raw_text))
+        if not cleaned:
+            continue
+        items.append((float(y0), float(x0), cleaned))
+
+    for item in table_items:
+        items.append((float(item["bbox"].y0), float(item["bbox"].x0), item["markdown"]))
+
+    parts: list[str] = []
+    for _, _, text in sorted(items, key=lambda x: (x[0], x[1])):
+        if not text:
+            continue
+        if parts and parts[-1] == text:
+            continue
+        parts.append(text)
+
+    merged = "\n\n".join(parts)
+    return _clean_markdown(merged)
+
+
 def _clean_markdown(text: str) -> str:
     text = text.replace("\r\n", "\n")
     text = re.sub(r"\n{3,}", "\n\n", text)
@@ -302,6 +383,198 @@ def _clean_markdown(text: str) -> str:
         text = "\n".join(lines).strip()
     text = _strip_layout_noise_lines(text)
     return text
+
+
+def _extract_direct_table_items(page: fitz.Page) -> list[Dict[str, Any]]:
+    try:
+        finder = page.find_tables()
+        tables = list(finder.tables) if finder else []
+    except Exception:
+        tables = []
+
+    items: list[Dict[str, Any]] = []
+    for table in tables:
+        markdown = _table_to_markdown(table)
+        if not markdown.strip():
+            continue
+        items.append({"bbox": fitz.Rect(table.bbox), "markdown": markdown})
+    return items
+
+
+def _table_to_markdown(table: Any) -> str:
+    try:
+        rows = table.extract() or []
+    except Exception:
+        rows = []
+    if not rows:
+        return ""
+
+    normalized: list[list[str]] = []
+    width = max((len(row) for row in rows if isinstance(row, list)), default=0)
+    if width <= 1:
+        return ""
+
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        cells = [_clean_table_cell_text(cell) for cell in row]
+        if len(cells) < width:
+            cells.extend([""] * (width - len(cells)))
+        normalized.append(cells[:width])
+
+    normalized = [row for row in normalized if any(cell for cell in row)]
+    if len(normalized) < 2:
+        return ""
+
+    if _looks_like_spurious_table_header(normalized[0]):
+        normalized = normalized[1:]
+    if len(normalized) < 2:
+        return ""
+
+    if len(normalized) >= 3 and _looks_like_header_row(normalized[0]) and _looks_like_header_row(normalized[1]):
+        header = _merge_header_rows(normalized[0], normalized[1])
+        body = normalized[2:]
+    else:
+        header = normalized[0]
+        body = normalized[1:]
+
+    header = [cell or f"Col{i + 1}" for i, cell in enumerate(header)]
+    body = [row[: len(header)] + [""] * max(0, len(header) - len(row)) for row in body if any(cell for cell in row)]
+    if not body:
+        return ""
+
+    lines = [
+        "| " + " | ".join(header) + " |",
+        "| " + " | ".join(["---"] * len(header)) + " |",
+    ]
+    for row in body:
+        lines.append("| " + " | ".join(row[: len(header)]) + " |")
+    return "\n".join(lines).strip()
+
+
+def _clean_table_cell_text(value: Any) -> str:
+    text = str(value or "").replace("\r", "\n").strip()
+    if not text:
+        return ""
+    parts = [part.strip() for part in text.splitlines() if part.strip()]
+    if not parts:
+        return ""
+
+    meaningful_exists = any(len(part) >= 3 for part in parts)
+    kept: list[str] = []
+    for part in parts:
+        if re.fullmatch(r"[A-Za-z]{1,3}", part):
+            continue
+        if re.fullmatch(r"[\W_]{1,3}", part):
+            continue
+        if meaningful_exists and len(part) == 1 and re.fullmatch(r"[\u4e00-\u9fff]", part):
+            continue
+        if meaningful_exists and len(re.sub(r"\s+", "", part)) <= 3 and not re.search(r"\d", part):
+            if sum(1 for ch in part if "\u4e00" <= ch <= "\u9fff") <= 1:
+                continue
+        kept.append(part)
+
+    fallback = [
+        part
+        for part in parts
+        if not re.fullmatch(r"[A-Za-z]{1,3}", part)
+        and not re.fullmatch(r"[\W_]{1,2}", part)
+    ]
+    merged = " ".join(kept or fallback or parts)
+    merged = re.sub(r"\s+", " ", merged).strip()
+    merged = re.sub(r"^[A-Za-z]\s+", "", merged)
+    return merged
+
+
+def _looks_like_spurious_table_header(row: list[str]) -> bool:
+    joined = " ".join(row)
+    has_placeholder = any(re.fullmatch(r"col\d+", cell.strip(), flags=re.IGNORECASE) for cell in row if cell.strip())
+    return has_placeholder or ("表" in joined and any("Col" in cell for cell in row))
+
+
+def _looks_like_header_row(row: list[str]) -> bool:
+    non_empty = [cell for cell in row if cell]
+    if not non_empty:
+        return False
+    digit_cells = sum(1 for cell in non_empty if re.search(r"\d", cell))
+    return digit_cells <= max(1, len(non_empty) // 3)
+
+
+def _merge_header_rows(row1: list[str], row2: list[str]) -> list[str]:
+    expanded = list(row1)
+    carry = ""
+    for idx in range(len(expanded) - 1, -1, -1):
+        if expanded[idx]:
+            carry = expanded[idx]
+        elif carry:
+            expanded[idx] = carry
+    expanded = _forward_fill(expanded)
+
+    merged: list[str] = []
+    for a, b in zip(expanded, row2):
+        a = str(a or "").strip()
+        b = str(b or "").strip()
+        if b and (not a or a.lower().startswith("col") or a in {"安全系数", "安全系数 "}):
+            merged.append(b)
+            continue
+        if a and b and a != b:
+            generic_headers = {"安全系数", "材料", "热处理状态", "直径", "厚度"}
+            if a in generic_headers and len(b) > len(a):
+                merged.append(b)
+                continue
+        parts = []
+        for cell in (a, b):
+            if cell and cell not in parts:
+                parts.append(cell)
+        merged.append(" ".join(parts).strip())
+    return merged
+
+
+def _forward_fill(values: list[str]) -> list[str]:
+    out: list[str] = []
+    last = ""
+    for value in values:
+        value = str(value or "").strip()
+        if value:
+            last = value
+            out.append(value)
+        else:
+            out.append(last)
+    return out
+
+
+def _is_noise_block(text: str, rect: fitz.Rect, page_rect: fitz.Rect) -> bool:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return True
+    if _contains_header_footer_artifact(cleaned):
+        return True
+    if _is_header_footer_line(cleaned):
+        return True
+    if rect.width >= page_rect.width * 0.8 and rect.height >= page_rect.height * 0.35:
+        return True
+    return False
+
+
+def _overlap_ratio(a: fitz.Rect, b: fitz.Rect) -> float:
+    inter = a & b
+    if inter.is_empty:
+        return 0.0
+    denom = max(a.get_area(), 1.0)
+    return float(inter.get_area() / denom)
+
+
+def _trim_section_tail(text: str) -> str:
+    lines = str(text or "").splitlines()
+    if not lines:
+        return ""
+    trimmed: list[str] = []
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if idx > 0 and re.match(r"^\d+(?:\.\d+){1,}\s+", stripped):
+            break
+        trimmed.append(line)
+    return "\n".join(trimmed).strip()
 
 
 def _unwrap_render_json(text: str) -> str:
@@ -368,6 +641,111 @@ def _extract_section(markdown: str) -> Optional[str]:
     return None
 
 
+def _merge_region_vlm_markdown(markdown: str, structured: Dict[str, Any]) -> str:
+    text = markdown or ""
+    formulas = _dedupe_formulas_against_markdown(
+        [str(x).strip() for x in (structured.get("formulas") or []) if str(x).strip()],
+        text,
+    )
+    if not formulas:
+        return markdown
+    if not _should_append_formulas_to_region_render(text, structured):
+        return markdown
+    if re.search(r"\$[^$\n]+\$|\$\$[\s\S]+?\$\$", markdown or ""):
+        return markdown
+
+    formula_block = "\n\n".join([f"$${formula}$$" for formula in formulas])
+    text = _replace_formula_fragments(text)
+    if "式中" in text:
+        return text.replace("式中", f"{formula_block}\n\n式中", 1)
+    return (text.rstrip() + "\n\n" + formula_block).strip()
+
+
+def _dedupe_formulas_against_markdown(formulas: list[str], markdown: str) -> list[str]:
+    text = str(markdown or "")
+    if not formulas or not text:
+        return formulas
+    compact_text = _latex_compact(text)
+    out: list[str] = []
+    for formula in formulas:
+        compact_formula = _latex_compact(formula)
+        if compact_formula and compact_formula in compact_text:
+            continue
+        out.append(formula)
+    return _unique_keep_order(out)
+
+
+def _latex_compact(text: str) -> str:
+    s = str(text or "")
+    s = s.replace("\\,", "")
+    s = s.replace("\\ ", "")
+    s = s.replace("\\mathrm{~h}", "\\mathrm{h}")
+    s = re.sub(r"\s+", "", s)
+    return s
+
+
+def _should_append_formulas_to_region_render(markdown: str, structured: Dict[str, Any]) -> bool:
+    text = str(markdown or "")
+    if not text.strip():
+        return False
+    if structured.get("tables"):
+        return False
+    if "式中" in text:
+        return True
+    if re.search(r"\(\d+-\d+\)", text):
+        return True
+    if _looks_like_formula_fragment_page(text):
+        return True
+    return False
+
+
+def _looks_like_formula_fragment_page(markdown: str) -> bool:
+    lines = [ln.strip() for ln in str(markdown or "").splitlines() if ln.strip()]
+    if not lines:
+        return False
+    short_formulaish = 0
+    for line in lines:
+        if _is_formula_fragment_line(line):
+            short_formulaish += 1
+    return short_formulaish >= 6
+
+
+def _replace_formula_fragments(text: str) -> str:
+    lines = (text or "").splitlines()
+    if not lines:
+        return text
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        if _is_formula_fragment_line(lines[i]):
+            j = i
+            fragment_count = 0
+            while j < len(lines) and _is_formula_fragment_line(lines[j]):
+                fragment_count += 1
+                j += 1
+            label = lines[j].strip() if j < len(lines) and re.search(r"^\(\d+-\d+\)$", lines[j].strip()) else ""
+            if fragment_count >= 4 and label:
+                out.append(label)
+                i = j + 1
+                continue
+        out.append(lines[i])
+        i += 1
+    merged = "\n".join(out)
+    merged = re.sub(r"\n{3,}", "\n\n", merged)
+    return merged.strip()
+
+
+def _is_formula_fragment_line(line: str) -> bool:
+    t = (line or "").strip()
+    if not t:
+        return False
+    if re.search(r"[\u4e00-\u9fff]", t):
+        return False
+    if len(t) > 20:
+        return False
+    return bool(re.fullmatch(r"[\[\]A-Za-z0-9σηΣΠΤτσpPtT=／/\.\-\s]+", t))
+
+
 def _build_rag_content(markdown: str, structured: Dict[str, Any], rag_page_text: str = "") -> str:
     base = _strip_layout_noise_lines(rag_page_text.strip() or markdown.strip())
     parts = [base] if base else []
@@ -390,8 +768,15 @@ def _build_rag_content(markdown: str, structured: Dict[str, Any], rag_page_text:
 def _strip_layout_noise_lines(text: str) -> str:
     if not text:
         return text
-    lines = [ln.rstrip() for ln in text.splitlines()]
-    cleaned = [ln for ln in lines if not _is_header_footer_line(ln) and not _is_noise_figure_line(ln)]
+    lines = [_clean_inline_artifacts(ln.rstrip()) for ln in text.splitlines()]
+    cleaned = [
+        ln
+        for ln in lines
+        if not _is_header_footer_line(ln)
+        and not _is_noise_figure_line(ln)
+        and not _is_noise_text_line(ln)
+        and not _is_formula_noise_line(ln)
+    ]
     out = "\n".join(cleaned).strip()
     out = re.sub(r"\n{3,}", "\n\n", out)
     return out
@@ -404,8 +789,12 @@ def _is_header_footer_line(line: str) -> bool:
     # Typical standards header: GB/T 150.1—2024
     if re.match(r"^[A-Z]{1,6}\s*/?\s*[A-Z]?\s*\d+(?:\.\d+)?\s*[—-]\s*\d{4}$", t):
         return True
+    if re.match(r"^(?:[A-Z]{1,6}\s*/?\s*[A-Z]?\s*\d+(?:\.\d+)?|TSG\s*\d+)\s*[—-]\s*\d{4}\b", t):
+        return True
     # Standalone page number.
     if re.match(r"^\d{1,4}$", t):
+        return True
+    if re.match(r"^[—-]\s*\d{1,4}\s*[—-]$", t):
         return True
     return False
 
@@ -432,6 +821,78 @@ def _is_noise_figure_line(line: str) -> bool:
     return any(k in low for k in noise_terms)
 
 
+def _is_noise_text_line(line: str) -> bool:
+    t = (line or "").strip()
+    if not t:
+        return False
+    if _contains_header_footer_artifact(t):
+        return True
+    low = t.lower()
+    if "http://" in low or "https://" in low or "www." in low:
+        return True
+    if "aqsiq.gov.cn" in low:
+        return True
+    if "国家质监监督检验检疫总局" in t:
+        return True
+    return False
+
+
+def _contains_header_footer_artifact(text: str) -> bool:
+    t = str(text or "").strip()
+    if not t:
+        return False
+    low = t.lower()
+    if "aqsiq.gov.cn" in low:
+        return True
+    if "国家质监监督检验检疫总局" in t:
+        return True
+    if "特种设备安全技术规范" in t and re.search(r"\bTSG\s*\d+\s*[—-]\s*\d{4}\b", t):
+        return True
+    if re.search(r"[—-]\s*\d{1,4}\s*[—-]", t):
+        compact = re.sub(r"\s+", "", t)
+        if re.fullmatch(r"[—-]\d{1,4}[—-]", compact):
+            return True
+    return False
+
+
+def _clean_inline_artifacts(line: str) -> str:
+    text = str(line or "")
+    if not text:
+        return ""
+    text = re.sub(r"\[\s*\]", "", text)
+    text = re.sub(r"\bTSG\s*\d+\s*[—-]\s*\d{4}\b", "", text, flags=re.IGNORECASE)
+    text = text.replace("特种设备安全技术规范", "")
+    text = text.replace("国家质监监督检验检疫总局", "")
+    text = re.sub(r"https?://\S+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bwww\.\S+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"[—-]\s*\d{1,4}\s*[—-]", "", text)
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip()
+
+
+def _is_formula_noise_line(line: str) -> bool:
+    t = (line or "").strip()
+    if not t:
+        return False
+    if re.search(r"[\u4e00-\u9fff]", t):
+        return False
+    compact = re.sub(r"\s+", "", t)
+    if len(compact) > 8:
+        return False
+    return compact in {
+        "T",
+        "t",
+        "p",
+        "σ",
+        "η",
+        "=",
+        "Tσ",
+        "tσ",
+        "pσ",
+        "σ／σ",
+    }
+
+
 def _normalize_structured(value: Any) -> Dict[str, Any]:
     raw = value if isinstance(value, dict) else {}
 
@@ -443,12 +904,46 @@ def _normalize_structured(value: Any) -> Dict[str, Any]:
 
     figures = _as_list("figures")
     figures = [f for f in figures if not _is_noise_figure_line(f"[FIGURE: {f}]")]
+    tables = _normalize_table_candidates(_as_list("tables"))
+    formulas = _filter_formula_candidates(_as_list("formulas"), tables)
 
     return {
-        "formulas": _as_list("formulas"),
-        "tables": _normalize_table_candidates(_as_list("tables")),
+        "formulas": formulas,
+        "tables": tables,
         "figures": figures,
     }
+
+
+def _filter_formula_candidates(formulas: list[str], tables: list[str]) -> list[str]:
+    if not formulas:
+        return []
+    table_text = "\n".join([str(t or "") for t in tables]).replace(" ", "")
+    out: list[str] = []
+    for formula in formulas:
+        f = str(formula or "").strip()
+        if not f:
+            continue
+        compact = re.sub(r"\s+", "", f)
+        if not compact:
+            continue
+        if table_text and compact in table_text and _looks_like_table_formula_field(compact):
+            continue
+        if compact in {"R_m", "R_D", "R_n", "R_eL", "R_p1.0", "R_p0.2"}:
+            continue
+        out.append(f)
+    return _unique_keep_order(out)
+
+
+def _looks_like_table_formula_field(compact: str) -> bool:
+    if len(compact) <= 24:
+        return True
+    if re.fullmatch(r"R_[A-Za-z0-9\.\{\}\\]+", compact):
+        return True
+    if re.fullmatch(r"n_[A-Za-z0-9\{\}\\]+.?[≥≤=].+", compact):
+        return True
+    if "1000h" in compact or "0.01%" in compact:
+        return True
+    return False
 
 
 def _normalize_table_candidates(vlm_tables: list[str]) -> list[str]:
@@ -478,6 +973,7 @@ def _normalize_table_candidates(vlm_tables: list[str]) -> list[str]:
                         s = "\n".join(lines).strip()
             except Exception:
                 pass
+        s = _normalize_markdown_table_text(s)
         if s:
             out.append(s)
     return out
@@ -508,6 +1004,277 @@ def _select_rag_tables(markdown: str, vlm_tables: list[str]) -> list[str]:
         return [str(x).strip() for x in vlm_tables if str(x).strip()]
     anchors = _extract_table_anchors(markdown)
     return [f"[TABLE_PLACEHOLDER] {a}: table structure unavailable; see original page." for a in anchors]
+
+
+def _rebuild_render_tables_from_structured(markdown: str, structured: Dict[str, Any]) -> str:
+    text = (markdown or "").strip()
+    if not text:
+        return text
+    if _extract_markdown_tables(text):
+        return text
+
+    tables = _usable_structured_tables(structured.get("tables") or [])
+    if not tables:
+        return text
+
+    lines = text.splitlines()
+    anchors = _extract_table_anchors(text)
+    inserted = 0
+
+    for idx, table_md in enumerate(tables):
+        anchor = anchors[idx] if idx < len(anchors) else ""
+        if anchor:
+            pos = _find_anchor_insert_pos(lines, anchor)
+            if pos >= 0:
+                prune_end = _find_fragment_block_end(lines, pos, table_md)
+                if prune_end > pos:
+                    lines[pos:prune_end] = []
+                    pos = _find_anchor_insert_pos(lines, anchor)
+                block = ["", table_md, ""]
+                lines[pos:pos] = block
+                inserted += 1
+                continue
+        lines.extend(["", table_md, ""])
+        inserted += 1
+
+    if inserted <= 0:
+        return text
+    merged = "\n".join(lines)
+    merged = re.sub(r"\n{3,}", "\n\n", merged).strip()
+    merged = _cleanup_fragments_before_tables(merged)
+    return merged
+
+
+def _usable_structured_tables(vlm_tables: list[str]) -> list[str]:
+    out: list[str] = []
+    for item in vlm_tables:
+        s = _normalize_markdown_table_text(str(item or "").strip())
+        if not s:
+            continue
+        if s.startswith("[TABLE_PLACEHOLDER]"):
+            continue
+        if not _table_looks_like_markdown(s):
+            continue
+        out.append(s)
+    return out
+
+
+def _table_looks_like_markdown(text: str) -> bool:
+    rows = _extract_markdown_tables(text)
+    if rows:
+        return True
+    lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return False
+    if "|" not in lines[0] or "|" not in lines[1]:
+        return False
+    return bool(re.match(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$", lines[1]))
+
+
+def _normalize_markdown_table_text(table_text: str) -> str:
+    text = str(table_text or "").strip()
+    if not text or "|" not in text:
+        return text
+
+    rows: list[list[str]] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or "|" not in line:
+            continue
+        if re.match(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$", line):
+            continue
+        rows.append(_split_markdown_row(line))
+
+    if len(rows) < 2:
+        return text
+
+    width = max((len(r) for r in rows), default=0)
+    if width <= 1:
+        return text
+
+    normalized: list[list[str]] = []
+    for row in rows:
+        cells = [str(c or "").strip() for c in row]
+        if len(cells) < width:
+            cells.extend([""] * (width - len(cells)))
+        normalized.append(cells[:width])
+
+    normalized = [row for row in normalized if any(cell for cell in row)]
+    if len(normalized) < 2:
+        return text
+
+    if _looks_like_spurious_table_header(normalized[0]):
+        normalized = normalized[1:]
+    if len(normalized) < 2:
+        return text
+
+    if len(normalized) >= 3 and _looks_like_header_row(normalized[0]) and _looks_like_header_row(normalized[1]):
+        header = _merge_header_rows(normalized[0], normalized[1])
+        body = normalized[2:]
+    else:
+        header = normalized[0]
+        body = normalized[1:]
+
+    header = [cell or f"Col{i + 1}" for i, cell in enumerate(header)]
+    body = [row[: len(header)] + [""] * max(0, len(header) - len(row)) for row in body if any(cell for cell in row)]
+    if not body:
+        return text
+
+    lines = [
+        "| " + " | ".join(header) + " |",
+        "| " + " | ".join(["---"] * len(header)) + " |",
+    ]
+    for row in body:
+        lines.append("| " + " | ".join(row[: len(header)]) + " |")
+    return "\n".join(lines).strip()
+
+
+def _find_anchor_insert_pos(lines: list[str], anchor: str) -> int:
+    needle = (anchor or "").strip()
+    if not needle:
+        return -1
+    needle_norm = re.sub(r"\s+", "", needle)
+    for idx, line in enumerate(lines):
+        line_stripped = line.strip()
+        if line_stripped == needle:
+            return idx + 1
+        if re.sub(r"\s+", "", line_stripped) == needle_norm:
+            return idx + 1
+    return -1
+
+
+def _find_fragment_block_end(lines: list[str], start: int, table_md: str) -> int:
+    table_tokens = _table_fragment_tokens(table_md)
+    idx = start
+    while idx < len(lines):
+        line = lines[idx]
+        stripped = line.strip()
+        if not stripped:
+            idx += 1
+            continue
+        if _is_stop_line_for_fragment_cleanup(stripped):
+            break
+        if _looks_like_table_fragment_line(stripped, table_tokens):
+            idx += 1
+            continue
+        break
+    return idx
+
+
+def _table_fragment_tokens(table_md: str) -> set[str]:
+    tokens: set[str] = set()
+    for line in str(table_md or "").splitlines():
+        if "|" not in line:
+            continue
+        for cell in _split_markdown_row(line):
+            text = re.sub(r"<br>", " ", str(cell or ""), flags=re.IGNORECASE)
+            parts = [p for p in re.split(r"[\s\(\)（）,，;；:/]+", text) if p]
+            for part in parts:
+                clean = part.strip().lower()
+                if len(clean) >= 2:
+                    tokens.add(clean)
+    return tokens
+
+
+def _is_stop_line_for_fragment_cleanup(line: str) -> bool:
+    if re.match(r"^(表|Table)\s*", line, flags=re.IGNORECASE):
+        return True
+    if re.match(r"^\d+(?:\.\d+){1,}\s*", line):
+        return True
+    if re.match(r"^注\s*\d*", line):
+        return True
+    if "|" in line:
+        return True
+    return False
+
+
+def _looks_like_table_fragment_line(line: str, table_tokens: set[str]) -> bool:
+    compact = re.sub(r"\s+", "", line)
+    if not compact:
+        return False
+    if re.fullmatch(r"(?:[\u4e00-\u9fff]\s*){2,12}", line):
+        return True
+    if len(compact) <= 12:
+        return True
+    if re.fullmatch(r"[\[\]\(\)A-Za-z0-9_\.\-≥≤=×%/\\]+", compact):
+        return True
+    lowered = line.lower()
+    overlap = sum(1 for tok in table_tokens if tok and tok in lowered)
+    if overlap >= 2:
+        return True
+    if len(compact) <= 24 and overlap >= 1:
+        return True
+    return False
+
+
+def _cleanup_fragments_before_tables(markdown: str) -> str:
+    lines = (markdown or "").splitlines()
+    if not lines:
+        return markdown
+
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        out.append(lines[i])
+        if not re.match(r"^(表|Table)\s*", lines[i].strip(), flags=re.IGNORECASE):
+            i += 1
+            continue
+
+        j = i + 1
+        fragment_start = j
+        while j < n and not (lines[j].strip().startswith("|") and j + 1 < n and lines[j + 1].strip().startswith("|")):
+            if _is_stop_line_for_fragment_cleanup(lines[j].strip()):
+                break
+            j += 1
+
+        if j < n and lines[j].strip().startswith("|") and fragment_start < j:
+            sample_end = j
+            while sample_end < n and lines[sample_end].strip().startswith("|"):
+                sample_end += 1
+            table_tokens = _table_fragment_tokens("\n".join(lines[j:sample_end]))
+            if any(_looks_like_table_fragment_line(lines[k].strip(), table_tokens) for k in range(fragment_start, j) if lines[k].strip()):
+                while out and not out[-1].strip():
+                    out.pop()
+                i = j
+                continue
+
+        i += 1
+
+    merged = "\n".join(out)
+    merged = re.sub(r"\n{3,}", "\n\n", merged).strip()
+    return merged
+
+
+def _has_table_residual_noise(markdown: str) -> bool:
+    lines = (markdown or "").splitlines()
+    if not lines or not _extract_markdown_tables(markdown):
+        return False
+
+    noisy_hits = 0
+    seen_table = False
+    current_table_tokens: set[str] = set()
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i].strip()
+        if not line:
+            i += 1
+            continue
+        if line.startswith("|") and i + 1 < n and lines[i + 1].strip().startswith("|"):
+            seen_table = True
+            j = i
+            while j < n and lines[j].strip().startswith("|"):
+                j += 1
+            current_table_tokens = _table_fragment_tokens("\n".join(lines[i:j]))
+            i = j
+            continue
+        if seen_table and not _is_stop_line_for_fragment_cleanup(line) and _looks_like_table_fragment_line(line, current_table_tokens):
+            noisy_hits += 1
+            if noisy_hits >= 4:
+                return True
+        i += 1
+    return False
 
 
 def _extract_markdown_tables(markdown: str) -> list[str]:
@@ -729,8 +1496,9 @@ def _build_table_semantic_desc(anchor: str, table_block: str, lines: list[str], 
     dims = [_normalize_dim_token(x) for x in dims]
     dims = _unique_keep_order([x for x in dims if x])[:6]
     if dims:
-        return f"{base}，主要维度包括：{'、'.join(dims)}"
-    return base
+        usage = _build_table_usage_hint(dims)
+        return f"{base}，主要维度包括：{'、'.join(dims)}。{usage}"
+    return f"{base}。可结合表题与页号回查原文获取完整数值。"
 
 
 def _nearby_context(lines: list[str], table_start: int) -> str:
@@ -805,6 +1573,17 @@ def _normalize_dim_token(token: str) -> str:
     return t
 
 
+def _build_table_usage_hint(dims: list[str]) -> str:
+    d = [x for x in (dims or []) if x]
+    if not d:
+        return "可结合表题与页号回查原文获取完整数值。"
+    if "温度" in d and "厚度" in d:
+        return "可按温度与厚度定位目标单元，再结合材料牌号或标准读取对应参数。"
+    if "材料牌号" in d and "材料标准" in d:
+        return "可先按材料牌号与材料标准筛选，再按其余维度查取目标参数。"
+    return f"可按{'、'.join(d[:3])}逐步定位目标参数，并回看原PDF核对细节。"
+
+
 def _find_table_anchor(lines: list[str], table_start: int) -> str:
     for i in range(table_start - 1, max(-1, table_start - 13), -1):
         if i < 0:
@@ -836,7 +1615,7 @@ def _extract_table_anchors(markdown: str) -> list[str]:
         t = ln.strip()
         if not t:
             continue
-        if re.match(r"^(表|Table)\s*[A-Za-z]?(?:\.\d+)+", t, flags=re.IGNORECASE):
+        if re.match(r"^(表|Table)\s*[A-Za-z]?(?:(?:[.\-]\d+)+|\d+(?:[.\-]\d+)*)", t, flags=re.IGNORECASE):
             anchors.append(t[:120])
     seen = set()
     uniq = []

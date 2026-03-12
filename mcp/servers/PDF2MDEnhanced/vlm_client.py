@@ -180,6 +180,23 @@ class DynamicVLMClient:
             return data
         return {"formulas": [], "tables": [], "figures": []}
 
+    def cleanup_markdown_table_noise(self, markdown_text: str) -> str:
+        self.ensure_enabled()
+        prompt = (
+            "Clean the following markdown page content.\n"
+            "Goal: remove only duplicated table residue that appears after or around markdown tables.\n"
+            "Rules:\n"
+            "1) Keep all markdown tables unchanged.\n"
+            "2) Keep normal paragraphs, headings, notes, and formulas unchanged.\n"
+            "3) Delete only obvious table residue lines that repeat table headers/cells as broken fragments.\n"
+            "4) Do not summarize, rewrite, reorder, or translate.\n"
+            "5) Return markdown only, no code fences, no explanations.\n"
+            "\n"
+            "Markdown input:\n"
+            f"{markdown_text}"
+        )
+        return self._call_text_prompt(prompt, max_tokens=min(self.max_tokens, 4096))
+
     def _call_image_prompt(self, image_path: str, prompt: str, max_tokens: int) -> str:
         self.ensure_enabled()
         with open(image_path, "rb") as f:
@@ -230,6 +247,47 @@ class DynamicVLMClient:
                 time.sleep(0.4 * (attempt + 1))
 
         raise RuntimeError(f"VLM call failed: {last_err}")
+
+    def _call_text_prompt(self, prompt: str, max_tokens: int) -> str:
+        self.ensure_enabled()
+
+        last_err = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                t0 = time.time()
+                resp = self._client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+                    timeout=self.timeout_sec,
+                    max_tokens=max_tokens,
+                    temperature=min(self.temperature, 0.1),
+                )
+                elapsed = time.time() - t0
+                logger.info(
+                    "VLM text call ok: model=%s max_tokens=%s attempt=%s elapsed=%.2fs",
+                    self.model,
+                    max_tokens,
+                    attempt + 1,
+                    elapsed,
+                )
+                content = resp.choices[0].message.content if resp.choices else ""
+                if isinstance(content, list):
+                    return "\n".join([x.get("text", "") for x in content if isinstance(x, dict)])
+                return content or ""
+            except Exception as exc:
+                last_err = exc
+                logger.warning(
+                    "VLM text call failed: model=%s attempt=%s/%s error=%s",
+                    self.model,
+                    attempt + 1,
+                    self.max_retries + 1,
+                    repr(exc),
+                )
+                if attempt >= self.max_retries:
+                    break
+                time.sleep(0.4 * (attempt + 1))
+
+        raise RuntimeError(f"VLM text call failed: {last_err}")
 
     def _extract_json(self, text: str) -> Optional[Dict[str, Any]]:
         if not text:

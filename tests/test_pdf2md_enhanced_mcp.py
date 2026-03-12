@@ -28,6 +28,7 @@ import websockets.exceptions
 MCP_ROUTER_URL = "ws://localhost:8000/mcp/v1"
 MCP_ROUTER_HTTP_URL = "http://localhost:8000"
 PDF_PATH = Path.home() / "Documents/GB/GB∕T 150.1~4-2024 压力容器 扫描版.pdf"
+# PDF_PATH = Path.home() / "Documents/GB/TSG 21-2016 固定式压力容器安全技术监察规程.pdf"
 TOKEN_FILE = "/tmp/pdf2md_token.txt"
 
 
@@ -453,6 +454,36 @@ def _to_cn_table_desc(text: str) -> str:
     return "该表为页面中的结构化表格，包含可检索字段与数值信息。"
 
 
+def _formula_semantic_desc(latex: str) -> str:
+    s = str(latex or "").strip()
+    if not s:
+        return ""
+
+    compact = re.sub(r"\s+", "", s)
+    symbols = []
+    if re.search(r"p_\{?\\mathrm\{T\}\}?|p_T", compact):
+        symbols.append("耐压试验压力 p_T")
+    elif re.search(r"\bp\b", compact):
+        symbols.append("压力参数 p")
+
+    if "\\eta" in compact:
+        symbols.append("压力系数 η")
+    if "\\sigma" in compact:
+        symbols.append("许用应力 [σ]")
+    if re.search(r"\\frac|/", compact):
+        symbols.append("应力比值")
+
+    if "=" in compact and len(symbols) >= 2:
+        left = symbols[0]
+        right = "、".join(symbols[1:])
+        return f"该公式用于计算{left}，主要由{right}共同决定。"
+    if "=" in compact and symbols:
+        return f"该公式用于表达{symbols[0]}与相关参数之间的计算关系。"
+    if "\\frac" in compact:
+        return "该公式用于表达分子分母参数之间的比值关系。"
+    return "该公式用于表达页面中相关工程参数之间的计算关系。"
+
+
 def _build_canonical_page_record(
     task_id: str,
     doc_id: str,
@@ -506,6 +537,7 @@ def _build_canonical_page_record(
         if not text:
             continue
         eid = f"p{source_page_no}_f{idx}"
+        semantic_desc = _formula_semantic_desc(text)
         refs.append(eid)
         flat_elements.append(
             {
@@ -513,8 +545,8 @@ def _build_canonical_page_record(
                 "type": "formula",
                 "anchor": None,
                 "latex": text,
-                "semantic_desc": text[:280],
-                "keywords": _extract_keywords(text),
+                "semantic_desc": semantic_desc,
+                "keywords": _extract_keywords(f"{text} {semantic_desc}"),
             }
         )
 
@@ -751,6 +783,7 @@ async def run_task_pages(
     large_table_min_cols=12,
     large_table_min_rows=16,
     large_table_min_cells=180,
+    progress_pages=None,
 ):
     start_tool = "pdf2md-enhanced.start_task"
     process_tool = "pdf2md-enhanced.process_task_page"
@@ -773,6 +806,7 @@ async def run_task_pages(
 
     used_subset_pdf = False
     original_pages = list(pages)
+    progress_pages = list(progress_pages or pages)
     # Docker/remote MCP often cannot access host local path; fallback to file_data transfer.
     if start_data and start_data.get("error") and "no such file" in str(start_data.get("error")).lower():
         mode = (file_data_mode or "single").strip().lower()
@@ -804,6 +838,7 @@ async def run_task_pages(
                     large_table_min_cols=large_table_min_cols,
                     large_table_min_rows=large_table_min_rows,
                     large_table_min_cells=large_table_min_cells,
+                    progress_pages=progress_pages,
                 )
             return
 
@@ -836,6 +871,7 @@ async def run_task_pages(
                     large_table_min_cols=large_table_min_cols,
                     large_table_min_rows=large_table_min_rows,
                     large_table_min_cells=large_table_min_cells,
+                    progress_pages=progress_pages,
                 )
             return
 
@@ -886,6 +922,7 @@ async def run_task_pages(
                     large_table_min_cols=large_table_min_cols,
                     large_table_min_rows=large_table_min_rows,
                     large_table_min_cells=large_table_min_cells,
+                    progress_pages=progress_pages,
                 )
                 await run_task_pages(
                     transport=transport,
@@ -911,6 +948,7 @@ async def run_task_pages(
                     large_table_min_cols=large_table_min_cols,
                     large_table_min_rows=large_table_min_rows,
                     large_table_min_cells=large_table_min_cells,
+                    progress_pages=progress_pages,
                 )
                 return
             print("✗ 单页file_data仍超出WebSocket消息限制，请提高 --ws-max-mb 或改为可访问本地路径模式")
@@ -946,7 +984,12 @@ async def run_task_pages(
     prev_context = None
     for idx, page_no in enumerate(planned_pages, start=1):
         display_page_no = original_pages[page_no - 1] if used_subset_pdf and 1 <= page_no <= len(original_pages) else page_no
-        print(f"\n→ 处理第 {display_page_no} 页 ({idx}/{len(planned_pages)})")
+        total_progress = len(progress_pages) if progress_pages else len(planned_pages)
+        try:
+            progress_idx = progress_pages.index(display_page_no) + 1 if progress_pages else idx
+        except ValueError:
+            progress_idx = idx
+        print(f"\n→ 处理第 {display_page_no} 页 ({progress_idx}/{total_progress})")
         process_data = None
         elapsed = 0.0
         max_attempts = max(1, int(page_retries) + 1)
