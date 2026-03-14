@@ -9,6 +9,7 @@ import logging
 import os
 import re
 from datetime import datetime
+from urllib.parse import urljoin
 
 from ..mcp import BaseMCPServer, Tool, ToolResult
 from ..services.http_client import HTTPClient
@@ -38,6 +39,7 @@ class MembershipMCPServer(BaseMCPServer):
         self.base_url = settings.membership_service_url
         # Pass membership_url as well so token refresh can work on 401
         self.http_client = HTTPClient(base_url=self.base_url, membership_url=self.base_url)
+        self._audit_system_tokens: Dict[int, str] = {}
         self._register_tools()
 
     def _register_tools(self) -> None:
@@ -1680,6 +1682,49 @@ class MembershipMCPServer(BaseMCPServer):
 
         return headers
 
+    async def _resolve_audit_auth_token(self, tenant_id: int, user_token: Optional[str]) -> Optional[str]:
+        """Resolve a long-lived system token for audit submission, falling back to the user token."""
+        cached = self._audit_system_tokens.get(tenant_id)
+        if cached and not self.http_client._is_token_expired(cached):
+            return cached
+
+        source_token = user_token or self.auth_token
+        if not source_token:
+            return None
+
+        if self.http_client._is_token_expired(source_token):
+            logger.warning("Audit source token already expired before system token exchange; using original token")
+            return source_token
+
+        try:
+            exchange_url = urljoin(self.base_url, f"/v2/auth/system-token?tenantId={tenant_id}")
+            response = await self.http_client.client.post(
+                exchange_url,
+                headers={
+                    "Authorization": f"Bearer {source_token}",
+                    "X-Tenant-ID": str(tenant_id),
+                    "Content-Type": "application/json"
+                },
+                timeout=10,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                system_token = data.get("access_token")
+                if system_token:
+                    self._audit_system_tokens[tenant_id] = system_token
+                    return system_token
+                logger.warning("System token exchange succeeded but access_token was missing")
+            else:
+                logger.warning(
+                    "System token exchange failed for audit submission: status=%s body=%s",
+                    response.status_code,
+                    response.text,
+                )
+        except Exception as exc:
+            logger.warning("System token exchange failed for audit submission: %s", exc)
+
+        return source_token
+
     async def submit_audit_event(
         self,
         category: str,
@@ -1712,10 +1757,11 @@ class MembershipMCPServer(BaseMCPServer):
                 "body": payload
             }
 
+            audit_auth_token = await self._resolve_audit_auth_token(tenant_id, auth_token)
             response = await self.http_client.execute(
                 command="POST /v2/audit/events",
                 params=params,
-                auth_token=auth_token or self.auth_token,
+                auth_token=audit_auth_token,
                 tenant_id=tenant_id
             )
 
@@ -1749,10 +1795,11 @@ class MembershipMCPServer(BaseMCPServer):
             # Use tenant_id from first event
             first_event_tenant = events[0].get("tenant_id") if events else self.tenant_id
 
+            audit_auth_token = await self._resolve_audit_auth_token(first_event_tenant, auth_token)
             response = await self.http_client.execute(
                 command="POST /v2/audit/events/batch",
                 params=params,
-                auth_token=auth_token or self.auth_token,
+                auth_token=audit_auth_token,
                 tenant_id=first_event_tenant
             )
 
