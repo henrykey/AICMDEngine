@@ -22,6 +22,7 @@ class DynamicVLMClient:
         self.max_tokens = int(cfg.get("max_tokens", 4096))
         self.temperature = float(cfg.get("temperature", 0.1))
         self.extra_headers = cfg.get("extra_headers") or {}
+        self._runtime_max_tokens_cap: Optional[int] = None
 
         self.enabled = bool(self.model and self.api_key and self.base_url)
         self._client = None
@@ -206,7 +207,8 @@ class DynamicVLMClient:
         for attempt in range(self.max_retries + 1):
             try:
                 t0 = time.time()
-                resp = self._client.chat.completions.create(
+                call_max_tokens = self._apply_runtime_max_tokens_cap(max_tokens)
+                content, mode = self._chat_completion_with_stream_fallback(
                     model=self.model,
                     messages=[
                         {
@@ -218,20 +220,18 @@ class DynamicVLMClient:
                         }
                     ],
                     timeout=self.timeout_sec,
-                    max_tokens=max_tokens,
+                    max_tokens=call_max_tokens,
                     temperature=self.temperature,
                 )
                 elapsed = time.time() - t0
                 logger.info(
-                    "VLM call ok: model=%s max_tokens=%s attempt=%s elapsed=%.2fs",
+                    "VLM call ok: model=%s max_tokens=%s attempt=%s mode=%s elapsed=%.2fs",
                     self.model,
-                    max_tokens,
+                    call_max_tokens,
                     attempt + 1,
+                    mode,
                     elapsed,
                 )
-                content = resp.choices[0].message.content if resp.choices else ""
-                if isinstance(content, list):
-                    return "\n".join([x.get("text", "") for x in content if isinstance(x, dict)])
                 return content or ""
             except Exception as exc:
                 last_err = exc
@@ -255,24 +255,23 @@ class DynamicVLMClient:
         for attempt in range(self.max_retries + 1):
             try:
                 t0 = time.time()
-                resp = self._client.chat.completions.create(
+                call_max_tokens = self._apply_runtime_max_tokens_cap(max_tokens)
+                content, mode = self._chat_completion_with_stream_fallback(
                     model=self.model,
                     messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}],
                     timeout=self.timeout_sec,
-                    max_tokens=max_tokens,
+                    max_tokens=call_max_tokens,
                     temperature=min(self.temperature, 0.1),
                 )
                 elapsed = time.time() - t0
                 logger.info(
-                    "VLM text call ok: model=%s max_tokens=%s attempt=%s elapsed=%.2fs",
+                    "VLM text call ok: model=%s max_tokens=%s attempt=%s mode=%s elapsed=%.2fs",
                     self.model,
-                    max_tokens,
+                    call_max_tokens,
                     attempt + 1,
+                    mode,
                     elapsed,
                 )
-                content = resp.choices[0].message.content if resp.choices else ""
-                if isinstance(content, list):
-                    return "\n".join([x.get("text", "") for x in content if isinstance(x, dict)])
                 return content or ""
             except Exception as exc:
                 last_err = exc
@@ -288,6 +287,121 @@ class DynamicVLMClient:
                 time.sleep(0.4 * (attempt + 1))
 
         raise RuntimeError(f"VLM text call failed: {last_err}")
+
+    def _chat_completion_with_stream_fallback(self, **kwargs: Any) -> tuple[str, str]:
+        """
+        Prefer streaming mode for lower first-token latency.
+        Automatically falls back to non-stream mode for providers/gateways
+        that do not support stream responses.
+        """
+        stream_err = None
+        try:
+            stream_resp = self._client.chat.completions.create(stream=True, **kwargs)
+            chunks: list[str] = []
+            for chunk in stream_resp:
+                piece = self._extract_stream_chunk_text(chunk)
+                if piece:
+                    chunks.append(piece)
+
+            merged = "".join(chunks)
+            if merged:
+                return merged, "stream"
+
+            logger.warning("VLM stream call returned empty content, fallback to non-stream mode")
+        except Exception as exc:
+            stream_err = exc
+            if self._adjust_max_tokens_from_error(exc, kwargs):
+                logger.warning(
+                    "VLM stream call failed due to max_tokens range, retry stream with adjusted max_tokens=%s",
+                    kwargs.get("max_tokens"),
+                )
+                try:
+                    stream_resp = self._client.chat.completions.create(stream=True, **kwargs)
+                    chunks: list[str] = []
+                    for chunk in stream_resp:
+                        piece = self._extract_stream_chunk_text(chunk)
+                        if piece:
+                            chunks.append(piece)
+
+                    merged = "".join(chunks)
+                    if merged:
+                        return merged, "stream"
+                    logger.warning("VLM stream retry returned empty content, fallback to non-stream mode")
+                except Exception as retry_exc:
+                    stream_err = retry_exc
+                    logger.warning("VLM stream retry failed, fallback to non-stream mode: error=%s", repr(retry_exc))
+            else:
+                logger.warning("VLM stream call failed, fallback to non-stream mode: error=%s", repr(exc))
+
+        try:
+            resp = self._client.chat.completions.create(stream=False, **kwargs)
+        except Exception as exc:
+            if self._adjust_max_tokens_from_error(exc, kwargs):
+                logger.warning(
+                    "VLM non-stream call failed due to max_tokens range, retry with adjusted max_tokens=%s",
+                    kwargs.get("max_tokens"),
+                )
+                resp = self._client.chat.completions.create(stream=False, **kwargs)
+            else:
+                raise
+        content = resp.choices[0].message.content if resp.choices else ""
+        normalized = self._normalize_message_content(content)
+        if stream_err is not None:
+            logger.info("VLM non-stream fallback succeeded after stream failure")
+        return normalized, "non-stream"
+
+    def _apply_runtime_max_tokens_cap(self, max_tokens: int) -> int:
+        cap = self._runtime_max_tokens_cap
+        if cap is None:
+            return max_tokens
+        return min(max_tokens, cap)
+
+    def _adjust_max_tokens_from_error(self, exc: Exception, kwargs: Dict[str, Any]) -> bool:
+        text = f"{type(exc).__name__}: {exc!s}"
+        m = re.search(r"Range of max_tokens should be \[(\d+),\s*(\d+)\]", text)
+        if not m:
+            return False
+
+        low = int(m.group(1))
+        high = int(m.group(2))
+        raw = kwargs.get("max_tokens", self.max_tokens)
+        try:
+            current = int(raw)
+        except Exception:
+            current = self.max_tokens
+
+        adjusted = min(max(current, low), high)
+        if adjusted == current:
+            return False
+
+        kwargs["max_tokens"] = adjusted
+        self._runtime_max_tokens_cap = high if self._runtime_max_tokens_cap is None else min(self._runtime_max_tokens_cap, high)
+        logger.warning(
+            "Detected provider max_tokens range [%s, %s]; auto-adjust max_tokens from %s to %s",
+            low,
+            high,
+            current,
+            adjusted,
+        )
+        return True
+
+    def _extract_stream_chunk_text(self, chunk: Any) -> str:
+        choices = getattr(chunk, "choices", None) or []
+        if not choices:
+            return ""
+        delta = getattr(choices[0], "delta", None)
+        if delta is None:
+            return ""
+        content = getattr(delta, "content", "")
+        return self._normalize_message_content(content)
+
+    def _normalize_message_content(self, content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = [x.get("text", "") for x in content if isinstance(x, dict)]
+            return "\n".join([x for x in parts if x])
+        return ""
 
     def _extract_json(self, text: str) -> Optional[Dict[str, Any]]:
         if not text:
