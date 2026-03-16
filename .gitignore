@@ -53,6 +53,7 @@ plan-ui/.vite/
 # External MCP servers (installed via EXTERNAL_MCPS config)
 /mcp/Office-Word-MCP-Server
 /mcp/mcp-pdf-extraction-server
+/mcp/servers/PageIndex/
 /mcp/servers/mycode
 data/*
 /mcp/servers/PDF2MD/data
