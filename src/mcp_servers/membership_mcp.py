@@ -1693,8 +1693,8 @@ class MembershipMCPServer(BaseMCPServer):
             return None
 
         if self.http_client._is_token_expired(source_token):
-            logger.warning("Audit source token already expired before system token exchange; using original token")
-            return source_token
+            logger.warning("Audit source token already expired before system token exchange; skipping audit submit")
+            return None
 
         try:
             exchange_url = urljoin(self.base_url, f"/v2/auth/system-token?tenantId={tenant_id}")
@@ -1758,6 +1758,12 @@ class MembershipMCPServer(BaseMCPServer):
             }
 
             audit_auth_token = await self._resolve_audit_auth_token(tenant_id, auth_token)
+            if not audit_auth_token:
+                logger.warning("Skipping audit event submit because no valid audit auth token is available")
+                return ToolResult.success(
+                    content=f"Audit event skipped (no valid auth token): {action}",
+                    data={"skipped": True, "reason": "NO_VALID_AUDIT_TOKEN"}
+                )
             response = await self.http_client.execute(
                 command="POST /v2/audit/events",
                 params=params,
@@ -1796,6 +1802,12 @@ class MembershipMCPServer(BaseMCPServer):
             first_event_tenant = events[0].get("tenant_id") if events else self.tenant_id
 
             audit_auth_token = await self._resolve_audit_auth_token(first_event_tenant, auth_token)
+            if not audit_auth_token:
+                logger.warning("Skipping audit events batch submit because no valid audit auth token is available")
+                return ToolResult.success(
+                    content="Audit events batch skipped (no valid auth token)",
+                    data={"skipped": True, "reason": "NO_VALID_AUDIT_TOKEN", "count": len(events)}
+                )
             response = await self.http_client.execute(
                 command="POST /v2/audit/events/batch",
                 params=params,

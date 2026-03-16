@@ -35,12 +35,19 @@ def process_page(
 
     page = doc[page_no - 1]
     metrics = _collect_metrics(page)
+    bad_text_eval = _detect_bad_text(page, metrics, rc.get("bad_text_policy") or {})
     mode, reasons = _decide_mode(policy, metrics, rc)
+    if policy != "force_direct" and bad_text_eval["detected"]:
+        fallback_action = str((rc.get("bad_text_policy") or {}).get("fallback_action") or "").strip()
+        if fallback_action == "force_vlm_for_page":
+            mode = "FULL_VLM"
+            reasons = _unique_keep_order(list(reasons) + ["bad_text_detected"] + list(bad_text_eval["reasons"]))
     logger.info(
-        "process_page decision: page_no=%s mode=%s reasons=%s text_chars=%s image_ratio=%s formula_score=%s table_score=%s",
+        "process_page decision: page_no=%s mode=%s reasons=%s bad_text=%s text_chars=%s image_ratio=%s formula_score=%s table_score=%s",
         page_no,
         mode,
         reasons,
+        bad_text_eval["detected"],
         metrics.get("text_chars"),
         metrics.get("image_area_ratio"),
         metrics.get("formula_score"),
@@ -153,9 +160,15 @@ def process_page(
     if _should_emit_chunks(rc):
         rag_obj["chunks"] = _build_chunks(rag_content, chunk_size=rc["chunk_size"])
 
+    route_selected = "text_layer" if mode == "DIRECT" else "vlm"
+
     result = {
         "task_page_id": hashlib.sha1(f"{source_path}:{page_no}".encode("utf-8")).hexdigest()[:16],
         "page_no": page_no,
+        "route_selected": route_selected,
+        "bad_text_detected": bad_text_eval["detected"],
+        "bad_text_reasons": bad_text_eval["reasons"],
+        "text_quality_summary": bad_text_eval["summary"],
         "decision": {
             "mode": mode,
             "reasons": reasons,
@@ -165,6 +178,10 @@ def process_page(
             "table_source": table_source,
             "table_placeholder_count": len(table_placeholders),
             "layout_probe": layout_probe,
+            "route_selected": route_selected,
+            "bad_text_detected": bad_text_eval["detected"],
+            "bad_text_reasons": bad_text_eval["reasons"],
+            "text_quality_summary": bad_text_eval["summary"],
         },
         "render": {"markdown": markdown},
         "rag": rag_obj,
@@ -204,14 +221,43 @@ def _routing_defaults(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "large_table_min_cols": int(c.get("large_table_min_cols", 12)),
         "large_table_min_rows": int(c.get("large_table_min_rows", 16)),
         "large_table_min_cells": int(c.get("large_table_min_cells", 180)),
+        "bad_text_policy": _bad_text_policy_defaults(c.get("bad_text_policy")),
+    }
+
+
+def _bad_text_policy_defaults(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    c = cfg or {}
+    thresholds = c.get("thresholds") or {}
+    return {
+        "enabled": bool(c.get("enabled", False)),
+        "fallback_action": str(c.get("fallback_action") or ""),
+        "persist_bad_text": bool(c.get("persist_bad_text", False)),
+        "signals": list(c.get("signals") or []),
+        "thresholds": {
+            "max_cjk_ratio": float(thresholds.get("max_cjk_ratio", 0.01)),
+            "min_ascii_symbol_ratio": float(thresholds.get("min_ascii_symbol_ratio", 0.60)),
+            "min_long_symbol_runs": int(thresholds.get("min_long_symbol_runs", 3)),
+        },
+        "decision_prompt": str(c.get("decision_prompt") or ""),
+        "near_empty_text_chars_max": int(c.get("near_empty_text_chars_max", 20)),
+        "visual_content_image_ratio_min": float(c.get("visual_content_image_ratio_min", 0.08)),
+        "visual_content_drawing_density_min": float(c.get("visual_content_drawing_density_min", 0.30)),
+        "visual_content_non_text_blocks_min": int(c.get("visual_content_non_text_blocks_min", 1)),
+        "long_symbol_run_length": int(c.get("long_symbol_run_length", 4)),
     }
 
 
 def _collect_metrics(page: fitz.Page) -> Dict[str, Any]:
     page_area = float(page.rect.width * page.rect.height) or 1.0
     text = page.get_text("text") or ""
-    text_chars = len(re.sub(r"\s+", "", text))
+    compact_text = re.sub(r"\s+", "", text)
+    text_chars = len(compact_text)
     text_blocks = len(page.get_text("blocks") or [])
+    cjk_count = len(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", compact_text))
+    ascii_symbol_count = len(re.findall(r"[!-/:-@\\[-`{-~]", compact_text))
+    long_symbol_runs = len(re.findall(r"(?:(?<!\w)[!-/:-@\\[-`{-~]{4,}(?!\w))", text))
+    private_use_chars = len(re.findall(r"[\uE000-\uF8FF]", text))
+    cid_like_tokens = len(re.findall(r"\(cid:\d+\)", text, flags=re.IGNORECASE))
 
     image_area = 0.0
     for img in page.get_images(full=True):
@@ -229,6 +275,8 @@ def _collect_metrics(page: fitz.Page) -> Dict[str, Any]:
 
     noise_chars = len(re.findall(r"[\uFFFD�]", text))
     noise_ratio = noise_chars / max(len(text), 1)
+    cjk_ratio = cjk_count / max(text_chars, 1)
+    ascii_symbol_ratio = ascii_symbol_count / max(text_chars, 1)
 
     formula_hits = len(re.findall(r"[=∑∫√^_±≤≥≈πλμΔ]\s*", text))
     formula_block_hits = 0
@@ -257,6 +305,15 @@ def _collect_metrics(page: fitz.Page) -> Dict[str, Any]:
 
     formula_score = min(1.0, (formula_hits + formula_block_hits * 10) / 40.0)
 
+    non_text_blocks = 0
+    try:
+        dict_payload = page.get_text("dict") or {}
+        for block in dict_payload.get("blocks", []):
+            if block.get("type") != 0:
+                non_text_blocks += 1
+    except Exception:
+        non_text_blocks = 0
+
     table_line_hits = 0
     for line in text.splitlines():
         if re.search(r"\S+\s{2,}\S+\s{2,}\S+", line):
@@ -277,6 +334,16 @@ def _collect_metrics(page: fitz.Page) -> Dict[str, Any]:
         "image_area_ratio": round(image_area_ratio, 4),
         "drawing_density": round(drawing_density, 4),
         "noise_ratio": round(noise_ratio, 4),
+        "cjk_ratio": round(cjk_ratio, 4),
+        "ascii_symbol_ratio": round(ascii_symbol_ratio, 4),
+        "long_symbol_runs": int(long_symbol_runs),
+        "private_use_chars": int(private_use_chars),
+        "cid_like_tokens": int(cid_like_tokens),
+        "missing_unicode_mapping": bool(noise_chars > 0 or private_use_chars > 0 or cid_like_tokens > 0),
+        "visual_content_detected": bool(
+            image_area_ratio >= 0.08 or drawing_density >= 0.30 or non_text_blocks >= 1
+        ),
+        "non_text_blocks": int(non_text_blocks),
         "formula_score": round(formula_score, 4),
         "formula_block_hits": formula_block_hits,
         "table_score": round(table_score, 4),
@@ -305,6 +372,107 @@ def _decide_mode(policy: str, m: Dict[str, Any], c: Dict[str, Any]) -> Tuple[str
         return "REGION_VLM", reasons
 
     return "DIRECT", ["text_layer_reliable"]
+
+
+def _detect_bad_text(page: fitz.Page, metrics: Dict[str, Any], policy: Dict[str, Any]) -> Dict[str, Any]:
+    summary = {
+        "cjk_ratio": float(metrics.get("cjk_ratio", 0.0) or 0.0),
+        "ascii_symbol_ratio": float(metrics.get("ascii_symbol_ratio", 0.0) or 0.0),
+        "long_symbol_runs": int(metrics.get("long_symbol_runs", 0) or 0),
+        "missing_unicode_mapping": bool(metrics.get("missing_unicode_mapping", False)),
+    }
+    if not policy.get("enabled"):
+        return {"detected": False, "reasons": [], "summary": summary}
+
+    thresholds = policy.get("thresholds") or {}
+    enabled_signals = set(policy.get("signals") or [])
+    reasons: list[str] = []
+
+    if "missing_unicode_mapping" in enabled_signals and _has_missing_unicode_mapping(page, metrics):
+        reasons.append("missing_unicode_mapping")
+
+    if (
+        "low_cjk_ratio" in enabled_signals
+        and "high_ascii_symbol_ratio" in enabled_signals
+        and summary["cjk_ratio"] <= float(thresholds.get("max_cjk_ratio", 0.01))
+        and summary["ascii_symbol_ratio"] >= float(thresholds.get("min_ascii_symbol_ratio", 0.60))
+    ):
+        reasons.extend(["low_cjk_ratio", "high_ascii_symbol_ratio"])
+
+    if (
+        "long_ascii_symbol_runs" in enabled_signals
+        and _count_long_symbol_runs(page, min_run_length=int(policy.get("long_symbol_run_length", 4)))
+        >= int(thresholds.get("min_long_symbol_runs", 3))
+    ):
+        reasons.append("long_ascii_symbol_runs")
+
+    if (
+        "empty_or_near-empty_text_with_visual_content" in enabled_signals
+        and int(metrics.get("text_chars", 0) or 0) <= int(policy.get("near_empty_text_chars_max", 20))
+        and _has_visual_content(metrics, policy)
+    ):
+        reasons.append("empty_or_near-empty_text_with_visual_content")
+
+    return {"detected": bool(reasons), "reasons": _unique_keep_order(reasons), "summary": summary}
+
+
+def _has_missing_unicode_mapping(page: fitz.Page, metrics: Dict[str, Any]) -> bool:
+    if bool(metrics.get("missing_unicode_mapping", False)):
+        return True
+
+    try:
+        raw = page.get_text("rawdict") or {}
+    except Exception:
+        raw = {}
+
+    suspicious_spans = 0
+    for block in raw.get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                span_text = _span_text(span).strip()
+                if not span_text:
+                    continue
+                if re.search(r"\(cid:\d+\)", span_text, flags=re.IGNORECASE):
+                    return True
+                if re.search(r"[\uE000-\uF8FF\uFFFD�]", span_text):
+                    return True
+                if _looks_like_garbled_symbol_span(span_text):
+                    suspicious_spans += 1
+                    if suspicious_spans >= 2:
+                        return True
+    return False
+
+
+def _count_long_symbol_runs(page: fitz.Page, min_run_length: int = 4) -> int:
+    text = page.get_text("text") or ""
+    pattern = r"(?:(?<!\w)[^\w\s]{%d,}(?!\w))" % max(3, int(min_run_length or 4))
+    return len(re.findall(pattern, text))
+
+
+def _has_visual_content(metrics: Dict[str, Any], policy: Dict[str, Any]) -> bool:
+    return bool(
+        float(metrics.get("image_area_ratio", 0.0) or 0.0) >= float(policy.get("visual_content_image_ratio_min", 0.08))
+        or float(metrics.get("drawing_density", 0.0) or 0.0) >= float(policy.get("visual_content_drawing_density_min", 0.30))
+        or int(metrics.get("non_text_blocks", 0) or 0) >= int(policy.get("visual_content_non_text_blocks_min", 1))
+        or bool(metrics.get("visual_content_detected", False))
+    )
+
+
+def _span_text(span: Dict[str, Any]) -> str:
+    chars = span.get("chars")
+    if isinstance(chars, list):
+        return "".join([str(ch.get("c") or "") for ch in chars])
+    return str(span.get("text") or "")
+
+
+def _looks_like_garbled_symbol_span(text: str) -> bool:
+    compact = re.sub(r"\s+", "", str(text or ""))
+    if len(compact) < 4:
+        return False
+    symbol_ratio = len(re.findall(r"[!-/:-@\\[-`{-~]", compact)) / max(len(compact), 1)
+    return symbol_ratio >= 0.75 and not re.search(r"[A-Za-z0-9\u3400-\u4dbf\u4e00-\u9fff]", compact)
 
 
 def _render_page_image(

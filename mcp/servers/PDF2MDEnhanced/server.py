@@ -93,6 +93,10 @@ async def process_task_page(
             "page_no": page_no,
             "page_result": result,
             "next_context": result.get("next_context"),
+            "route_selected": result.get("route_selected"),
+            "bad_text_detected": result.get("bad_text_detected"),
+            "bad_text_reasons": result.get("bad_text_reasons"),
+            "text_quality_summary": result.get("text_quality_summary"),
             "vlm": vlm_used,
         }
     except asyncio.TimeoutError:
