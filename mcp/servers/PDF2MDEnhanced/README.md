@@ -20,3 +20,6 @@ Task-oriented MCP service for page-by-page PDF processing.
 - No MinerU runtime dependency.
 - Uses Fitz for PDF text/geometry/image rendering.
 - VLM config is dynamically injected by caller (`vlm_config`).
+- `process_task_page` failures mark the page as `FAILED` and persist the error message.
+- Via MCP Router, page-level failures are surfaced as MCP errors instead of silent success payloads.
+- `get_task_status` and `finalize_task` include `failed_page_errors` so clients can show page-specific failure reasons directly.

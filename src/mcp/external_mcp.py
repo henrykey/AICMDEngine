@@ -819,35 +819,9 @@ class ExternalMCPServer(BaseMCPServer):
                         return ToolResult.error(error_msg, error_code=error_code)
 
                     if "result" in response:
-                        result = response["result"]
+                        return self._build_tool_result_from_response_result(tool_name, response["result"])
 
-                        # 检查是否有错误标记
-                        if result.get("isError", False):
-                            content = result.get("content", [])
-                            if content and len(content) > 0:
-                                error_text = content[0].get("text", "Unknown error")
-                                return ToolResult.error(error_text, error_code="TOOL_ERROR")
-
-                        # 提取文本内容
-                        content = result.get("content", [])
-                        if content and len(content) > 0:
-                            text_content = []
-                            for item in content:
-                                if item.get("type") == "text":
-                                    text_content.append(item.get("text", ""))
-
-                            if text_content:
-                                combined_text = "\n".join(text_content)
-                                # 记录识别的文字长度
-                                logger.info(
-                                    f"OCR tool '{tool_name}' recognized text length: {len(combined_text)} characters"
-                                )
-                                # 打印前100个字符用于调试
-                                preview = combined_text[:100] if len(combined_text) > 100 else combined_text
-                                logger.debug(f"OCR text preview: {preview}")
-                                return ToolResult.success(combined_text)
-
-                    return ToolResult.success(str(result))
+                    return ToolResult.error("Invalid response from external MCP", error_code="INVALID_RESPONSE")
 
                 return ToolResult.error(
                     "No response from external MCP",
@@ -913,31 +887,7 @@ class ExternalMCPServer(BaseMCPServer):
                     return ToolResult.error(error_msg, error_code=error_code)
 
                 if "result" in response:
-                    result = response["result"]
-
-                    # 检查是否有错误标记
-                    if result.get("isError", False):
-                        content = result.get("content", [])
-                        if content and len(content) > 0:
-                            error_text = content[0].get("text", "Unknown error")
-                            return ToolResult.error(error_text, error_code="TOOL_ERROR")
-
-                    # 提取文本内容
-                    content = result.get("content", [])
-                    if content and len(content) > 0:
-                        text_content = []
-                        for item in content:
-                            if item.get("type") == "text":
-                                text_content.append(item.get("text", ""))
-
-                        if text_content:
-                            combined_text = "\n".join(text_content)
-                            logger.info(
-                                f"Tool '{tool_name}' result length: {len(combined_text)} characters"
-                            )
-                            return ToolResult.success(combined_text)
-
-                    return ToolResult.success(str(result))
+                    return self._build_tool_result_from_response_result(tool_name, response["result"])
 
             return ToolResult.error(
                 "No response from external MCP",
@@ -953,6 +903,64 @@ class ExternalMCPServer(BaseMCPServer):
             error_msg = f"Error executing HTTP tool '{tool_name}': {e}"
             logger.error(error_msg)
             return ToolResult.error(error_msg, error_code="EXECUTION_ERROR")
+
+    def _build_tool_result_from_response_result(self, tool_name: str, result: Dict[str, Any]) -> ToolResult:
+        if result.get("isError", False):
+            content = result.get("content", [])
+            if content and len(content) > 0:
+                error_text = content[0].get("text", "Unknown error")
+                return ToolResult.error(error_text, error_code="TOOL_ERROR")
+            return ToolResult.error("Unknown error", error_code="TOOL_ERROR")
+
+        content = result.get("content", [])
+        if content and len(content) > 0:
+            text_content = []
+            for item in content:
+                if item.get("type") == "text":
+                    text_content.append(item.get("text", ""))
+
+            if text_content:
+                combined_text = "\n".join(text_content)
+                embedded_error = self._extract_embedded_tool_error(combined_text)
+                if embedded_error:
+                    logger.warning(
+                        "External tool '%s' returned embedded error payload: %s",
+                        tool_name,
+                        embedded_error,
+                    )
+                    return ToolResult.error(embedded_error, error_code="TOOL_ERROR")
+
+                logger.info(
+                    "Tool '%s' result length: %s characters",
+                    tool_name,
+                    len(combined_text),
+                )
+                return ToolResult.success(combined_text)
+
+        return ToolResult.success(str(result))
+
+    def _extract_embedded_tool_error(self, text: str) -> Optional[str]:
+        raw = (text or "").strip()
+        if not raw:
+            return None
+
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+
+        error_value = payload.get("error")
+        if not error_value:
+            return None
+
+        if isinstance(error_value, str):
+            return error_value
+        if isinstance(error_value, dict):
+            return str(error_value.get("message") or error_value)
+        return str(error_value)
 
     async def _send_request(
         self,

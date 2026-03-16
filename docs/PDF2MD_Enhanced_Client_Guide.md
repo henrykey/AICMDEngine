@@ -176,32 +176,37 @@ Expected response:
 }
 ```
 
-Expected response (simplified):
+Expected response (simplified, direct service payload):
 
 ```json
 {
   "task_id": "task_01J...",
   "page_no": 3,
-  "decision": {
-    "mode": "REGION_VLM",
-    "reasons": ["table_score_high"],
-    "metrics": {
-      "text_chars": 1240,
-      "image_area_ratio": 0.18,
-      "noise_ratio": 0.05
+  "page_result": {
+    "decision": {
+      "mode": "REGION_VLM",
+      "reasons": ["table_score_high"],
+      "metrics": {
+        "text_chars": 1240,
+        "image_area_ratio": 0.18,
+        "noise_ratio": 0.05
+      },
+      "vlm_calls": 1
     },
-    "vlm_calls": 1
+    "render": {"markdown": "..."},
+    "rag": {"content": "...", "elements": {"tables": [], "formulas": [], "figures": []}},
+    "elements": {"tables": [], "formulas": [], "figures": []},
+    "next_context": {"current_section": "5.3"}
   },
-  "render": {"markdown": "..."},
-  "rag": {"content": "...", "elements": {"tables": [], "formulas": [], "figures": []}},
-  "elements": {"tables": [], "formulas": [], "figures": []},
-  "next_context": {"current_section": "5.3"}
+  "next_context": {"current_section": "5.3"},
+  "vlm": {"provider": "OpenAI", "model": "gpt-4o"}
 }
 ```
 
 Optional notes:
 - markdown may contain layout comments like `<!-- Table (x1, y1, x2, y2) -->`.
 - keep or drop these comments based on your downstream pipeline needs.
+- When calling through MCP Router, a page-level failure is returned as MCP `isError=true` instead of a normal success payload.
 
 ## 6.3 Finalize task
 
@@ -214,6 +219,26 @@ Optional notes:
 
 Default (`none`) returns summary/page stats only.
 Use `markdown`/`rag`/`both` only when you intentionally need server-side merged content.
+
+Typical summary fields:
+
+```json
+{
+  "summary": {
+    "task_id": "task_01J...",
+    "status": "FAILED",
+    "completed_pages": [1, 2],
+    "failed_pages": [3],
+    "failed_page_errors": {
+      "3": "VLM token quota exhausted"
+    },
+    "progress": 66
+  },
+  "failed_page_errors": {
+    "3": "VLM token quota exhausted"
+  }
+}
+```
 
 ## 6.4 Required client-side post-processing
 
@@ -250,16 +275,18 @@ For each task/page, client should persist:
 2. `planned_pages`
 3. `completed_pages`
 4. `failed_pages`
-5. latest `next_context` per page
-6. `config_hash` (optional, for idempotency)
+5. `failed_page_errors`
+6. latest `next_context` per page
+7. `config_hash` (optional, for idempotency)
 
 ## 7.2 Resume after interruption
 
 After reconnect/restart:
 1. call `get_task_status(task_id)`
 2. compute remaining pages
-3. continue `process_task_page` from pending/failed pages
-4. call `retry_failed_pages` if needed
+3. inspect `failed_page_errors` and classify retryable vs non-retryable failures
+4. continue `process_task_page` from pending/failed pages
+5. call `retry_failed_pages` if needed
 
 ---
 
@@ -281,6 +308,10 @@ For legal/standard docs with cross-page tables/sections:
 
 ## 9. Error Handling Contract
 
+Important:
+- For Router-based integration, treat MCP `isError=true` as the primary failure signal for `process_task_page`.
+- For task-level polling/final summary, use `failed_page_errors` from `get_task_status` or `finalize_task` to display page-specific causes.
+
 ## 9.1 Common error classes
 
 1. Input errors
@@ -297,6 +328,28 @@ For legal/standard docs with cross-page tables/sections:
 3. Task errors
 - unknown task_id
 - task already finalized/cancelled
+
+## 9.3 Status/finalize failure details
+
+`get_task_status(task_id)` now includes:
+
+```json
+{
+  "task_id": "task_01J...",
+  "state": "PARTIAL_FAILED",
+  "completed_pages": [1, 2],
+  "failed_pages": [3, 4],
+  "failed_page_errors": {
+    "3": "process_task_page timeout after 280s",
+    "4": "VLM token quota exhausted"
+  }
+}
+```
+
+Client guidance:
+1. Show `failed_page_errors[page_no]` directly in UI/logs.
+2. Do not blindly requeue all failed pages.
+3. Retry only transient errors such as timeout, transient 5xx, or rate limit.
 
 ## 9.2 Retry policy recommendation
 

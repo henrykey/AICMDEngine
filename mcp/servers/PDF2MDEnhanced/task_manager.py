@@ -120,6 +120,7 @@ class TaskManager:
         task = self.get_task(task_id)
         completed = task.completed_pages()
         failed = task.failed_pages()
+        failed_page_errors = self._failed_page_errors(task)
 
         merged_markdown = ""
         merged_rag: List[Dict[str, Any]] = []
@@ -145,12 +146,14 @@ class TaskManager:
             "planned_pages": task.planned_pages,
             "completed_pages": completed,
             "failed_pages": failed,
+            "failed_page_errors": failed_page_errors,
             "progress": task.progress(),
         }
         return {
             "summary": summary,
             "merged_markdown": merged_markdown if merge_mode in {"markdown", "both"} else None,
             "merged_rag": merged_rag if merge_mode in {"rag", "both"} else None,
+            "failed_page_errors": failed_page_errors,
             "page_stats": {
                 "completed": len(completed),
                 "failed": len(failed),
@@ -168,6 +171,7 @@ class TaskManager:
             "planned_pages": task.planned_pages,
             "completed_pages": task.completed_pages(),
             "failed_pages": task.failed_pages(),
+            "failed_page_errors": self._failed_page_errors(task),
             "pending_pages": task.pending_pages(),
             "progress": task.progress(),
             "updated_at": task.updated_at,
@@ -195,6 +199,13 @@ class TaskManager:
             task.status = "UPLOADED"
 
         task.updated_at = now_iso()
+
+    def _failed_page_errors(self, task: TaskRecord) -> Dict[str, str]:
+        return {
+            str(page_no): str(task.pages[page_no].error or "")
+            for page_no in task.failed_pages()
+            if task.pages[page_no].error
+        }
 
     def _new_task_id(self, task_name: str, source_path: str) -> str:
         seed = f"{task_name}:{source_path}:{now_iso()}".encode("utf-8")

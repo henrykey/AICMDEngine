@@ -163,6 +163,46 @@ class TestExternalMCPServer:
             assert "Hello, World!" in result.content
 
     @pytest.mark.asyncio
+    async def test_execute_external_tool_embedded_json_error_is_promoted(self):
+        """测试文本内容中的JSON错误对象会被提升为ToolResult.error"""
+        mcp = ExternalMCPServer(
+            name="test",
+            command="echo"
+        )
+
+        embedded_error_response = {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps({
+                            "task_id": "task_123",
+                            "page_no": 7,
+                            "error": "VLM token quota exhausted"
+                        })
+                    }
+                ],
+                "isError": False
+            }
+        }
+
+        with patch.object(
+            mcp,
+            '_send_request',
+            new=AsyncMock(return_value=embedded_error_response)
+        ):
+            result = await mcp._execute_external_tool(
+                "process_task_page",
+                {"task_id": "task_123", "page_no": 7}
+            )
+
+            assert isinstance(result, ToolResult)
+            assert result.is_error
+            assert "token quota exhausted" in result.content
+
+    @pytest.mark.asyncio
     async def test_execute_external_tool_error(self):
         """测试外部工具返回错误"""
         mcp = ExternalMCPServer(
