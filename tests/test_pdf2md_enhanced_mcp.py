@@ -99,15 +99,35 @@ def extract_pdf_page(pdf_path: Path, page_num: int) -> bytes:
         doc.close()
 
 
-def extract_pdf_pages(pdf_path: Path, pages: list[int]) -> bytes:
+def extract_pdf_pages(pdf_path: Path, pages: list[int], render_dpi: int = 150) -> bytes:
+    """Extract pages as a new PDF rendered at render_dpi.
+
+    Using insert_pdf() copies the entire xref table of the source document
+    (including all other pages' images), making even a single-page extract
+    as large as the full file.  Rendering to pixmaps first produces a clean,
+    compact PDF.
+    """
     doc = fitz.open(pdf_path)
     try:
         subset_doc = fitz.open()
+        mat = fitz.Matrix(render_dpi / 72, render_dpi / 72)
         for p in pages:
-            subset_doc.insert_pdf(doc, from_page=p - 1, to_page=p - 1)
+            pix = doc[p - 1].get_pixmap(matrix=mat)
+            img_page = subset_doc.new_page(width=pix.width, height=pix.height)
+            img_page.insert_image(img_page.rect, pixmap=pix)
         return subset_doc.write()
     finally:
         doc.close()
+
+
+def build_file_data_dpi_candidates(render_dpi: int) -> List[int]:
+    base = max(72, int(render_dpi or 150))
+    candidates = [base]
+    for candidate in (150, 120, 96, 72):
+        if candidate < base:
+            candidates.append(candidate)
+    # Keep order stable while removing duplicates.
+    return list(dict.fromkeys(candidates))
 
 
 def split_pages_for_file_data(pages: List[int], batch_size: int = 40) -> List[List[int]]:
@@ -878,16 +898,28 @@ async def run_task_pages(
         if len(pages) > 1:
             print(f"  ℹ️  检测到远程MCP不可访问本地路径，改用 file_data 批量传输 ({len(pages)} 页)")
         print("  ℹ️  检测到远程MCP不可访问本地路径，改用 file_data(仅请求页) 传输")
-        subset_bytes = extract_pdf_pages(pdf_path, pages)
-        subset_b64 = base64.b64encode(subset_bytes).decode("utf-8")
-        start_req_args = {
-            "task_name": task_name,
-            "file_data": subset_b64,
-            "pages": list(range(1, len(pages) + 1)),
-        }
-        start_resp = await _call_tool(transport, start_tool, start_req_args, req_id=11)
-        start_data = _extract_json_from_tool_response(start_resp)
-        used_subset_pdf = True
+        dpi_candidates = build_file_data_dpi_candidates(render_dpi)
+        start_data = None
+        for idx, file_data_dpi in enumerate(dpi_candidates, start=1):
+            subset_bytes = extract_pdf_pages(pdf_path, pages, render_dpi=file_data_dpi)
+            subset_mb = len(subset_bytes) / 1024 / 1024
+            if idx == 1:
+                print(f"  ℹ️  file_data渲染DPI={file_data_dpi}，请求体约 {subset_mb:.2f} MB")
+            else:
+                print(f"  ⚠️  降低 file_data 渲染DPI 到 {file_data_dpi} 后重试，请求体约 {subset_mb:.2f} MB")
+
+            subset_b64 = base64.b64encode(subset_bytes).decode("utf-8")
+            start_req_args = {
+                "task_name": task_name,
+                "file_data": subset_b64,
+                "pages": list(range(1, len(pages) + 1)),
+            }
+            start_resp = await _call_tool(transport, start_tool, start_req_args, req_id=10 + idx)
+            start_data = _extract_json_from_tool_response(start_resp)
+            used_subset_pdf = True
+            if not is_message_too_big_error(start_data):
+                break
+
         if is_message_too_big_error(start_data):
             if mode == "batch":
                 if len(pages) <= 1:
@@ -1013,6 +1045,23 @@ async def run_task_pages(
                         "render_rotate_deg": int(render_rotate_deg),
                         "source_page_no": int(display_page_no),
                         "debug_layout_probe": bool(debug_layout_probe),
+                        "bad_text_policy": {
+                            "enabled": True,
+                            "fallback_action": "force_vlm_for_page",
+                            "persist_bad_text": False,
+                            "signals": [
+                                "missing_unicode_mapping",
+                                "low_cjk_ratio",
+                                "high_ascii_symbol_ratio",
+                                "long_ascii_symbol_runs",
+                                "empty_or_near-empty_text_with_visual_content",
+                            ],
+                            "thresholds": {
+                                "max_cjk_ratio": 0.01,
+                                "min_ascii_symbol_ratio": 0.60,
+                                "min_long_symbol_runs": 3,
+                            },
+                        },
                         "full_vlm_retry_markdown": bool(full_vlm_retry_markdown),
                         "full_vlm_split_extract": bool(full_vlm_split_extract),
                         "large_table_placeholder_enabled": bool(large_table_placeholder),
