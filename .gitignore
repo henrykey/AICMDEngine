@@ -1,5 +1,8 @@
 .DS_Store
 .env
+.env.example
+.log
+*.log
 .env.local
 .env.*.local
 
@@ -53,3 +56,6 @@ plan-ui/.vite/
 /mcp/servers/mycode
 data/*
 /mcp/servers/PDF2MD/data
+.env
+.env.*
+
