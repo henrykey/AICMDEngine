@@ -3,7 +3,7 @@ import logging
 import sys
 import json
 from pydantic_settings import BaseSettings
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from dotenv import load_dotenv
 
 # Load .env file
@@ -25,9 +25,33 @@ class Settings(BaseSettings):
     openai_base_url: str = Field(default="https://api.openai.com/v1", env="OPENAI_BASE_URL")
     openai_model_name: str = Field(default="gpt-4", env="OPENAI_MODEL_NAME")
 
-    # Database Configuration
+    # Database Configuration - primitive fields (Python assembles the URI)
+    mongo_user: Optional[str] = Field(default=None, env="MONGO_USER")
+    mongo_password: Optional[str] = Field(default=None, env="MONGO_PASSWORD")
+    mongo_host: str = Field(default="localhost", env="MONGO_HOST")
+    mongo_port: int = Field(default=27017, env="MONGO_PORT")
+    mongo_auth_source: str = Field(default="admin", env="MONGO_AUTH_SOURCE")
+    # mongodb_uri is assembled by the validator below; MONGODB_URI in .env is for shell/Docker only
     mongodb_uri: str = Field(default="mongodb://localhost:27017", env="MONGODB_URI")
     database_name: str = Field(default="nl_tps", env="DATABASE_NAME")
+
+    @model_validator(mode="after")
+    def assemble_mongodb_uri(self) -> "Settings":
+        """Build mongodb_uri from primitive MONGO_* fields when available, ignoring any
+        shell-expansion expressions that python-dotenv cannot evaluate."""
+        if self.mongo_host and self.mongo_host != "localhost":
+            if self.mongo_user:
+                pwd = f":{self.mongo_password}" if self.mongo_password else ""
+                auth = f"{self.mongo_user}{pwd}@"
+                query = f"?authSource={self.mongo_auth_source}"
+            else:
+                auth = ""
+                query = ""
+            self.mongodb_uri = (
+                f"mongodb://{auth}{self.mongo_host}:{self.mongo_port}"
+                f"/{self.database_name}{query}"
+            )
+        return self
 
     # Tenant Configuration
     fixed_tenant_id: Optional[int] = Field(default=None, env="FIXED_TENANT_ID")
