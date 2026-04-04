@@ -3,6 +3,10 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_DEFAULT_TIMEOUT=300 \
+    PIP_RETRIES=10
+
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     gcc \
@@ -10,9 +14,14 @@ RUN apt-get update && apt-get install -y \
 
 # Copy requirements
 COPY requirements.txt .
+COPY .wheelhouse/mcp-router/ /opt/wheelhouse/
 
 # Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+RUN if find /opt/wheelhouse -type f ! -name '.gitkeep' | grep -q .; then \
+      pip install --no-index --find-links=/opt/wheelhouse -r requirements.txt; \
+    else \
+      pip install --no-cache-dir -r requirements.txt; \
+    fi
 
 # Copy application code
 COPY src/ src/

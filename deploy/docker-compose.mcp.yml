@@ -1,0 +1,124 @@
+services:
+  mcp-router:
+    build:
+      context: ..
+      dockerfile: Dockerfile.mcp-router
+    image: aiplanner-mcp-router:latest
+    container_name: aiplanner-mcp-router
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "8000"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LLM_TIMEOUT: ${LLM_TIMEOUT:-60000}
+      LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-3}
+      LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.8}
+      MEMBERSHIP_SERVICE_URL: ${MEMBERSHIP_SERVICE_URL}
+      ENABLE_EXTERNAL_MCPS: ${ENABLE_EXTERNAL_MCPS:-true}
+      EXTERNAL_MCPS: |
+        office-word:
+          transport: http
+          url: http://172.18.157.7:9002
+          timeout: 120
+        pdf2md-enhanced:
+          transport: http
+          url: http://172.18.157.7:9010
+          timeout: 1300
+          llm_provider: multmode
+        pageindex:
+          transport: http
+          url: http://172.18.157.7:9011
+          timeout: 1300
+          llm_provider: multmode
+    depends_on:
+      pdf2md-enhanced:
+        condition: service_healthy
+      pageindex:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    networks:
+      - membership_default
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  plan2:
+    build:
+      context: ../plan2
+      dockerfile: Dockerfile
+    image: aiplanner-plan2:latest
+    container_name: aiplanner-plan2
+    restart: unless-stopped
+    depends_on:
+      mcp-router:
+        condition: service_healthy
+    ports:
+      - "5122:5122"
+    volumes:
+      - ./plan2/config.json:/usr/share/nginx/html/config.json:ro
+    networks:
+      - membership_default
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5122/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  pdf2md-enhanced:
+    build:
+      context: ../mcp/servers/PDF2MDEnhanced
+      dockerfile: Dockerfile
+    image: aiplanner-pdf2md-enhanced:latest
+    container_name: aiplanner-pdf2md-enhanced
+    restart: unless-stopped
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PDF2MD_ENH_OUTPUT_DIR: /app/data/output
+      PDF2MD_ENH_PAGE_TIMEOUT_SEC: ${PDF2MD_ENH_PAGE_TIMEOUT_SEC:-1260}
+      PDF2MD_ENH_VLM_CALL_TIMEOUT_CAP_SEC: ${PDF2MD_ENH_VLM_CALL_TIMEOUT_CAP_SEC:-1200}
+    ports:
+      - "9010:9010"
+    volumes:
+      - ../mcp/servers/PDF2MDEnhanced/data/input:/app/data/input
+      - ../mcp/servers/PDF2MDEnhanced/data/output:/app/data/output
+    networks:
+      - membership_default
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1', 9010), 2); s.close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  pageindex:
+    build:
+      context: ../mcp/servers/PageIndex
+      dockerfile: Dockerfile
+    image: aiplanner-pageindex:latest
+    container_name: aiplanner-pageindex
+    restart: unless-stopped
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PAGEINDEX_VLM_CALL_TIMEOUT_CAP_SEC: ${PAGEINDEX_VLM_CALL_TIMEOUT_CAP_SEC:-1200}
+    ports:
+      - "9011:9011"
+    networks:
+      - membership_default
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1', 9011), 2); s.close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+networks:
+  membership_default:
+    external: true

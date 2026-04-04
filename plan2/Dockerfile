@@ -3,8 +3,11 @@
 # Vite + React 前端应用 Dockerfile for plan2
 # 多阶段构建：构建阶段 + 生产阶段
 
+ARG NODE_BASE_IMAGE=node:20-alpine
+ARG NGINX_BASE_IMAGE=nginx:alpine
+
 # ===== 构建阶段 =====
-FROM node:20-alpine AS builder
+FROM ${NODE_BASE_IMAGE} AS builder
 
 WORKDIR /app
 
@@ -17,7 +20,7 @@ COPY . .
 RUN npm run build
 
 # ===== 生产阶段 =====
-FROM nginx:alpine AS production
+FROM ${NGINX_BASE_IMAGE} AS production
 
 # 安装curl用于健康检查
 RUN apk add --no-cache curl

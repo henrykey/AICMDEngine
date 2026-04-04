@@ -287,7 +287,7 @@ class MCPServerWrapper:
         await self.process.stdin.drain()
 
         try:
-            response = await asyncio.wait_for(fut, timeout=30.0)
+            response = await asyncio.wait_for(fut, timeout=float(self.timeout))
             server_info = response.get("result", {}).get("serverInfo", {})
             logger.info(
                 f"[{self.name}] stdio handshake OK: "
@@ -399,12 +399,33 @@ class MCPProxyManager:
             logger.info(f"  [pdf2md] Injected {injected_count} LLM env vars from system environment")
 
     async def start_all(self):
-        await asyncio.gather(*[w.start() for w in self.wrappers.values()])
+        results = await asyncio.gather(
+            *[w.start() for w in self.wrappers.values()],
+            return_exceptions=True,
+        )
+
+        failed = []
+        active = []
+        for (name, wrapper), result in zip(self.wrappers.items(), results):
+            if isinstance(result, Exception):
+                failed.append((name, result))
+                wrapper.is_running = False
+                logger.error(f"Failed to start MCP backend '{name}': {result}")
+            else:
+                active.append((name, wrapper))
+
+        if not active:
+            raise RuntimeError("No MCP backends started successfully")
+
         logger.info("=" * 60)
         logger.info("✅ MCP HTTP/SSE Proxy is running!")
         logger.info("Available MCP servers (Legacy SSE):")
-        for name, w in self.wrappers.items():
+        for name, w in active:
             logger.info(f"  - {name}: http://localhost:{w.port}/sse")
+        if failed:
+            logger.warning("Failed MCP backends:")
+            for name, error in failed:
+                logger.warning(f"  - {name}: {error}")
         logger.info("=" * 60)
 
     async def stop_all(self):
@@ -440,4 +461,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-

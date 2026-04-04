@@ -59,4 +59,8 @@ data/*
 /mcp/servers/PDF2MD/data
 .env
 .env.*
-
+/.wheelhouse/
+**/.wheelhouse/*
+!**/.wheelhouse/.gitkeep
+/deploy/cache/
+/deploy/out/

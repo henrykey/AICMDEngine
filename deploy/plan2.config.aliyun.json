@@ -1,0 +1,6 @@
+{
+  "nlTpsApiUrl": "${PLAN2_PUBLIC_BASE_URL}/api/v1",
+  "membershipApiUrl": "${PLAN2_PUBLIC_BASE_URL}",
+  "membershipLoginPath": "/v2/auth/login",
+  "membershipUserPath": "/v2/users/me"
+}

@@ -1,0 +1,19 @@
+[Unit]
+Description=AIPlanner MCP Proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=${REMOTE_DIR}/proxy
+EnvironmentFile=${REMOTE_DIR}/.env
+ExecStart=${REMOTE_DIR}/proxy/venv/bin/python -m src
+Restart=always
+RestartSec=5
+TimeoutStartSec=60
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

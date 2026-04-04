@@ -1,0 +1,26 @@
+# AIPlanner Aliyun MCP proxy config skeleton
+# Only host-managed stdio MCPs live here.
+
+proxy:
+  port_base: 9000
+
+servers:
+  - name: office-word
+    port: 9002
+    type: process
+    cwd: ${REMOTE_DIR}/proxy/servers/office-word
+    command:
+      - ${REMOTE_DIR}/proxy/venv/bin/python
+    args:
+      - -m
+      - word_mcp_server
+    timeout: 120
+    env:
+      PYTHONUNBUFFERED: "1"
+      MCP_TRANSPORT: "${MCP_TRANSPORT}"
+      FASTMCP_LOG_LEVEL: "${FASTMCP_LOG_LEVEL}"
+
+# Notes:
+# - Do not place API keys directly in this file.
+# - Credentials should be injected via ${REMOTE_DIR}/.env and inherited by systemd.
+# - Remote paths must match the actual uploaded layout on aliapp.
