@@ -3,9 +3,30 @@ from openai import RateLimitError, APIError, APIConnectionError, AuthenticationE
 import json
 import logging
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 from src.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _classify_base_url(base_url: Any) -> str:
+    raw = str(base_url or "")
+    try:
+        host = (urlparse(raw).hostname or "").lower()
+    except Exception:
+        host = raw.lower()
+
+    local_hosts = {
+        "localhost",
+        "127.0.0.1",
+        "0.0.0.0",
+        "host.docker.internal",
+    }
+    if host in local_hosts or host.endswith(".local"):
+        return "local"
+    if "ollama" in host:
+        return "local"
+    return "remote"
 
 class LLMClient:
     def __init__(self):
@@ -63,9 +84,18 @@ class LLMClient:
                 if response_format:
                     kwargs["response_format"] = response_format
 
-                logger.info(f"Attempting LLM call with provider='{current_provider['name']}', "
-                           f"model='{current_provider['model']}', "
-                           f"base_url='{current_provider['client'].base_url}'")
+                base_url = current_provider["client"].base_url
+                route = _classify_base_url(base_url)
+                logger.info(
+                    "LLM call start route=%s provider=%s model=%s base_url=%s messages=%s max_tokens=%s temperature=%s",
+                    route,
+                    current_provider["name"],
+                    current_provider["model"],
+                    base_url,
+                    len(messages),
+                    max_tokens,
+                    temperature,
+                )
 
                 response = await current_provider['client'].chat.completions.create(**kwargs)
 
@@ -76,8 +106,12 @@ class LLMClient:
                     content = response.choices[0].message.content or ""
 
                 logger.info(
-                    f"Successfully got response from provider='{current_provider['name']}', "
-                    f"finish_reason='{finish_reason}', content_len={len(content)}"
+                    "LLM call success route=%s provider=%s model=%s finish_reason=%s content_len=%s",
+                    route,
+                    current_provider["name"],
+                    current_provider["model"],
+                    finish_reason,
+                    len(content),
                 )
                 return content
 

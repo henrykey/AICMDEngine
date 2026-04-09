@@ -134,9 +134,11 @@ curl http://localhost:8000/health
 
 ### 前端安装
 
+当前实际使用的前端是 `plan2/`。`ui/` 为旧版目录，不再作为主入口。
+
 1. **进入前端目录**
    ```bash
-   cd ui
+   cd plan2
    ```
 
 2. **安装依赖**
@@ -149,7 +151,7 @@ curl http://localhost:8000/health
 启动 Vite 开发服务器：
 
 ```bash
-cd ui
+cd plan2
 npm run dev
 ```
 
@@ -160,11 +162,125 @@ npm run dev
 编译生产版本：
 
 ```bash
-cd ui
+cd plan2
 npm run build
 ```
 
-构建输出在 `ui/dist/` 目录。
+构建输出在 `plan2/dist/` 目录。
+
+## DocIntel 命令检索
+
+### 功能说明
+
+AICMDEngine 现在支持两层命令候选检索：
+
+- **DocIntel 远端检索**：优先使用 Membership DocIntel 的 command corpus 做 Top-N 语义检索
+- **本地 ES 回退**：当 DocIntel 不可用、结果不足或配置未启用时，回退到本地 Elasticsearch 命令索引
+
+这项能力只负责：
+
+- 为 `cmdengine` 和 `mcp direct` 提供 Top-N 候选命令 / 工具
+
+它不替代：
+
+- 任务规划
+- 执行引擎
+- MCP 调用本身
+
+### 启用条件
+
+仅修改代码不会自动启用 DocIntel 检索。运行实例必须显式配置环境变量。
+
+最小配置如下：
+
+```env
+COMMAND_RETRIEVAL_ENABLED=true
+DOCINTEL_ENABLED=true
+DOCINTEL_BASE_URL=http://host.docker.internal:8080
+DOCINTEL_SEARCH_PATH=/v2/documents/search/commands
+DOCINTEL_COMMAND_SYNC_PATH=/v2/documents/commands/sync/batch
+DOCINTEL_COMMAND_DELETE_PATH=/v2/documents/commands/delete
+DOCINTEL_PREFER_REMOTE_RETRIEVAL=true
+```
+
+常用可选项：
+
+```env
+DOCINTEL_TIMEOUT_MS=10000
+DOCINTEL_COMMAND_CATEGORY_PREFIX=cmdengine.command
+DOCINTEL_REMOTE_MIN_RESULTS=1
+DOCINTEL_REMOTE_MIN_TOP_SCORE=0.0
+DOCINTEL_SYNC_ENABLED=false
+DOCINTEL_DEFAULT_USER_ID=system
+```
+
+说明：
+
+- `COMMAND_RETRIEVAL_ENABLED=true`
+  开启命令召回层
+- `DOCINTEL_ENABLED=true`
+  开启 DocIntel 远端检索客户端
+- `DOCINTEL_SEARCH_PATH=/v2/documents/search/commands`
+  指向 Membership 侧专用 command corpus 检索接口
+- `DOCINTEL_COMMAND_SYNC_PATH`
+  用于把 command / MCP tool 同步到 DocIntel
+- `DOCINTEL_COMMAND_DELETE_PATH`
+  用于按 `externalIds` 删除 command corpus 文档
+- `DOCINTEL_SYNC_ENABLED=true`
+  表示服务启动时自动把 Mongo commands 和 MCP tools 同步到 DocIntel
+
+### 运行方式
+
+如果你使用 Docker Compose 启动 `mcp-router-dev`，请确认这些变量已经进入容器环境。
+
+例如：
+
+```bash
+docker inspect mcp-router-dev --format '{{range .Config.Env}}{{println .}}{{end}}'
+```
+
+如果输出中没有 `DOCINTEL_ENABLED`、`DOCINTEL_BASE_URL` 等变量，说明当前运行实例还没有启用 DocIntel。
+
+### 如何验证正在使用 DocIntel
+
+不要只看 `Command Sets` 页面。
+
+正确的验证路径：
+
+1. 确保 Membership docs / DocIntel 已启动
+2. 确保 AICMDEngine 已用上面的环境变量启动
+3. 在 `Task Playground` 中发起一次任务规划
+4. 查看右侧 `Retrieval Diagnostics`
+
+关键字段解释：
+
+- `Retrieval backend = docintel`
+  表示当前候选命令来自 Membership DocIntel
+- `Retrieval backend = local_es`
+  表示当前使用了本地 ES 回退
+- `Remote candidates > 0`
+  表示远端命中结果存在
+- `Fallback reason = none`
+  表示本次没有回退
+
+### 如何验证两侧修改都在生效
+
+要证明 “Membership DocIntel 改造” 和 “AICMDEngine 适配” 同时工作，至少要满足：
+
+1. AICMDEngine 容器环境里存在 `DOCINTEL_*` 变量
+2. 触发一次命令同步，例如：
+   - 新建命令
+   - Smart Import
+   - Rebuild Index
+   - Refresh MCP Index
+3. Membership docs 日志出现 command corpus sync / search 记录
+4. `Task Playground` 中 `Retrieval backend = docintel`
+5. 如果故意停掉 DocIntel，再次请求后切换为 `local_es`
+
+只有这样，才算真正验证了：
+
+- Membership docs 侧 command corpus 改造已参与处理
+- AICMDEngine 侧 remote-first + fallback 已生效
 
 ## 📡 API 概览
 

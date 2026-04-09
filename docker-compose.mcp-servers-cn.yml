@@ -1,0 +1,35 @@
+#
+# CN override for MCP server builds.
+# Use together with the base compose file:
+#   docker compose -f docker-compose.mcp-servers.yml -f docker-compose.mcp-servers-cn.yml build office-word-mcp
+#   docker compose -f docker-compose.mcp-servers.yml -f docker-compose.mcp-servers-cn.yml build pdf2md-enhanced-mcp
+#
+services:
+  mcp-router:
+    platform: linux/arm64
+    build:
+      dockerfile: Dockerfile.mcp-router.cn
+
+  local-retrieval:
+    platform: linux/arm64
+    build:
+      dockerfile: Dockerfile.cn
+
+  office-word-mcp:
+    platform: linux/arm64
+    build:
+      dockerfile: Dockerfile.cn
+
+  pdf2md-enhanced-mcp:
+    platform: linux/arm64
+    build:
+      dockerfile: Dockerfile.cn
+  pageindex-mcp:
+    platform: linux/arm64
+    build:
+      dockerfile: Dockerfile.cn
+
+  plan2-ui:
+    platform: linux/arm64
+    build:
+      dockerfile: Dockerfile.cn

@@ -1,0 +1,38 @@
+# MCP Router Dockerfile (CN mirror variant)
+FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/python:3.11-slim
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_DEFAULT_TIMEOUT=300 \
+    PIP_RETRIES=10 \
+    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+
+WORKDIR /app
+
+ARG USE_WHEELHOUSE=false
+
+# Install system dependencies using CN Debian mirrors
+RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources \
+    && sed -i 's|security.debian.org|mirrors.tuna.tsinghua.edu.cn/debian-security|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gcc \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+
+# Copy requirements
+COPY requirements.txt .
+COPY .wheelhouse/mcp-router/ /opt/wheelhouse/
+
+# Install Python dependencies
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if [ "${USE_WHEELHOUSE}" = "true" ] && find /opt/wheelhouse -type f ! -name '.gitkeep' | grep -q .; then \
+      pip install --no-index --find-links=/opt/wheelhouse -r requirements.txt; \
+    else \
+      pip install -r requirements.txt; \
+    fi
+
+# Copy application code
+COPY src/ src/
+
+EXPOSE 8000
+
+CMD ["python", "-m", "src.main"]

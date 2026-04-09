@@ -4,18 +4,27 @@ import json
 import logging
 import re
 from difflib import SequenceMatcher
-from src.models.models import TaskRequest, TaskPlanResponse, PlanStep, RiskAssessment
+from src.models.models import TaskRequest, TaskPlanResponse, PlanStep, RiskAssessment, RetrievalDiagnostics
 from src.models.command_set import CommandSet
 from src.models.command import Command
 from src.services.llm_client import llm_client
+from src.services.command_retriever import CommandRetriever
+from src.services.task_mode_selector import TaskModeSelector
 from src.mcp.registry import MCPRegistry
 
 logger = logging.getLogger(__name__)
 
 class PlanningEngine:
-    def __init__(self, db: AsyncIOMotorDatabase, mcp_registry: Optional[MCPRegistry] = None):
+    def __init__(
+        self,
+        db: AsyncIOMotorDatabase,
+        mcp_registry: Optional[MCPRegistry] = None,
+        command_retriever: Optional[CommandRetriever] = None
+    ):
         self.db = db
         self.mcp_registry = mcp_registry
+        self.command_retriever = command_retriever
+        self.task_mode_selector = TaskModeSelector()
 
     async def get_available_commands(self, tenant_id: int, command_set_names: List[str] = None) -> List[Dict[str, Any]]:
         """
@@ -97,6 +106,17 @@ class PlanningEngine:
         
         logger.info(f"Extracted {len(mcp_commands)} MCP tool commands")
         return mcp_commands
+
+    def _should_load_system_state(self, commands: List[Dict[str, Any]]) -> bool:
+        for command in commands:
+            command_name = str(command.get("command", ""))
+            tags = [str(tag).lower() for tag in command.get("tags", []) if tag is not None]
+            source_name = str(command.get("sourceName", "")).lower()
+            if command_name.startswith("MCP.membership.") or "membership" in tags or source_name == "membership":
+                return True
+            if any(token in command_name.lower() for token in ("member", "role", "org")):
+                return True
+        return False
 
     async def _get_system_state(self, user_goal: str, tenant_id: int, auth_token: str = None) -> str:
         """
@@ -364,22 +384,73 @@ class PlanningEngine:
     async def plan_task(self, request: TaskRequest, tenant_id: int, user_id: str = None, auth_token: str = None) -> TaskPlanResponse:
         # 1. Load Knowledge (Commands)
         command_set_names = request.context.command_set_names if request.context else None
-        commands = await self.get_available_commands(tenant_id, command_set_names)
+        requested_mode = request.context.planning_mode if request.context else None
+        resolved_mode = self.task_mode_selector.resolve_mode(request.goal, requested_mode)
+        retrieval_diagnostics = {
+            "requested_mode": requested_mode or "auto",
+            "resolved_mode": resolved_mode,
+            "requested_retrieval_backend": request.context.retrieval_backend if request.context else None,
+        }
+        commands: List[Dict[str, Any]] = []
+
+        if self.command_retriever:
+            try:
+                source_types = None
+                preferred_server_names = request.context.preferred_mcp_servers if request.context else None
+                if resolved_mode == "mcp":
+                    source_types = ["mcp_tool"]
+                elif request.context and request.context.preferred_sources:
+                    source_types = request.context.preferred_sources
+
+                retrieval_result = await self.command_retriever.retrieve(
+                    goal=request.goal,
+                    tenant_id=tenant_id,
+                    candidate_limit=request.context.candidate_limit if request.context else None,
+                    source_types=source_types,
+                    source_names=preferred_server_names,
+                    user_id=user_id,
+                    auth_token=auth_token,
+                    preferred_backend=request.context.retrieval_backend if request.context else None,
+                )
+                commands = retrieval_result.get("prompt_candidates", [])
+                retrieval_diagnostics.update(retrieval_result.get("diagnostics", {}))
+            except Exception as e:
+                logger.warning(f"Command retrieval failed; falling back to full inventory: {e}")
+                retrieval_diagnostics["retrieval_backend"] = "full_inventory"
+                retrieval_diagnostics["local_fallback_reason"] = str(e)
+
+        if not commands:
+            commands = await self.get_available_commands(tenant_id, command_set_names)
+            if retrieval_diagnostics.get("retrieval_backend") is None:
+                retrieval_diagnostics["retrieval_backend"] = "full_inventory"
+
+        # Add MCP tools to available commands when retrieval path is not active or yielded no MCP helpers
+        if self.mcp_registry and not self.command_retriever:
+            mcp_commands = self._get_mcp_commands()
+            commands.extend(mcp_commands)
+
+        if resolved_mode == "mcp":
+            commands = [command for command in commands if str(command.get("command", "")).startswith("MCP.")]
 
         if not commands:
              return TaskPlanResponse(
                 type="clarification_needed",
                 confidence=0.0,
-                question="No available commands found for your tenant/context. Please contact support."
+                question="No available commands found for your tenant/context. Please contact support.",
+                resolved_mode=resolved_mode,
+                retrieval_diagnostics=RetrievalDiagnostics(**retrieval_diagnostics)
             )
-        
-        # Add MCP tools to available commands
-        if self.mcp_registry:
-            mcp_commands = self._get_mcp_commands()
-            commands.extend(mcp_commands)
 
         # 1.5 Query existing data using MCP to provide context
-        system_state_info = await self._get_system_state(request.goal, tenant_id, auth_token=auth_token)
+        include_system_state = request.context.include_system_state if request.context else None
+        should_load_system_state = include_system_state if include_system_state is not None else self._should_load_system_state(commands)
+        system_state_info = None
+        if should_load_system_state:
+            system_state_info = await self._get_system_state(request.goal, tenant_id, auth_token=auth_token)
+            retrieval_diagnostics["system_state_loaded"] = True
+        elif retrieval_diagnostics is not None:
+            logger.info("Skipping system-state loading based on retrieved candidate set")
+            retrieval_diagnostics["system_state_loaded"] = False
 
         # 2. Generate Prompt (include tenant_id and conversation history)
         prompt_messages = self._build_prompt(
@@ -442,7 +513,9 @@ class PlanningEngine:
                 confidence=plan_data.get("confidence", 0.0),
                 plan=steps,
                 question=plan_data.get("question"),
-                risk_assessment=risk_assessment
+                risk_assessment=risk_assessment,
+                resolved_mode=resolved_mode,
+                retrieval_diagnostics=RetrievalDiagnostics(**retrieval_diagnostics)
             )
 
             # TODO: 5. Security/Risk Check (Programmatic Fallback) 
@@ -455,14 +528,18 @@ class PlanningEngine:
             return TaskPlanResponse(
                 type="clarification_needed",
                 confidence=0.0,
-                question="The system failed to generate a valid plan (JSON Error). Please try rephrasing."
+                question="The system failed to generate a valid plan (JSON Error). Please try rephrasing.",
+                resolved_mode=resolved_mode,
+                retrieval_diagnostics=RetrievalDiagnostics(**retrieval_diagnostics)
             )
         except Exception as e:
             logger.error(f"Planning failed unexpectedly: {e}", exc_info=True)
             return TaskPlanResponse(
                 type="clarification_needed",
                 confidence=0.0,
-                question=f"An internal error occurred: {str(e)}"
+                question=f"An internal error occurred: {str(e)}",
+                resolved_mode=resolved_mode,
+                retrieval_diagnostics=RetrievalDiagnostics(**retrieval_diagnostics)
             )
 
     def _clean_llm_json_response(self, raw_response: str) -> str:

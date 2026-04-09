@@ -14,6 +14,34 @@
 version: '3.8'
 
 services:
+  local-retrieval:
+    build:
+      context: ./local-retrieval
+      dockerfile: Dockerfile
+    image: local-retrieval:latest
+    container_name: local-retrieval-dev
+    restart: unless-stopped
+    ports:
+      - "8088:8088"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8088
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - SQLITE_DB_PATH=/data/retrieval.db
+      - OLLAMA_BASE_URL=${LOCAL_RETRIEVAL_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - OLLAMA_EMBEDDING_MODEL=${LOCAL_RETRIEVAL_OLLAMA_EMBEDDING_MODEL:-qwen3-embedding:0.6b}
+      - VECTOR_SEARCH_ENABLED=${LOCAL_RETRIEVAL_VECTOR_SEARCH_ENABLED:-true}
+    volumes:
+      - /Volumes/DATA/sqlite:/data
+    networks:
+      - mcp-servers-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8088/health').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
   # MCP Router - AIPlanner MCP 服务统一入口
   mcp-router:
     build:
@@ -29,6 +57,8 @@ services:
       PYTHONUNBUFFERED: 1
       MCP_HOST: 0.0.0.0
       MCP_PORT: 8000
+      LOCAL_RETRIEVAL_ENABLED: ${LOCAL_RETRIEVAL_ENABLED:-false}
+      LOCAL_RETRIEVAL_BASE_URL: ${LOCAL_RETRIEVAL_BASE_URL:-http://local-retrieval:8088}
       EXTERNAL_MCPS: |
         paddleocr:
           transport: http

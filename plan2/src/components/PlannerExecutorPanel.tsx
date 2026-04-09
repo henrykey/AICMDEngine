@@ -202,6 +202,57 @@ const PlannerExecutorPanel: React.FC = () => {
     };
 
     if (!currentPlanResponse?.plan || executionSteps.length === 0) {
+        if (currentPlanResponse?.directResult) {
+            return (
+                <div className="flex flex-1 flex-col gap-4 overflow-y-auto">
+                    <MCPSelector />
+                    <div className="rounded-lg border border-green-200 bg-green-50 p-4">
+                        <div className="mb-2 text-sm font-semibold text-green-900">Direct MCP Result</div>
+                        <div className="mb-3 text-xs text-slate-600">
+                            Resolved mode: {currentPlanResponse.resolvedMode ?? 'mcp'}
+                        </div>
+                        <div className="mb-3 rounded bg-white px-3 py-2 font-mono text-sm text-green-700">
+                            {currentPlanResponse.directResult.serverName}.{currentPlanResponse.directResult.toolName}
+                        </div>
+                        {Object.keys(currentPlanResponse.directResult.params ?? {}).length > 0 && (
+                            <pre className="mb-3 overflow-auto rounded bg-white p-3 text-xs text-slate-600">
+                                {JSON.stringify(currentPlanResponse.directResult.params, null, 2)}
+                            </pre>
+                        )}
+                        <div className="rounded bg-white p-3 text-sm text-slate-800">
+                            {currentPlanResponse.directResult.content}
+                        </div>
+                        {currentPlanResponse.directResult.data && Object.keys(currentPlanResponse.directResult.data).length > 0 && (
+                            <pre className="mt-3 overflow-auto rounded bg-white p-3 text-xs text-slate-500">
+                                {JSON.stringify(currentPlanResponse.directResult.data, null, 2)}
+                            </pre>
+                        )}
+                    </div>
+
+                    {currentPlanResponse.retrievalDiagnostics && (
+                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                            <div className="mb-2 text-sm font-semibold text-slate-700">Retrieval Diagnostics</div>
+                            <div className="grid gap-2 text-xs text-slate-600 md:grid-cols-2">
+                                <div>Requested mode: {currentPlanResponse.retrievalDiagnostics.requested_mode ?? 'auto'}</div>
+                                <div>Requested retrieval: {currentPlanResponse.retrievalDiagnostics.requested_retrieval_backend ?? 'auto'}</div>
+                                <div>Resolved mode: {currentPlanResponse.retrievalDiagnostics.resolved_mode ?? currentPlanResponse.resolvedMode ?? 'mcp'}</div>
+                                <div>Retrieval backend: {currentPlanResponse.retrievalDiagnostics.retrieval_backend ?? 'n/a'}</div>
+                                <div>Remote candidates: {currentPlanResponse.retrievalDiagnostics.remote_candidate_count ?? 0}</div>
+                                <div>Remote top score: {currentPlanResponse.retrievalDiagnostics.remote_top_score ?? 'n/a'}</div>
+                                <div>Keyword hits: {currentPlanResponse.retrievalDiagnostics.keyword_hits ?? 0}</div>
+                                <div>Vector hits: {currentPlanResponse.retrievalDiagnostics.vector_hits ?? 0}</div>
+                                <div>Raw candidates: {currentPlanResponse.retrievalDiagnostics.raw_candidate_count ?? 0}</div>
+                                <div>Prompt candidates: {currentPlanResponse.retrievalDiagnostics.prompt_candidate_count ?? 0}</div>
+                                <div>Embedding provider: {currentPlanResponse.retrievalDiagnostics.embedding_provider ?? 'n/a'}</div>
+                                <div>Embedding model: {currentPlanResponse.retrievalDiagnostics.embedding_model ?? 'n/a'}</div>
+                                <div>Fallback reason: {currentPlanResponse.retrievalDiagnostics.remote_fallback_reason ?? 'none'}</div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
         return (
             <div className="flex flex-1 flex-col items-center justify-center text-center p-6 text-slate-600">
                 <p className="text-sm">Plan a task in the Chat panel to see execution details here</p>
@@ -248,6 +299,41 @@ const PlannerExecutorPanel: React.FC = () => {
             {/* Task Plan Title */}
             <div>
                 <div className="text-sm font-semibold text-slate-700 mb-3">Task Execution Plan</div>
+                <div className="mb-3 grid gap-2 text-xs text-slate-600 md:grid-cols-2">
+                    <div>Resolved mode: {currentPlanResponse.resolvedMode ?? 'cmdengine'}</div>
+                    <div>Confidence: {Math.round((currentPlanResponse.confidence ?? 0) * 100)}%</div>
+                </div>
+
+                {currentPlanResponse.retrievalDiagnostics && (
+                    <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50 p-4">
+                        <div className="mb-2 text-sm font-semibold text-slate-700">Retrieval Diagnostics</div>
+                        <div className="grid gap-2 text-xs text-slate-600 md:grid-cols-2">
+                            <div>Requested mode: {currentPlanResponse.retrievalDiagnostics.requested_mode ?? 'auto'}</div>
+                            <div>Requested retrieval: {currentPlanResponse.retrievalDiagnostics.requested_retrieval_backend ?? 'auto'}</div>
+                            <div>Resolved mode: {currentPlanResponse.retrievalDiagnostics.resolved_mode ?? currentPlanResponse.resolvedMode ?? 'cmdengine'}</div>
+                            <div>Retrieval backend: {currentPlanResponse.retrievalDiagnostics.retrieval_backend ?? 'n/a'}</div>
+                            <div>Remote candidates: {currentPlanResponse.retrievalDiagnostics.remote_candidate_count ?? 0}</div>
+                            <div>Remote top score: {currentPlanResponse.retrievalDiagnostics.remote_top_score ?? 'n/a'}</div>
+                            <div>Keyword hits: {currentPlanResponse.retrievalDiagnostics.keyword_hits ?? 0}</div>
+                            <div>Vector hits: {currentPlanResponse.retrievalDiagnostics.vector_hits ?? 0}</div>
+                            <div>Raw candidates: {currentPlanResponse.retrievalDiagnostics.raw_candidate_count ?? 0}</div>
+                            <div>Prompt candidates: {currentPlanResponse.retrievalDiagnostics.prompt_candidate_count ?? 0}</div>
+                            <div>System state loaded: {currentPlanResponse.retrievalDiagnostics.system_state_loaded ? 'yes' : 'no'}</div>
+                            <div>Embedding provider: {currentPlanResponse.retrievalDiagnostics.embedding_provider ?? 'n/a'}</div>
+                            <div>Fallback reason: {currentPlanResponse.retrievalDiagnostics.remote_fallback_reason ?? 'none'}</div>
+                        </div>
+                        {currentPlanResponse.retrievalDiagnostics.top_commands && currentPlanResponse.retrievalDiagnostics.top_commands.length > 0 && (
+                            <div className="mt-3">
+                                <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">Top Commands</div>
+                                <div className="space-y-1 font-mono text-xs text-slate-700">
+                                    {currentPlanResponse.retrievalDiagnostics.top_commands.map((command) => (
+                                        <div key={command}>{command}</div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                )}
 
                 {/* Execution Steps */}
                 <div className="space-y-3">

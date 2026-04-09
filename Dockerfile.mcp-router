@@ -7,6 +7,8 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_DEFAULT_TIMEOUT=300 \
     PIP_RETRIES=10
 
+ARG USE_WHEELHOUSE=false
+
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     gcc \
@@ -17,10 +19,11 @@ COPY requirements.txt .
 COPY .wheelhouse/mcp-router/ /opt/wheelhouse/
 
 # Install Python dependencies
-RUN if find /opt/wheelhouse -type f ! -name '.gitkeep' | grep -q .; then \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if [ "${USE_WHEELHOUSE}" = "true" ] && find /opt/wheelhouse -type f ! -name '.gitkeep' | grep -q .; then \
       pip install --no-index --find-links=/opt/wheelhouse -r requirements.txt; \
     else \
-      pip install --no-cache-dir -r requirements.txt; \
+      pip install -r requirements.txt; \
     fi
 
 # Copy application code

@@ -1,16 +1,45 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, Body
-from typing import List
+from typing import List, Dict
 from datetime import datetime
+import logging
+import asyncio
 from src.models.command_set import CommandSet
 from src.models.command import Command
 from src.core.deps import get_tenant_id
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
+from src.utils.request_auth import extract_bearer_token, extract_user_id
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 def get_db(request: Request) -> AsyncIOMotorDatabase:
     return request.app.mongodb
+
+
+def get_command_indexer(request: Request):
+    return getattr(request.app, "command_indexer", None)
+
+
+def get_docintel_command_sync(request: Request):
+    return getattr(request.app, "docintel_command_sync", None)
+
+
+def get_local_command_sync(request: Request):
+    return getattr(request.app, "local_command_sync", None)
+
+
+def get_request_user_context(request: Request):
+    auth_token = extract_bearer_token(request)
+    user_id = extract_user_id(request, auth_token)
+    return user_id, auth_token
+
+
+def get_command_sync_targets(request: Request):
+    return [
+        ("DocIntel", get_docintel_command_sync(request)),
+        ("local retrieval", get_local_command_sync(request)),
+    ]
 
 # --- Helper Functions ---
 
@@ -90,6 +119,96 @@ def _resolve_schema_ref(ref: str, spec: dict) -> dict:
             return {}
 
     return current if isinstance(current, dict) else {}
+
+
+def _flatten_schema_properties(
+    schema: dict,
+    spec: dict = None,
+    path_prefix: str = "",
+    required_fields: List[str] = None
+) -> List[dict]:
+    """
+    Flatten JSON schema properties into parameter definitions.
+
+    This is primarily used for requestBody extraction from OpenAPI operations.
+    Nested object fields are flattened using dot notation.
+    """
+    if not isinstance(schema, dict):
+        return []
+
+    if "$ref" in schema and spec:
+        schema = _resolve_schema_ref(schema["$ref"], spec)
+
+    schema_type = schema.get("type")
+    properties = schema.get("properties", {})
+    local_required = set(schema.get("required", []))
+    required_fields = set(required_fields or [])
+    required_fields.update(local_required)
+
+    if schema_type != "object" and not properties:
+        field_name = path_prefix or "body"
+        return [{
+            "name": field_name,
+            "in": "body",
+            "description": schema.get("description", ""),
+            "required": bool(path_prefix and field_name in required_fields),
+            "schema": schema
+        }]
+
+    result = []
+    for prop_name, prop_schema in properties.items():
+        full_name = f"{path_prefix}.{prop_name}" if path_prefix else prop_name
+        resolved_prop_schema = prop_schema
+        if isinstance(prop_schema, dict) and "$ref" in prop_schema and spec:
+            resolved_prop_schema = _resolve_schema_ref(prop_schema["$ref"], spec)
+
+        prop_type = resolved_prop_schema.get("type")
+        if prop_type == "object" and resolved_prop_schema.get("properties"):
+            result.extend(
+                _flatten_schema_properties(
+                    resolved_prop_schema,
+                    spec=spec,
+                    path_prefix=full_name,
+                    required_fields=resolved_prop_schema.get("required", [])
+                )
+            )
+        else:
+            result.append({
+                "name": full_name,
+                "in": "body",
+                "description": resolved_prop_schema.get("description", ""),
+                "required": prop_name in required_fields,
+                "schema": resolved_prop_schema
+            })
+
+    return result
+
+
+def _extract_request_body_parameters(operation: dict, spec: dict = None) -> List[dict]:
+    """
+    Extract requestBody schema fields as synthetic body parameters.
+    Supports application/json and internal $ref resolution.
+    """
+    request_body = operation.get("requestBody", {})
+    if not isinstance(request_body, dict):
+        return []
+
+    if "$ref" in request_body and spec:
+        request_body = _resolve_schema_ref(request_body["$ref"], spec)
+
+    content = request_body.get("content", {})
+    if not isinstance(content, dict):
+        return []
+
+    json_content = content.get("application/json") or content.get("application/*+json")
+    if not isinstance(json_content, dict):
+        return []
+
+    schema = json_content.get("schema", {})
+    if not isinstance(schema, dict):
+        return []
+
+    return _flatten_schema_properties(schema, spec=spec)
 
 def _analyze_schema_structure(schema: dict) -> dict:
     """
@@ -174,28 +293,81 @@ async def create_command_set(
 
 @router.get("/", response_model=List[CommandSet])
 async def list_command_sets(
+    request: Request,
     tenant_id: int = Depends(get_tenant_id),
     db: AsyncIOMotorDatabase = Depends(get_db)
 ):
     cursor = db["command_sets"].find({"tenant_id": tenant_id})
     results = []
     async for doc in cursor:
-        results.append(CommandSet(**doc))
-    return results
+        results.append(doc)
+
+    auth_token = extract_bearer_token(request)
+    user_id = extract_user_id(request, auth_token)
+    docintel_client = getattr(request.app, "docintel_client", None)
+    local_retrieval_client = getattr(request.app, "local_retrieval_client", None)
+
+    async def detect_storage_status(command_set_doc: Dict) -> Dict[str, bool]:
+        source_name = command_set_doc.get("name", "")
+        status = {"docintel": False, "local": False}
+        tasks = []
+        labels = []
+
+        if docintel_client:
+            tasks.append(docintel_client.has_command_source(tenant_id, source_name, user_id=user_id, auth_token=auth_token))
+            labels.append("docintel")
+        if local_retrieval_client:
+            tasks.append(local_retrieval_client.has_command_source(tenant_id, source_name, user_id=user_id, auth_token=auth_token))
+            labels.append("local")
+
+        if not tasks:
+            return status
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for label, result in zip(labels, results):
+            if isinstance(result, Exception):
+                logger.debug("Storage status lookup failed for set '%s' on %s: %s", source_name, label, result)
+                continue
+            status[label] = bool(result)
+        return status
+
+    statuses = await asyncio.gather(*(detect_storage_status(doc) for doc in results))
+    output: List[CommandSet] = []
+    for doc, storage_status in zip(results, statuses):
+        doc["storageStatus"] = storage_status
+        output.append(CommandSet(**doc))
+    return output
 
 @router.delete("/{set_id}")
 async def delete_command_set(
     set_id: str,
+    request: Request,
     tenant_id: int = Depends(get_tenant_id),
     db: AsyncIOMotorDatabase = Depends(get_db)
 ):
+    parent_set = await db["command_sets"].find_one({"_id": ObjectId(set_id), "tenant_id": tenant_id})
+    if not parent_set:
+        raise HTTPException(status_code=404, detail="Command set not found")
+
     # Check ownership
     result = await db["command_sets"].delete_one({"_id": ObjectId(set_id), "tenant_id": tenant_id})
-    if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Command set not found")
 
     # Also delete commands belonging to this set
     await db["commands"].delete_many({"command_set_id": set_id})
+
+    user_id, auth_token = get_request_user_context(request)
+    for label, sync_service in get_command_sync_targets(request):
+        if not sync_service:
+            continue
+        try:
+            await sync_service.delete_command_set_with_auth(
+                set_id=set_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                auth_token=auth_token,
+            )
+        except Exception as e:
+            logger.warning("Failed to delete command set %s from %s: %s", set_id, label, e)
 
     return {"status": "deleted"}
 
@@ -205,6 +377,7 @@ async def delete_command_set(
 async def create_command(
     set_id: str,
     command: Command,
+    request: Request,
     tenant_id: int = Depends(get_tenant_id),
     db: AsyncIOMotorDatabase = Depends(get_db)
 ):
@@ -220,6 +393,27 @@ async def create_command(
     result = await db["commands"].insert_one(command_dict)
 
     stored_cmd = await db["commands"].find_one({"_id": result.inserted_id})
+    command_indexer = get_command_indexer(request)
+    if command_indexer:
+        try:
+            await command_indexer.upsert_command(stored_cmd, parent_set.get("name", "manual"))
+        except Exception as e:
+            # Mongo remains source of truth; index sync failure is logged only.
+            logger.warning("Failed to index command '%s': %s", stored_cmd.get("command"), e)
+    user_id, auth_token = get_request_user_context(request)
+    for label, sync_service in get_command_sync_targets(request):
+        if not sync_service:
+            continue
+        try:
+            await sync_service.sync_command_with_auth(
+                stored_cmd,
+                parent_set.get("name", "manual"),
+                user_id=user_id,
+                auth_token=auth_token,
+            )
+            logger.info("Synced command '%s' to %s", stored_cmd.get("command"), label)
+        except Exception as e:
+            logger.warning("Failed to sync command '%s' to %s: %s", stored_cmd.get("command"), label, e)
     return Command(**stored_cmd)
 
 @router.get("/{set_id}/commands", response_model=List[Command])
@@ -244,6 +438,7 @@ async def list_commands(
 @router.post("/{set_id}/import/smart")
 async def smart_import_commands(
     set_id: str,
+    request: Request,
     document: str = Body(..., embed=True),
     tenant_id: int = Depends(get_tenant_id),
     db: AsyncIOMotorDatabase = Depends(get_db)
@@ -289,11 +484,17 @@ async def smart_import_commands(
                         operation, method.upper(), spec
                     )
 
+                    # Extract regular parameters plus requestBody-derived body parameters
+                    parameters = list(operation.get('parameters', []))
+                    body_parameters = _extract_request_body_parameters(operation, spec)
+                    if body_parameters:
+                        parameters.extend(body_parameters)
+
                     cmd = {
                         "command": f"{method.upper()} {path}",
                         "summary": operation.get('summary', f"{method.upper()} {path}"),
                         "description": operation.get('description', ''),
-                        "parameters": operation.get('parameters', []),
+                        "parameters": parameters,
                         "riskLevel": "high" if method.upper() in ['POST', 'PUT', 'DELETE'] else "normal"
                     }
 
@@ -342,12 +543,51 @@ Return format:
             raise HTTPException(status_code=400, detail="Invalid command data format")
         
         # Insert commands
+        inserted_docs = []
         inserted_count = 0
         for cmd_data in commands_data:
             cmd_data["command_set_id"] = set_id
             cmd_data["tenant_id"] = tenant_id
-            await db["commands"].insert_one(cmd_data)
+            result = await db["commands"].insert_one(cmd_data)
+            inserted_doc = await db["commands"].find_one({"_id": result.inserted_id})
+            if inserted_doc:
+                inserted_docs.append(inserted_doc)
             inserted_count += 1
+
+        command_indexer = get_command_indexer(request)
+        if command_indexer and inserted_docs:
+            try:
+                await command_indexer.bulk_upsert_commands(inserted_docs, parent_set.get("name", "manual"))
+            except Exception as e:
+                logger.warning("Failed to bulk index imported commands for set %s: %s", set_id, e)
+        user_id, auth_token = get_request_user_context(request)
+        for label, sync_service in get_command_sync_targets(request):
+            if not sync_service or not inserted_docs:
+                continue
+            try:
+                logger.info(
+                    "Syncing %s imported commands for set %s to %s (tenant=%s, source=%s, user_id=%s)",
+                    len(inserted_docs),
+                    set_id,
+                    label,
+                    tenant_id,
+                    parent_set.get("name", "manual"),
+                    user_id,
+                )
+                await sync_service.sync_commands_with_auth(
+                    inserted_docs,
+                    parent_set.get("name", "manual"),
+                    user_id=user_id,
+                    auth_token=auth_token,
+                )
+                logger.info(
+                    "Synced %s imported commands for set %s to %s",
+                    len(inserted_docs),
+                    set_id,
+                    label,
+                )
+            except Exception as e:
+                logger.warning("Failed to sync imported commands for set %s to %s: %s", set_id, label, e)
 
         # Update command set metadata
         if inserted_count > 0:

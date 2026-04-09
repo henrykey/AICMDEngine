@@ -4,10 +4,10 @@ import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import WorkflowDesigner from './pages/WorkflowDesigner';
 import { TaskProvider } from './contexts/TaskContext';
+import { hasUsableSession } from './lib/api';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const token = localStorage.getItem('token');
-  if (!token) {
+  if (!hasUsableSession()) {
     return <Navigate to="/login" replace />;
   }
   return <>{children}</>;

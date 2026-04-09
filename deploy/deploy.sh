@@ -553,7 +553,11 @@ build_images() {
   sync_wheelhouse "${WHEEL_CACHE_DIR}/pdf2md-enhanced" "${ROOT_DIR}/mcp/servers/PDF2MDEnhanced/.wheelhouse"
 
   log "Building Docker images for linux/amd64"
-  docker build --platform linux/amd64 -f "${ROOT_DIR}/Dockerfile.mcp-router" -t aiplanner-mcp-router:latest "${ROOT_DIR}"
+  docker build --platform linux/amd64 \
+    --build-arg USE_WHEELHOUSE=true \
+    -f "${ROOT_DIR}/Dockerfile.mcp-router" \
+    -t aiplanner-mcp-router:latest \
+    "${ROOT_DIR}"
   docker build --platform linux/amd64 \
     --build-arg NODE_BASE_IMAGE="${PLAN2_NODE_BASE_IMAGE}" \
     --build-arg NGINX_BASE_IMAGE="${PLAN2_NGINX_BASE_IMAGE}" \

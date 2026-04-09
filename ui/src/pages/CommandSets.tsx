@@ -9,6 +9,15 @@ interface CommandSet {
     version: string;
 }
 
+interface CommandIndexStatus {
+    exists: boolean;
+    index_name: string;
+    command_docs: number;
+    mcp_tool_docs: number;
+    total_docs: number;
+    index_version: string;
+}
+
 export default function CommandSets() {
     const queryClient = useQueryClient();
     const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
@@ -21,6 +30,7 @@ export default function CommandSets() {
     const [docContent, setDocContent] = useState('');
     const [importStatus, setImportStatus] = useState('');
     const [createStatus, setCreateStatus] = useState('');
+    const [adminStatus, setAdminStatus] = useState('');
 
     const { data: commandSets, isLoading } = useQuery({
         queryKey: ['command-sets'],
@@ -28,6 +38,15 @@ export default function CommandSets() {
             const res = await api.get<CommandSet[]>('/command-sets/');
             return res.data;
         }
+    });
+
+    const { data: indexStatus, refetch: refetchIndexStatus } = useQuery({
+        queryKey: ['command-index-status'],
+        queryFn: async () => {
+            const res = await api.get<CommandIndexStatus>('/command-index/status');
+            return res.data;
+        },
+        retry: false,
     });
 
     const importMutation = useMutation({
@@ -56,6 +75,34 @@ export default function CommandSets() {
         },
         onSuccess: () => {
             queryClient.invalidateQueries({ queryKey: ['command-sets'] });
+        }
+    });
+
+    const rebuildIndexMutation = useMutation({
+        mutationFn: async () => {
+            const response = await api.post('/command-index/rebuild');
+            return response.data;
+        },
+        onSuccess: async (data: any) => {
+            setAdminStatus(`✅ Rebuilt index. Deleted ${data.deleted_command_docs}, rebuilt ${data.rebuilt_command_docs}.`);
+            await refetchIndexStatus();
+        },
+        onError: (err: any) => {
+            setAdminStatus(`❌ Rebuild failed: ${err.response?.data?.detail || err.message}`);
+        }
+    });
+
+    const refreshMcpMutation = useMutation({
+        mutationFn: async () => {
+            const response = await api.post('/command-index/refresh-mcp');
+            return response.data;
+        },
+        onSuccess: async (data: any) => {
+            setAdminStatus(`✅ Refreshed MCP index. Deleted ${data.deleted_mcp_docs}, indexed ${data.indexed_mcp_docs}.`);
+            await refetchIndexStatus();
+        },
+        onError: (err: any) => {
+            setAdminStatus(`❌ MCP refresh failed: ${err.response?.data?.detail || err.message}`);
         }
     });
 
@@ -129,12 +176,58 @@ export default function CommandSets() {
                 <h2 className="text-2xl font-bold bg-gradient-to-r from-blue-400 to-purple-500 bg-clip-text text-transparent">
                     Command Sets Configuration
                 </h2>
-                <button
-                    onClick={() => setIsCreateModalOpen(true)}
-                    className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded transition flex items-center gap-2"
-                >
-                    <span>+</span> New Command Set
-                </button>
+                <div className="flex items-center gap-3">
+                    <button
+                        onClick={() => refetchIndexStatus()}
+                        className="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded transition text-sm"
+                    >
+                        Refresh Status
+                    </button>
+                    <button
+                        onClick={() => rebuildIndexMutation.mutate()}
+                        disabled={rebuildIndexMutation.isPending}
+                        className="bg-amber-600 hover:bg-amber-500 px-4 py-2 rounded transition text-sm disabled:opacity-50"
+                    >
+                        Rebuild Index
+                    </button>
+                    <button
+                        onClick={() => refreshMcpMutation.mutate()}
+                        disabled={refreshMcpMutation.isPending}
+                        className="bg-purple-600 hover:bg-purple-500 px-4 py-2 rounded transition text-sm disabled:opacity-50"
+                    >
+                        Refresh MCP Index
+                    </button>
+                    <button
+                        onClick={() => setIsCreateModalOpen(true)}
+                        className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded transition flex items-center gap-2"
+                    >
+                        <span>+</span> New Command Set
+                    </button>
+                </div>
+            </div>
+
+            <div className="mb-6 rounded-lg border border-gray-700 bg-gray-800 p-4">
+                <div className="mb-2 flex items-center justify-between">
+                    <h3 className="text-sm font-semibold text-gray-200">Command Index</h3>
+                    {indexStatus && (
+                        <span className="rounded bg-gray-700 px-2 py-1 font-mono text-xs text-blue-300">
+                            {indexStatus.index_name} / {indexStatus.index_version}
+                        </span>
+                    )}
+                </div>
+                {indexStatus ? (
+                    <div className="grid gap-2 text-sm text-gray-300 md:grid-cols-4">
+                        <div>Exists: {indexStatus.exists ? 'yes' : 'no'}</div>
+                        <div>Command docs: {indexStatus.command_docs}</div>
+                        <div>MCP docs: {indexStatus.mcp_tool_docs}</div>
+                        <div>Total docs: {indexStatus.total_docs}</div>
+                    </div>
+                ) : (
+                    <div className="text-sm text-gray-500">Index status unavailable.</div>
+                )}
+                {adminStatus && (
+                    <div className="mt-3 text-sm text-gray-300">{adminStatus}</div>
+                )}
             </div>
 
             {isLoading ? (

@@ -3,6 +3,8 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile.mcp-router
+      args:
+        USE_WHEELHOUSE: "true"
     image: aiplanner-mcp-router:latest
     container_name: aiplanner-mcp-router
     restart: unless-stopped

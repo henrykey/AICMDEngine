@@ -12,6 +12,31 @@ export interface PlanResponse {
     confidence: number;
     plan?: PlanStep[];
     question?: string;
+    resolvedMode?: string;
+    retrievalDiagnostics?: {
+        requested_retrieval_backend?: string;
+        retrieval_backend?: string;
+        remote_candidate_count?: number;
+        remote_top_score?: number;
+        remote_fallback_reason?: string;
+        keyword_hits: number;
+        vector_hits: number;
+        raw_candidate_count: number;
+        prompt_candidate_count: number;
+        embedding_provider?: string;
+        embedding_model?: string;
+        requested_mode?: string;
+        resolved_mode?: string;
+        system_state_loaded?: boolean;
+        top_commands?: string[];
+    };
+    directResult?: {
+        serverName: string;
+        toolName: string;
+        params: Record<string, any>;
+        content: string;
+        data: Record<string, any>;
+    };
     risk_assessment?: {
         level: 'normal' | 'high' | 'critical';
         message: string;
@@ -65,6 +90,12 @@ export interface TaskContextType {
     // Command Sets selection state
     selectedCommandSets: string[];
     setSelectedCommandSets: (sets: string[]) => void;
+
+    // Planning mode
+    planningMode: 'auto' | 'cmdengine' | 'mcp';
+    setPlanningMode: (mode: 'auto' | 'cmdengine' | 'mcp') => void;
+    retrievalBackend: 'auto' | 'docintel';
+    setRetrievalBackend: (backend: 'auto' | 'docintel') => void;
 }
 
 const TaskContext = createContext<TaskContextType | undefined>(undefined);
@@ -79,6 +110,8 @@ export const TaskProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     const [selectedMcp, setSelectedMcp] = useState<string | null>(null);
     const [availableMcps, setAvailableMcps] = useState<MCPServerInfo[]>([]);
     const [selectedCommandSets, setSelectedCommandSets] = useState<string[]>([]);
+    const [planningMode, setPlanningMode] = useState<'auto' | 'cmdengine' | 'mcp'>('auto');
+    const [retrievalBackend, setRetrievalBackend] = useState<'auto' | 'docintel'>('auto');
 
     const value: TaskContextType = {
         conversationHistory,
@@ -99,6 +132,10 @@ export const TaskProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         setAvailableMcps,
         selectedCommandSets,
         setSelectedCommandSets,
+        planningMode,
+        setPlanningMode,
+        retrievalBackend,
+        setRetrievalBackend,
     };
 
     return (

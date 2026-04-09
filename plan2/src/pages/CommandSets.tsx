@@ -6,6 +6,10 @@ interface CommandSet {
     name: string;
     description?: string;
     version?: string;
+    storageStatus?: {
+        docintel?: boolean;
+        local?: boolean;
+    };
 }
 
 interface Command {
@@ -15,6 +19,36 @@ interface Command {
     description?: string;
     riskLevel?: string;
     response_schema?: any;
+}
+
+interface CommandIndexStatus {
+    exists: boolean;
+    index_name: string;
+    command_docs: number;
+    mcp_tool_docs: number;
+    total_docs: number;
+    index_version: string;
+    enabled?: boolean;
+    reason?: string;
+    docintel_enabled?: boolean;
+    docintel?: {
+        enabled?: boolean;
+        base_url?: string;
+    };
+    local_retrieval?: {
+        enabled?: boolean;
+        backend?: string;
+        reason?: string;
+        exists?: boolean;
+        total_docs?: number;
+        command_docs?: number;
+        mcp_tool_docs?: number;
+        vector_docs?: number;
+        vector_enabled?: boolean;
+        embedding_model?: string;
+        embedding_base_url?: string;
+        embedding_healthy?: boolean;
+    };
 }
 
 const CommandSets = () => {
@@ -35,9 +69,12 @@ const CommandSets = () => {
 
     const [commands, setCommands] = useState<Command[]>([]);
     const [isCommandsLoading, setIsCommandsLoading] = useState(false);
+    const [indexStatus, setIndexStatus] = useState<CommandIndexStatus | null>(null);
+    const [adminStatus, setAdminStatus] = useState('');
 
     useEffect(() => {
         loadCommandSets();
+        loadIndexStatus();
     }, []);
 
     const loadCommandSets = async () => {
@@ -51,6 +88,37 @@ const CommandSets = () => {
             console.error(err);
         } finally {
             setIsLoading(false);
+        }
+    };
+
+    const loadIndexStatus = async () => {
+        try {
+            const res = await api.get<CommandIndexStatus>('/command-index/status');
+            setIndexStatus(res.data);
+        } catch (err) {
+            setIndexStatus(null);
+        }
+    };
+
+    const handleRebuildIndex = async () => {
+        setAdminStatus('Rebuilding command index...');
+        try {
+            const res = await api.post('/command-index/rebuild');
+            setAdminStatus(`✅ Rebuilt index. Deleted ${res.data.deleted_command_docs}, rebuilt ${res.data.rebuilt_command_docs}.`);
+            await loadIndexStatus();
+        } catch (err: any) {
+            setAdminStatus(`❌ Rebuild failed: ${err.response?.data?.detail || err.message}`);
+        }
+    };
+
+    const handleRefreshMcpIndex = async () => {
+        setAdminStatus('Refreshing MCP index...');
+        try {
+            const res = await api.post('/command-index/refresh-mcp');
+            setAdminStatus(`✅ Refreshed MCP index. Deleted ${res.data.deleted_mcp_docs}, indexed ${res.data.indexed_mcp_docs}.`);
+            await loadIndexStatus();
+        } catch (err: any) {
+            setAdminStatus(`❌ Refresh failed: ${err.response?.data?.detail || err.message}`);
         }
     };
 
@@ -166,12 +234,84 @@ const CommandSets = () => {
         <div className="max-w-6xl mx-auto p-6">
             <div className="flex justify-between items-center mb-6">
                 <h2 className="text-2xl font-bold">Command Sets Configuration</h2>
-                <button
-                    onClick={() => setIsCreateModalOpen(true)}
-                    className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded transition flex items-center gap-2 text-white"
-                >
-                    <span>+</span> New Command Set
-                </button>
+                <div className="flex items-center gap-3">
+                    <button
+                        onClick={() => loadIndexStatus()}
+                        className="rounded bg-slate-200 px-4 py-2 text-sm text-slate-700 transition hover:bg-slate-300"
+                    >
+                        Refresh Status
+                    </button>
+                    <button
+                        onClick={handleRebuildIndex}
+                        className="rounded bg-amber-500 px-4 py-2 text-sm text-white transition hover:bg-amber-600"
+                    >
+                        Rebuild Index
+                    </button>
+                    <button
+                        onClick={handleRefreshMcpIndex}
+                        className="rounded bg-purple-600 px-4 py-2 text-sm text-white transition hover:bg-purple-700"
+                    >
+                        Refresh MCP Index
+                    </button>
+                    <button
+                        onClick={() => setIsCreateModalOpen(true)}
+                        className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded transition flex items-center gap-2 text-white"
+                    >
+                        <span>+</span> New Command Set
+                    </button>
+                </div>
+            </div>
+
+            <div className="mb-6 rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+                <div className="mb-2 flex items-center justify-between">
+                    <div className="text-sm font-semibold text-slate-800">Command Retrieval</div>
+                    {indexStatus && (
+                        <span className="rounded bg-slate-100 px-2 py-1 font-mono text-xs text-slate-600">
+                            {indexStatus.docintel?.enabled ? 'docintel' : 'unavailable'}
+                        </span>
+                    )}
+                </div>
+                {indexStatus ? (
+                    <div className="space-y-4 text-sm text-slate-600">
+                        <div className="rounded border border-slate-200 bg-slate-50 p-3">
+                            <div className="mb-2 flex items-center justify-between">
+                                <div className="font-semibold text-slate-800">DocIntel Command Retrieval</div>
+                                <span className="rounded bg-slate-100 px-2 py-1 font-mono text-xs text-slate-600">
+                                    {indexStatus.docintel?.enabled ? 'docintel' : 'unavailable'}
+                                </span>
+                            </div>
+                            <div className="grid gap-2 md:grid-cols-4">
+                                <div>Enabled: {indexStatus.docintel?.enabled ? 'yes' : 'no'}</div>
+                                <div>Connected by: command-set `D` badge</div>
+                                <div>Base URL: {indexStatus.docintel?.base_url || '-'}</div>
+                                <div>Primary backend: yes</div>
+                            </div>
+                        </div>
+
+                        <div className="rounded border border-slate-200 bg-white p-3">
+                            <div className="mb-2 flex items-center justify-between">
+                                <div className="font-semibold text-slate-800">Full Inventory Fallback</div>
+                                <span className="rounded bg-slate-100 px-2 py-1 font-mono text-xs text-slate-600">
+                                    mongo commands
+                                </span>
+                            </div>
+                            <div className="grid gap-2 md:grid-cols-4">
+                                <div>DocIntel enabled: {indexStatus.docintel_enabled ? 'yes' : 'no'}</div>
+                                <div>Local retrieval: disabled for now</div>
+                                <div>Local ES: {indexStatus.enabled === false ? 'disabled' : 'enabled'}</div>
+                                <div>Inventory fallback: always available</div>
+                            </div>
+                            {indexStatus.reason && (
+                                <div className="mt-2 text-amber-700">{indexStatus.reason}</div>
+                            )}
+                        </div>
+                    </div>
+                ) : (
+                    <div className="text-sm text-slate-500">Index status unavailable.</div>
+                )}
+                {adminStatus && (
+                    <div className="mt-3 text-sm text-slate-700">{adminStatus}</div>
+                )}
             </div>
 
             {error && (
@@ -200,11 +340,21 @@ const CommandSets = () => {
                             <div>
                                 <div className="flex justify-between items-start mb-2 pr-6">
                                     <h3 className="text-lg font-bold text-slate-800">{set.name}</h3>
-                                    {set.version && (
-                                        <span className="bg-slate-100 text-xs px-2 py-1 rounded text-slate-600 font-mono">
-                                            v{set.version}
-                                        </span>
-                                    )}
+                                    <div className="flex items-center gap-2">
+                                        {set.storageStatus?.docintel && (
+                                            <span
+                                                className="bg-slate-100 text-xs px-2 py-1 rounded text-slate-700 font-mono"
+                                                title="Available in DocIntel command corpus"
+                                            >
+                                                D
+                                            </span>
+                                        )}
+                                        {set.version && (
+                                            <span className="bg-slate-100 text-xs px-2 py-1 rounded text-slate-600 font-mono">
+                                                v{set.version}
+                                            </span>
+                                        )}
+                                    </div>
                                 </div>
                                 <p className="text-slate-600 text-sm mb-4 h-10 overflow-hidden text-ellipsis">
                                     {set.description || 'No description provided.'}

@@ -14,6 +14,26 @@ interface PlanResponse {
     confidence: number;
     plan?: PlanStep[];
     question?: string;
+    resolvedMode?: string;
+    retrievalDiagnostics?: {
+        keyword_hits: number;
+        vector_hits: number;
+        raw_candidate_count: number;
+        prompt_candidate_count: number;
+        embedding_provider?: string;
+        embedding_model?: string;
+        requested_mode?: string;
+        resolved_mode?: string;
+        system_state_loaded?: boolean;
+        top_commands?: string[];
+    };
+    directResult?: {
+        serverName: string;
+        toolName: string;
+        params: Record<string, any>;
+        content: string;
+        data: Record<string, any>;
+    };
     risk_assessment?: {
         level: 'normal' | 'high' | 'critical';
         message: string;
@@ -25,14 +45,17 @@ interface ConversationMessage {
     content: string;
 }
 
+type PlanningMode = 'auto' | 'cmdengine' | 'mcp';
+
 export default function TaskPlayground() {
     const [goal, setGoal] = useState('');
     const [conversationHistory, setConversationHistory] = useState<ConversationMessage[]>([]);
     const [lastQuestion, setLastQuestion] = useState<string | null>(null);
     const [isComposing, setIsComposing] = useState(false);
+    const [planningMode, setPlanningMode] = useState<PlanningMode>('auto');
 
     const mutation = useMutation({
-        mutationFn: async (payload: { goal: string; conversationHistory?: ConversationMessage[] }) => {
+        mutationFn: async (payload: { goal: string; conversationHistory?: ConversationMessage[]; context?: { planningMode: PlanningMode } }) => {
             const res = await api.post<PlanResponse>('/tasks/', payload);
             return res.data;
         },
@@ -67,7 +90,10 @@ export default function TaskPlayground() {
         // 发送请求
         mutation.mutate({
             goal,
-            conversationHistory: conversationHistory.length > 0 ? conversationHistory : undefined
+            conversationHistory: conversationHistory.length > 0 ? conversationHistory : undefined,
+            context: {
+                planningMode
+            }
         });
     };
 
@@ -81,6 +107,18 @@ export default function TaskPlayground() {
         <div className="max-w-4xl mx-auto space-y-6">
             <div className="bg-gray-800 p-6 rounded-lg border border-gray-700">
                 <h2 className="text-lg font-semibold mb-4">Task Planning Playground</h2>
+                <div className="mb-4 flex items-center gap-3">
+                    <label className="text-sm text-gray-400">Mode</label>
+                    <select
+                        className="bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm"
+                        value={planningMode}
+                        onChange={(e) => setPlanningMode(e.target.value as PlanningMode)}
+                    >
+                        <option value="auto">Auto</option>
+                        <option value="cmdengine">CmdEngine</option>
+                        <option value="mcp">MCP Direct</option>
+                    </select>
+                </div>
 
                 {/* Show conversation history if exists */}
                 {conversationHistory.length > 0 && (
@@ -140,10 +178,17 @@ export default function TaskPlayground() {
                     <div className="flex items-center gap-4">
                         <div className={`px-3 py-1 rounded-full text-sm font-bold ${mutation.data.type === 'plan_ready' ? 'bg-green-900 text-green-200' : 'bg-yellow-900 text-yellow-200'
                             }`}>
-                            {mutation.data.type === 'plan_ready' ? 'PLAN READY' : 'CLARIFICATION NEEDED'}
+                            {mutation.data.type === 'plan_ready'
+                                ? 'PLAN READY'
+                                : mutation.data.type === 'direct_result'
+                                    ? 'DIRECT MCP RESULT'
+                                    : 'CLARIFICATION NEEDED'}
                         </div>
                         <div className="text-gray-400 text-sm">
                             Confidence: {(mutation.data.confidence * 100).toFixed(0)}%
+                        </div>
+                        <div className="text-gray-500 text-sm">
+                            Resolved mode: {mutation.data.resolvedMode ?? planningMode}
                         </div>
                         {mutation.data.risk_assessment && (
                             <div className={`px-3 py-1 rounded-full text-sm font-bold border ${mutation.data.risk_assessment.level === 'critical' ? 'bg-red-900 text-red-100 border-red-500' :
@@ -190,6 +235,59 @@ export default function TaskPlayground() {
                                     </div>
                                 </div>
                             ))}
+                        </div>
+                    )}
+
+                    {mutation.data.directResult && (
+                        <div className="bg-gray-800 p-6 rounded-lg border border-green-700 space-y-4">
+                            <div className="flex flex-wrap items-center gap-3">
+                                <div className="rounded bg-green-900 px-3 py-1 text-sm font-semibold text-green-200">
+                                    {mutation.data.directResult.serverName}.{mutation.data.directResult.toolName}
+                                </div>
+                                <div className="text-sm text-gray-400">
+                                    Executed directly without plan generation
+                                </div>
+                            </div>
+                            {Object.keys(mutation.data.directResult.params ?? {}).length > 0 && (
+                                <pre className="overflow-x-auto rounded bg-black/50 p-3 text-xs text-gray-300">
+                                    {JSON.stringify(mutation.data.directResult.params, null, 2)}
+                                </pre>
+                            )}
+                            <div className="rounded bg-black/50 p-4 text-sm text-green-300">
+                                {mutation.data.directResult.content}
+                            </div>
+                            {mutation.data.directResult.data && Object.keys(mutation.data.directResult.data).length > 0 && (
+                                <pre className="overflow-x-auto rounded bg-black/50 p-3 text-xs text-gray-500">
+                                    {JSON.stringify(mutation.data.directResult.data, null, 2)}
+                                </pre>
+                            )}
+                        </div>
+                    )}
+
+                    {mutation.data.retrievalDiagnostics && (
+                        <div className="bg-gray-800 p-4 rounded-lg border border-gray-700 space-y-3">
+                            <h3 className="text-sm font-semibold text-gray-200">Retrieval Diagnostics</h3>
+                            <div className="grid gap-2 text-sm text-gray-300 md:grid-cols-2">
+                                <div>Requested mode: {mutation.data.retrievalDiagnostics.requested_mode ?? planningMode}</div>
+                                <div>Resolved mode: {mutation.data.retrievalDiagnostics.resolved_mode ?? mutation.data.resolvedMode ?? planningMode}</div>
+                                <div>Keyword hits: {mutation.data.retrievalDiagnostics.keyword_hits ?? 0}</div>
+                                <div>Vector hits: {mutation.data.retrievalDiagnostics.vector_hits ?? 0}</div>
+                                <div>Raw candidates: {mutation.data.retrievalDiagnostics.raw_candidate_count ?? 0}</div>
+                                <div>Prompt candidates: {mutation.data.retrievalDiagnostics.prompt_candidate_count ?? 0}</div>
+                                <div>Embedding provider: {mutation.data.retrievalDiagnostics.embedding_provider ?? 'n/a'}</div>
+                                <div>Embedding model: {mutation.data.retrievalDiagnostics.embedding_model ?? 'n/a'}</div>
+                                <div>System state loaded: {mutation.data.retrievalDiagnostics.system_state_loaded ? 'yes' : 'no'}</div>
+                            </div>
+                            {mutation.data.retrievalDiagnostics.top_commands && mutation.data.retrievalDiagnostics.top_commands.length > 0 && (
+                                <div>
+                                    <div className="mb-2 text-xs uppercase tracking-wide text-gray-500">Top Commands</div>
+                                    <div className="space-y-1 font-mono text-xs text-green-300">
+                                        {mutation.data.retrievalDiagnostics.top_commands.map((command) => (
+                                            <div key={command}>{command}</div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
                         </div>
                     )}
 

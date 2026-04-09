@@ -1,4 +1,4 @@
-from typing import Optional, Any
+from typing import Optional, Any, Dict
 from pydantic import BaseModel, Field, model_validator
 from datetime import datetime
 from bson import ObjectId
@@ -11,6 +11,7 @@ class CommandSet(BaseModel):
     source_type: str = "manual"
     source_uri: Optional[str] = None
     version: str = "1.0.0"
+    storage_status: Optional[Dict[str, bool]] = Field(default=None, alias="storageStatus")
 
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

@@ -5,9 +5,24 @@ LLM Provider Manager - manages multiple LLM providers with OpenAI-compatible int
 from typing import Dict, Optional, List, Any
 import logging
 from openai import AsyncOpenAI
+from urllib.parse import urlparse
 from src.llm.config_loader import LLMConfig, LLMConfigLoader
 
 logger = logging.getLogger(__name__)
+
+
+def _classify_base_url(base_url: Optional[str]) -> str:
+    raw = str(base_url or "")
+    try:
+        host = (urlparse(raw).hostname or "").lower()
+    except Exception:
+        host = raw.lower()
+
+    if host in {"localhost", "127.0.0.1", "0.0.0.0", "host.docker.internal"}:
+        return "local"
+    if "ollama" in host:
+        return "local"
+    return "remote"
 
 
 class LLMProviderManager:
@@ -210,6 +225,17 @@ class LLMProviderManager:
             return None
 
         try:
+            route = _classify_base_url(provider_config.base_url)
+            logger.info(
+                "ProviderManager call start route=%s provider=%s model=%s base_url=%s messages=%s max_tokens=%s temperature=%s",
+                route,
+                provider_name,
+                model or provider_config.model,
+                provider_config.base_url,
+                len(messages),
+                max_tokens or provider_config.max_tokens,
+                temperature or provider_config.temperature,
+            )
             response = await client.chat.completions.create(
                 model=model or provider_config.model,
                 messages=messages,
@@ -232,6 +258,13 @@ class LLMProviderManager:
                     f"{total_tokens} tokens, ${cost:.6f} cost"
                 )
 
+            logger.info(
+                "ProviderManager call success route=%s provider=%s model=%s content_len=%s",
+                route,
+                provider_name,
+                model or provider_config.model,
+                len(result or ""),
+            )
             return result
 
         except Exception as e:

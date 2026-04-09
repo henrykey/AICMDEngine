@@ -2,8 +2,11 @@ import { useState, useRef, useEffect } from 'react';
 import { api } from '../lib/api';
 import { useTask, PlanResponse } from '../contexts/TaskContext';
 
+type PlanningMode = 'auto' | 'cmdengine' | 'mcp';
+type RetrievalBackend = 'auto' | 'docintel';
+
 const ChatPanel: React.FC = () => {
-    const { conversationHistory, setConversationHistory, lastQuestion, setLastQuestion, setCurrentPlanResponse, selectedCommandSets } = useTask();
+    const { conversationHistory, setConversationHistory, lastQuestion, setLastQuestion, setCurrentPlanResponse, selectedCommandSets, planningMode, setPlanningMode, retrievalBackend, setRetrievalBackend } = useTask();
     const [goal, setGoal] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState('');
@@ -37,9 +40,11 @@ const ChatPanel: React.FC = () => {
                 conversationHistory: conversationHistory.length > 0 ? conversationHistory : undefined
             };
 
-            if (selectedCommandSets.length > 0) {
-                payload.context = { commandSetNames: selectedCommandSets };
-            }
+            payload.context = {
+                ...(selectedCommandSets.length > 0 ? { commandSetNames: selectedCommandSets } : {}),
+                planningMode,
+                retrievalBackend,
+            };
 
             // 在对话中添加加载状态的占位符
             const historyWithLoading = [
@@ -122,6 +127,30 @@ const ChatPanel: React.FC = () => {
             )}
 
             {/* Input Area */}
+            <div className="flex items-center gap-3 flex-wrap">
+                <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">Mode</label>
+                <select
+                    value={planningMode}
+                    onChange={(e) => setPlanningMode(e.target.value as PlanningMode)}
+                    className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 outline-none focus:border-blue-500"
+                    disabled={isLoading}
+                >
+                    <option value="auto">Auto</option>
+                    <option value="cmdengine">CmdEngine</option>
+                    <option value="mcp">MCP Direct</option>
+                </select>
+                <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">Retrieval</label>
+                <select
+                    value={retrievalBackend}
+                    onChange={(e) => setRetrievalBackend(e.target.value as RetrievalBackend)}
+                    className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 outline-none focus:border-blue-500"
+                    disabled={isLoading}
+                >
+                    <option value="auto">Auto</option>
+                    <option value="docintel">DocIntel</option>
+                </select>
+            </div>
+
             <div className="flex gap-2">
                 <input
                     type="text"

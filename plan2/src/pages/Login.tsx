@@ -31,12 +31,18 @@ export default function Login() {
 
             // Robust token extraction
             const token = res.data.access_token || res.data.token || res.data.data?.token;
+            const refreshToken = res.data.refresh_token || res.data.data?.refresh_token;
 
             if (!token) {
                 throw new Error("No access token returned from Membership Service");
             }
 
             localStorage.setItem('token', token);
+            if (refreshToken) {
+                localStorage.setItem('refreshToken', refreshToken);
+            } else {
+                localStorage.removeItem('refreshToken');
+            }
             localStorage.setItem('username', username);
 
             // Default tenant check - must match database tenant_id (integer 1)

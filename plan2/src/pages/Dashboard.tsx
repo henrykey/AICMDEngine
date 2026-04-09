@@ -7,6 +7,7 @@ import CommandSets from './CommandSets';
 import Settings from './Settings';
 import MCPTools from './MCPTools';
 import WorkflowDesigner from './WorkflowDesigner';
+import { useTask } from '../contexts/TaskContext';
 
 interface NavItem {
   id: string;
@@ -26,6 +27,7 @@ const NAV_ITEMS: NavItem[] = [
 
 const Dashboard = () => {
   const navigate = useNavigate();
+  const { planningMode, setPlanningMode } = useTask();
   const [activeNav, setActiveNav] = useState<string>('planner');
 
   const handleLogout = () => {
@@ -103,7 +105,21 @@ const Dashboard = () => {
               </div>
             </div>
             {activeNav === 'planner' && (
-              <div className="flex-shrink-0">
+              <div className="flex flex-shrink-0 items-start gap-3">
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 shadow-sm">
+                  <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Planning Mode
+                  </label>
+                  <select
+                    value={planningMode}
+                    onChange={(e) => setPlanningMode(e.target.value as 'auto' | 'cmdengine' | 'mcp')}
+                    className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 outline-none focus:border-blue-500"
+                  >
+                    <option value="auto">Auto</option>
+                    <option value="cmdengine">CmdEngine</option>
+                    <option value="mcp">MCP Direct</option>
+                  </select>
+                </div>
                 <CommandSetSelector />
               </div>
             )}

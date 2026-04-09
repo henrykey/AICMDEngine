@@ -782,13 +782,14 @@ async def fetch_router_vlm_info(server_name: str = "pdf2md-enhanced"):
 async def run_task_pages(
     transport,
     task_name,
-    pdf_path,
     pages,
     policy,
     merge_mode,
     check_merge,
     full_output,
     output_prefix,
+    pdf_path=None,
+    pdf_base64=None,
     render_dpi=220,
     render_rotate_deg=0,
     debug_layout_probe=False,
@@ -811,11 +812,18 @@ async def run_task_pages(
     status_tool = "pdf2md-enhanced.get_task_status"
 
     print(f"→ 调用远程工具: {start_tool}")
-    start_req_args = {
-        "task_name": task_name,
-        "file_path": str(pdf_path),
-        "pages": pages,
-    }
+    if pdf_base64:
+        start_req_args = {
+            "task_name": task_name,
+            "file_data": pdf_base64,
+            "pages": pages,
+        }
+    else:
+        start_req_args = {
+            "task_name": task_name,
+            "file_path": str(pdf_path),
+            "pages": pages,
+        }
     start_resp = await _call_tool(
         transport,
         start_tool,
@@ -828,7 +836,7 @@ async def run_task_pages(
     original_pages = list(pages)
     progress_pages = list(progress_pages or pages)
     # Docker/remote MCP often cannot access host local path; fallback to file_data transfer.
-    if start_data and start_data.get("error") and "no such file" in str(start_data.get("error")).lower():
+    if (not pdf_base64) and start_data and start_data.get("error") and "no such file" in str(start_data.get("error")).lower():
         mode = (file_data_mode or "single").strip().lower()
         if mode == "single" and len(pages) > 1:
             print(f"  ℹ️  file_data单页模式：{len(pages)}页将逐页单独传输")
@@ -1001,10 +1009,10 @@ async def run_task_pages(
     md_file = None
     rag_file = None
     pages_file = None
+    doc_id = Path(pdf_path).stem if pdf_path else task_name
     if output_prefix:
         out_prefix = Path(output_prefix)
         out_prefix.parent.mkdir(parents=True, exist_ok=True)
-        doc_id = Path(pdf_path).stem
         md_file = f"{output_prefix}.md"
         rag_file = f"{output_prefix}.json"
         pages_file = f"{output_prefix}.pages.json"
@@ -1333,7 +1341,35 @@ async def test_pdf2md_enhanced_mcp(
             total_pages = get_pdf_total_pages(pdf_path)
 
             if page_num:
-                target_pages = [page_num]
+                print(f"→ 提取第{page_num}页并编码...")
+                page_data = extract_pdf_page(pdf_path, page_num)
+                page_base64 = base64.b64encode(page_data).decode('utf-8')
+                print(f"✓ 第{page_num}页编码完成 ({len(page_base64)//1024} KB)")
+                await run_task_pages(
+                    transport=transport,
+                    task_name=f"single-page-{page_num}-{int(time.time())}",
+                    pdf_base64=page_base64,
+                    pages=[1],
+                    policy=policy,
+                    merge_mode=merge_mode,
+                    check_merge=check_merge,
+                    full_output=full_output,
+                    output_prefix=output_prefix,
+                    render_dpi=render_dpi,
+                    render_rotate_deg=render_rotate_deg,
+                    debug_layout_probe=debug_layout_probe,
+                    page_retries=page_retries,
+                    retry_render_dpi=retry_render_dpi,
+                    file_data_mode=file_data_mode,
+                    file_data_batch_size=file_data_batch_size,
+                    full_vlm_retry_markdown=full_vlm_retry_markdown,
+                    full_vlm_split_extract=full_vlm_split_extract,
+                    large_table_placeholder=large_table_placeholder,
+                    large_table_min_cols=large_table_min_cols,
+                    large_table_min_rows=large_table_min_rows,
+                    large_table_min_cells=large_table_min_cells,
+                )
+                return
             elif test_document:
                 target_pages = list(range(1, total_pages + 1))
             elif pages:
