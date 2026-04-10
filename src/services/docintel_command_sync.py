@@ -91,7 +91,13 @@ class DocIntelCommandSyncService:
             auth_token=auth_token,
         )
 
-    async def sync_mcp_tools(self, mcp_registry: Any, tenant_id: int = 0) -> int:
+    async def sync_mcp_tools(
+        self,
+        mcp_registry: Any,
+        tenant_id: int = 0,
+        user_id: str | None = None,
+        auth_token: str | None = None,
+    ) -> int:
         if not mcp_registry:
             return 0
         payloads = []
@@ -109,7 +115,8 @@ class DocIntelCommandSyncService:
         return await self.client.bulk_upsert_command_documents(
             tenant_id,
             payloads,
-            user_id=self._resolve_user_id(),
+            user_id=self._resolve_user_id(user_id, auth_token),
+            auth_token=auth_token,
         )
 
     async def delete_commands(self, tenant_id: int, external_ids: List[str]) -> int:

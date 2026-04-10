@@ -32,7 +32,8 @@ class ExecutionRepository:
         plan_id: str,
         plan: list,
         global_timeout: int,
-        created_by: str
+        created_by: str,
+        original_goal: Optional[str] = None,
     ) -> ExecutionRecord:
         """
         创建执行记录
@@ -52,7 +53,9 @@ class ExecutionRepository:
             plan_id=plan_id,
             total_steps=len(plan),
             global_timeout=global_timeout,
-            created_by=created_by
+            created_by=created_by,
+            original_goal=original_goal,
+            original_plan=plan,
         )
 
         result = await self.db["executions"].insert_one(

@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field, model_validator, ConfigDict
 from datetime import datetime
 from enum import Enum
@@ -39,6 +39,8 @@ class ExecutionRecord(BaseModel):
     completed_at: Optional[datetime] = None
     created_by: str  # user_id
     error_message: Optional[str] = None
+    original_goal: Optional[str] = None
+    original_plan: List[Dict[str, Any]] = Field(default_factory=list)
 
     @model_validator(mode='before')
     @classmethod
@@ -92,6 +94,7 @@ class ExecutionRequest(BaseModel):
     """执行请求"""
     plan: list  # List[PlanStep]
     global_timeout: int = Field(default=60, description="全局超时时间（秒）")
+    goal: Optional[str] = None
     # 可选：直接传递认证信息
     auth_token: Optional[str] = None  # JWT token
 
@@ -119,6 +122,33 @@ class ExecutionResponse(BaseModel):
     )
 
 
+class UserExecutionSummary(BaseModel):
+    headline: str
+    summary: str
+    status_label: str = Field(alias="statusLabel")
+    next_action: Optional[str] = Field(None, alias="nextAction")
+    detail_lines: list[str] = Field(default_factory=list, alias="detailLines")
+    debug_hint: Optional[str] = Field(None, alias="debugHint")
+
+    model_config = ConfigDict(
+        populate_by_name=True,
+        serialize_by_alias=True
+    )
+
+
+class RepairHint(BaseModel):
+    recoverable: bool
+    category: str
+    summary: str
+    suggested_action: Optional[str] = Field(None, alias="suggestedAction")
+    coach_prompt: Optional[str] = Field(None, alias="coachPrompt")
+
+    model_config = ConfigDict(
+        populate_by_name=True,
+        serialize_by_alias=True
+    )
+
+
 class ExecutionDetailResponse(BaseModel):
     """执行详情响应"""
     execution_id: str
@@ -129,10 +159,41 @@ class ExecutionDetailResponse(BaseModel):
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
     error_message: Optional[str]
+    original_goal: Optional[str] = Field(None, alias="originalGoal")
     steps: list  # List[StepExecution]
+    user_summary: Optional[UserExecutionSummary] = Field(None, alias="userSummary")
+    repair_hint: Optional[RepairHint] = Field(None, alias="repairHint")
 
     model_config = ConfigDict(
+        populate_by_name=True,
+        serialize_by_alias=True,
         use_enum_values=True
+    )
+
+
+class RepairExecutionRequest(BaseModel):
+    goal: str
+    guidance: Optional[str] = None
+    conversation_history: Optional[List[Dict[str, str]]] = Field(default=None, alias="conversationHistory")
+    auth_token: Optional[str] = None
+
+    model_config = ConfigDict(
+        populate_by_name=True,
+        serialize_by_alias=True
+    )
+
+
+class RepairExecutionResponse(BaseModel):
+    type: str = "repair_plan_ready"
+    confidence: float
+    repair_summary: str = Field(alias="repairSummary")
+    repair_plan_description: str = Field(alias="repairPlanDescription")
+    repaired_plan: List[Dict[str, Any]] = Field(alias="repairedPlan")
+    source_execution_id: str = Field(alias="sourceExecutionId")
+
+    model_config = ConfigDict(
+        populate_by_name=True,
+        serialize_by_alias=True
     )
 
 

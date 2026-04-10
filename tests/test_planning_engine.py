@@ -1,6 +1,6 @@
 import pytest
 from src.services.planning_engine import PlanningEngine
-from src.models.models import TaskRequest, TaskRequestContext
+from src.models.models import TaskRequest, TaskRequestContext, PlanStep
 
 
 class TestPlanningEngine:
@@ -162,3 +162,31 @@ class TestPlanningEngine:
         system_content = prompt[0]["content"]
         assert "123" in system_content
         assert "Current User's Tenant ID: 123" in system_content
+
+    def test_augment_member_mcp_lookup_plan_inserts_get_member_id(self):
+        engine = PlanningEngine(None)
+        steps = [
+            PlanStep(
+                step=0,
+                description="List all members to find Zhu Guodong's ID",
+                command="MCP.membership.list_members",
+                params={},
+            ),
+            PlanStep(
+                step=1,
+                description="Get detailed information for Zhu Guodong using the ID from step 0",
+                command="MCP.membership.get_member",
+                params={
+                    "member_id": "$.steps[0].response.data[?(@.full_name == '朱国栋')].id",
+                    "tenant_id": 1,
+                },
+            ),
+        ]
+
+        updated = engine._augment_member_mcp_lookup_plan("显示用户朱国栋的详细信息", steps)
+
+        assert len(updated) == 3
+        assert updated[1].command == "MCP.membership.get_member_id"
+        assert updated[1].params["query"] == "朱国栋"
+        assert updated[2].command == "MCP.membership.get_member"
+        assert updated[2].params["member_id"] == "$.steps[1].response.member_id"

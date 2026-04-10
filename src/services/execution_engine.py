@@ -14,6 +14,8 @@ from src.models.execution import (
     ExecutionRequest,
     ExecutionResponse,
     ExecutionDetailResponse,
+    UserExecutionSummary,
+    RepairHint,
     RollbackRequest,
     RollbackResponse
 )
@@ -41,6 +43,179 @@ class ExecutionEngine:
         self.repository = ExecutionRepository(db)
         self.mcp_registry = mcp_registry
 
+    def _extract_member_candidates(self, response_data: Any) -> List[Dict[str, Any]]:
+        if isinstance(response_data, dict):
+            for key in ("data", "members", "items", "results"):
+                value = response_data.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)]
+            return [response_data] if any(key in response_data for key in ("id", "fullName", "username")) else []
+        if isinstance(response_data, list):
+            return [item for item in response_data if isinstance(item, dict)]
+        return []
+
+    async def _execute_internal_lookup_member_by_name(
+        self,
+        step: StepExecution,
+        resolved_params: Dict[str, Any],
+        step_results: List[StepExecution],
+    ) -> tuple[Dict[str, Any], str]:
+        member_name = str(resolved_params.get("member_name", "")).strip()
+        source_step_number = int(resolved_params.get("source_step", 0) or 0)
+        if not member_name:
+            raise ValueError("Internal lookup failed: member_name is required")
+        if source_step_number <= 0 or source_step_number > len(step_results):
+            raise ValueError("Internal lookup failed: source_step is invalid")
+
+        source_step = step_results[source_step_number - 1]
+        candidates = self._extract_member_candidates(source_step.response_data)
+        exact_matches = [
+            item for item in candidates
+            if str(item.get("fullName", "")).strip() == member_name
+        ]
+        if not exact_matches:
+            exact_matches = [
+                item for item in candidates
+                if str(item.get("username", "")).strip() == member_name
+                or str(item.get("name", "")).strip() == member_name
+            ]
+
+        if len(exact_matches) == 1:
+            member = exact_matches[0]
+            member_id = member.get("id")
+            if member_id is None:
+                raise ValueError(f"已找到成员“{member_name}”，但结果中没有可用的 id。")
+            content = f"已定位成员“{member_name}”的ID：{member_id}"
+            return member, content
+
+        if len(exact_matches) == 0:
+            raise ValueError(f"未找到成员“{member_name}”。请确认名称是否正确，或先创建该成员。")
+
+        raise ValueError(f"找到多个名为“{member_name}”的成员，无法唯一确定目标。")
+
+    def _friendly_execution_error(self, error_message: Optional[str]) -> Optional[str]:
+        if not error_message:
+            return None
+        lowered = error_message.lower()
+        if "could not resolve" in lowered or "failed to extract values" in lowered:
+            return "执行在解析上一步结果时失败了，因此无法继续后续查询。"
+        if "missing 1 required positional argument" in lowered or "invalid parameters for tool" in lowered:
+            return "执行在参数解析阶段失败了，系统没有成功把上一步查到的信息传给下一步。"
+        if "timed out" in lowered:
+            return "执行超时了，系统暂时没有完成这次查询。"
+        return "执行过程中出现异常，系统暂时没有完成这次请求。"
+
+    def _build_repair_hint(
+        self,
+        execution: ExecutionRecord,
+        steps: List[StepExecution],
+    ) -> Optional[RepairHint]:
+        failed_steps = [step for step in steps if step.status == StepStatus.FAILED]
+        if not failed_steps:
+            return None
+
+        failed_step = failed_steps[-1]
+        error_text = failed_step.error_message or execution.error_message or ""
+        lowered = error_text.lower()
+
+        if "missing 1 required positional argument" in lowered or "invalid parameters for tool" in lowered:
+            return RepairHint(
+                recoverable=True,
+                category="missing_intermediate_dependency",
+                summary="当前计划缺少中间依赖解析步骤，导致后续命令没有拿到必需参数。",
+                suggestedAction="请继续教系统如何从上一步结果中提取正确参数，然后重新规划执行。",
+                coachPrompt=(
+                    "请告诉我：应该怎样从前一步结果中取得后续命令需要的参数。"
+                    "例如是先从成员列表中按 username/fullName 匹配，再提取 member_id。"
+                ),
+            )
+
+        if "could not resolve" in lowered or "failed to extract values" in lowered:
+            return RepairHint(
+                recoverable=True,
+                category="jsonpath_or_result_extraction_failure",
+                summary="当前计划引用了前一步结果，但结果提取路径或中间步骤设计不正确。",
+                suggestedAction="请补充更合适的中间步骤或更明确的结果提取方式。",
+                coachPrompt="请告诉我应如何从已有结果中更准确地定位目标对象或提取字段。",
+            )
+
+        if "未找到成员" in error_text or "找到多个名为" in error_text:
+            return RepairHint(
+                recoverable=False,
+                category="business_outcome_confirmed",
+                summary=error_text,
+                suggestedAction="这是已确认的业务结果，不需要继续技术修复。",
+                coachPrompt=None,
+            )
+
+        return RepairHint(
+            recoverable=False,
+            category="unknown_execution_failure",
+            summary=self._friendly_execution_error(error_text) or "执行失败，暂时无法自动修复。",
+            suggestedAction="请查看调试详情后决定是否人工提供新的求解思路。",
+            coachPrompt=None,
+        )
+
+    def _build_execution_user_summary(
+        self,
+        execution: ExecutionRecord,
+        steps: List[StepExecution],
+    ) -> UserExecutionSummary:
+        total = len(steps)
+        succeeded = sum(1 for step in steps if step.status == StepStatus.SUCCESS)
+        failed = sum(1 for step in steps if step.status == StepStatus.FAILED)
+        skipped = sum(1 for step in steps if step.status == StepStatus.SKIPPED)
+        running = sum(1 for step in steps if step.status == StepStatus.RUNNING)
+
+        detail_lines = []
+        if total:
+            detail_lines.append(f"已完成 {succeeded}/{total} 个步骤")
+        if failed:
+            detail_lines.append(f"{failed} 个步骤失败")
+        if skipped:
+            detail_lines.append(f"{skipped} 个步骤已跳过")
+        if running:
+            detail_lines.append("系统仍在执行中")
+
+        if execution.status == ExecutionStatus.COMPLETED:
+            return UserExecutionSummary(
+                headline="任务已完成",
+                summary="系统已经完成这次请求，正式结果会以自然语言为主，内部步骤已放到调试详情中。",
+                statusLabel="completed",
+                nextAction=None,
+                detailLines=detail_lines,
+                debugHint="如需查看具体命令、参数和原始响应，可展开调试详情。",
+            )
+
+        if execution.status == ExecutionStatus.RUNNING:
+            return UserExecutionSummary(
+                headline="任务执行中",
+                summary="系统正在按规划执行这次请求，界面会持续更新当前进度。",
+                statusLabel="running",
+                nextAction="等待执行完成后查看最终结果。",
+                detailLines=detail_lines,
+                debugHint="调试详情中可查看当前步骤状态和原始返回。",
+            )
+
+        if execution.status in {ExecutionStatus.FAILED, ExecutionStatus.PARTIAL_FAILED, ExecutionStatus.TIMEOUT}:
+            return UserExecutionSummary(
+                headline="任务未完整完成",
+                summary=self._friendly_execution_error(execution.error_message) or "执行过程中出现异常，系统暂时没有完成这次请求。",
+                statusLabel="failed",
+                nextAction="可重试本次请求；如需排查原因，请展开调试详情。",
+                detailLines=detail_lines,
+                debugHint="调试详情中保留了失败步骤、错误信息和原始响应。",
+            )
+
+        return UserExecutionSummary(
+            headline="任务状态已更新",
+            summary="系统已更新这次请求的执行状态。",
+            statusLabel=str(execution.status),
+            nextAction=None,
+            detailLines=detail_lines,
+            debugHint="调试详情中可查看完整步骤轨迹。",
+        )
+
     async def execute_plan(
         self,
         request: ExecutionRequest,
@@ -67,7 +242,8 @@ class ExecutionEngine:
             plan_id=plan_id,
             plan=request.plan,
             global_timeout=request.global_timeout,
-            created_by=user_id
+            created_by=user_id,
+            original_goal=getattr(request, "goal", None),
         )
 
         # 写入审计日志
@@ -375,13 +551,19 @@ class ExecutionEngine:
         client = None
         try:
             response_data = None
+            result_content = None  # Human-readable result content
 
+            if step.command == "INTERNAL.lookup_member_by_name":
+                response_data, result_content = await self._execute_internal_lookup_member_by_name(
+                    step=step,
+                    resolved_params=resolved_params,
+                    step_results=step_results,
+                )
             # 优先使用 MCP 命令执行
-            if self.mcp_registry:
+            elif self.mcp_registry:
                 # 尝试从命令字符串中提取 MCP 名称和工具名称
                 mcp_name, tool_name = self._parse_command_to_mcp(step.command)
 
-                result_content = None  # Human-readable result content
                 if mcp_name and tool_name:
                     # 使用 MCP 执行命令
                     logger.info(f"Executing MCP command: {mcp_name}.{tool_name}")
@@ -390,12 +572,18 @@ class ExecutionEngine:
                     # The planning engine puts parameters in body/query/path/headers structure,
                     # but MCP tools expect flat parameters at the top level
                     mcp_params = self._flatten_mcp_params(resolved_params)
+                    mcp_params = self._normalize_mcp_params(mcp_name, tool_name, mcp_params)
                     
                     # Add auth_token and tenant_id to MCP command execution
                     mcp_params["auth_token"] = auth_token
                     mcp_params["tenant_id"] = tenant_id
                     
                     logger.debug(f"MCP params after flattening: {mcp_params}")
+
+                    missing_required_msg = self._validate_required_mcp_params(mcp_name, tool_name, mcp_params)
+                    if missing_required_msg:
+                        logger.error(missing_required_msg)
+                        raise ValueError(missing_required_msg)
                     
                     result = await self.mcp_registry.execute_command(
                         mcp_name=mcp_name,
@@ -721,6 +909,31 @@ class ExecutionEngine:
                 logger.error(f"Step {step.step_number} (index {step_idx}) has no response data")
                 return None
 
+            # Compatibility shortcut:
+            # some plans still reference list-style JSONPath expressions against
+            # MCP.membership.get_member_id results, whose actual payload shape is
+            # {member_id, matched_member, ...}. When that happens, resolve
+            # directly to response.member_id so execution can continue.
+            if isinstance(step.response_data, dict) and "member_id" in step.response_data:
+                normalized_jsonpath = jsonpath.replace("full_name", "fullName")
+                member_resolution_patterns = (
+                    f"$.steps[{step_idx}].response.member_id",
+                    f"$.steps[{step_idx}].response.matched_member.id",
+                )
+                if normalized_jsonpath in member_resolution_patterns:
+                    return step.response_data.get("member_id")
+                if (
+                    normalized_jsonpath.startswith(f"$.steps[{step_idx}].response.data[?(")
+                    and normalized_jsonpath.endswith(")].id")
+                ) or (
+                    normalized_jsonpath.startswith(f"$.steps[{step_idx}].response.data[?(")
+                    and normalized_jsonpath.endswith("].id")
+                ) or (
+                    normalized_jsonpath.startswith(f"$.steps[{step_idx}].response.data")
+                    and normalized_jsonpath.endswith(".id")
+                ):
+                    return step.response_data.get("member_id")
+
             # 解析路径
             path_str = jsonpath[end_idx + 1:].strip(".")
             if not path_str:
@@ -932,7 +1145,10 @@ class ExecutionEngine:
             started_at=execution.started_at,
             completed_at=execution.completed_at,
             error_message=execution.error_message,
-            steps=[step.model_dump(by_alias=True) for step in steps]
+            original_goal=execution.original_goal,
+            steps=[step.model_dump(by_alias=True) for step in steps],
+            user_summary=self._build_execution_user_summary(execution, steps),
+            repair_hint=self._build_repair_hint(execution, steps),
         )
 
     async def rollback_execution(
@@ -1123,11 +1339,11 @@ class ExecutionEngine:
                                 return "membership", "create_member"
                             elif method == "GET" and len(path_segments) == 3:
                                 return "membership", "list_members"
-                            elif method == "GET" and len(path_segments) > 3:
+                            elif method == "GET" and len(path_segments) == 4:
                                 return "membership", "get_member"
-                            elif method == "DELETE":
+                            elif method == "DELETE" and len(path_segments) == 4:
                                 return "membership", "delete_member"
-                            elif method == "POST" and len(path_segments) > 3:
+                            elif method == "POST" and len(path_segments) == 4:
                                 return "membership", "update_member"
                         elif main_segment == "roles":
                             if method == "GET":
@@ -1148,6 +1364,59 @@ class ExecutionEngine:
             logger.warning(f"Error parsing command '{command}': {e}")
 
         return None, None
+
+    def _normalize_mcp_params(
+        self,
+        mcp_name: str,
+        tool_name: str,
+        params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        normalized = dict(params)
+
+        alias_map = {
+            ("membership", "get_member"): {"id": "member_id"},
+            ("membership", "update_member"): {"id": "member_id"},
+            ("membership", "delete_member"): {"id": "member_id"},
+            ("membership", "get_member_orgs"): {"id": "member_id"},
+            ("membership", "assign_role"): {"id": "member_id"},
+        }
+
+        for source_key, target_key in alias_map.get((mcp_name, tool_name), {}).items():
+            if source_key in normalized and target_key not in normalized:
+                normalized[target_key] = normalized[source_key]
+
+        return normalized
+
+    def _validate_required_mcp_params(
+        self,
+        mcp_name: str,
+        tool_name: str,
+        params: Dict[str, Any],
+    ) -> Optional[str]:
+        if not self.mcp_registry:
+            return None
+
+        tool_info = self.mcp_registry.get_tool_info(mcp_name, tool_name) or {}
+        input_schema = tool_info.get("input_schema") or tool_info.get("inputSchema") or {}
+        required = [
+            name for name in input_schema.get("required", [])
+            if name not in {"auth_token", "tenant_id"}
+        ]
+
+        missing = []
+        for name in required:
+            value = params.get(name)
+            if value is None or (isinstance(value, str) and not value.strip()):
+                missing.append(name)
+
+        if not missing:
+            return None
+
+        return (
+            f"Plan is missing required parameters for {mcp_name}.{tool_name}: {', '.join(missing)}. "
+            "This usually means the plan omitted an intermediate lookup/resolution step."
+        )
+
     def _flatten_mcp_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
         Flatten parameters for MCP tool execution.
@@ -1176,21 +1445,26 @@ class ExecutionEngine:
             Flattened parameters dictionary suitable for MCP tools
         """
         flattened = {}
-        
-        # Extract from body (most common for POST/PUT requests)
-        if "body" in params and isinstance(params["body"], dict):
+        structured_keys = {"body", "query", "path", "headers"}
+        has_structured_params = any(
+            key in params and isinstance(params.get(key), dict)
+            for key in structured_keys
+        )
+
+        if not has_structured_params:
+            return params.copy()
+
+        if isinstance(params.get("body"), dict):
             flattened.update(params["body"])
-        
-        # Extract from query (for GET requests with query params)
-        if "query" in params and isinstance(params["query"], dict):
+
+        if isinstance(params.get("query"), dict):
             flattened.update(params["query"])
-        
-        # Extract from path (for path parameters like {id})
-        if "path" in params and isinstance(params["path"], dict):
+
+        if isinstance(params.get("path"), dict):
             flattened.update(params["path"])
-        
-        # If params doesn't have these keys, it's already flat - use as is
-        if not any(k in params for k in ["body", "query", "path", "headers"]):
-            flattened = params.copy()
-        
+
+        for key, value in params.items():
+            if key not in structured_keys:
+                flattened[key] = value
+
         return flattened

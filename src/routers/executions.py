@@ -6,10 +6,13 @@ from src.models.execution import (
     ExecutionRequest,
     ExecutionResponse,
     ExecutionDetailResponse,
+    RepairExecutionRequest,
+    RepairExecutionResponse,
     RollbackRequest,
     RollbackResponse
 )
 from src.services.execution_engine import ExecutionEngine
+from src.services.planning_engine import PlanningEngine
 from src.core.deps import get_tenant_id
 
 router = APIRouter()
@@ -25,6 +28,14 @@ def get_engine(request: Request) -> ExecutionEngine:
     db = request.app.mongodb
     mcp_registry = getattr(request.app, 'mcp_registry', None)
     return ExecutionEngine(db, mcp_registry)
+
+
+def get_planning_engine(request: Request) -> PlanningEngine:
+    return PlanningEngine(
+        request.app.mongodb,
+        getattr(request.app, 'mcp_registry', None),
+        getattr(request.app, 'command_retriever', None)
+    )
 
 
 @router.post("/", response_model=ExecutionResponse)
@@ -61,6 +72,7 @@ async def execute_plan(
         execution_request = ExecutionRequest(
             plan=request.plan,
             global_timeout=request.global_timeout,
+            goal=request.goal,
             auth_token=request.auth_token
         )
 
@@ -150,6 +162,48 @@ async def rollback_execution(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Rollback failed: {str(e)}")
+
+
+@router.post("/{execution_id}/repair", response_model=RepairExecutionResponse)
+async def repair_execution(
+    execution_id: str,
+    request: RepairExecutionRequest,
+    http_request: Request,
+    tenant_id: int = Depends(get_tenant_id),
+    engine: ExecutionEngine = Depends(get_engine),
+    planning_engine: PlanningEngine = Depends(get_planning_engine),
+):
+    execution = await engine.get_execution(execution_id)
+    if not execution:
+        raise HTTPException(status_code=404, detail="Execution not found")
+
+    if not execution.repair_hint or not execution.repair_hint.recoverable:
+        raise HTTPException(status_code=400, detail="This execution is not eligible for interactive repair")
+
+    auth_token = request.auth_token
+    if not auth_token:
+        auth_header = http_request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            auth_token = auth_header[7:]
+
+    repaired = await planning_engine.repair_plan(
+        goal=request.goal,
+        tenant_id=tenant_id,
+        failed_plan=execution.steps,
+        failure_summary=execution.repair_hint.summary,
+        guidance=request.guidance,
+        conversation_history=request.conversation_history,
+        user_id="system",
+        auth_token=auth_token,
+    )
+
+    return RepairExecutionResponse(
+        confidence=repaired["confidence"],
+        repairSummary=repaired["repair_summary"],
+        repairPlanDescription=repaired["plan_description"],
+        repairedPlan=repaired["plan"],
+        sourceExecutionId=execution_id,
+    )
 
 
 @router.get("/")

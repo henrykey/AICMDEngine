@@ -122,6 +122,17 @@ const CommandSets = () => {
         }
     };
 
+    const handleSyncMcpDocIntel = async () => {
+        setAdminStatus('Syncing MCP tools to DocIntel...');
+        try {
+            const res = await api.post('/command-index/sync-mcp-docintel');
+            setAdminStatus(`✅ Synced ${res.data.synced_mcp_docs} MCP tools to DocIntel.`);
+            await loadIndexStatus();
+        } catch (err: any) {
+            setAdminStatus(`❌ DocIntel sync failed: ${err.response?.data?.detail || err.message}`);
+        }
+    };
+
     const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (file) {
@@ -252,6 +263,12 @@ const CommandSets = () => {
                         className="rounded bg-purple-600 px-4 py-2 text-sm text-white transition hover:bg-purple-700"
                     >
                         Refresh MCP Index
+                    </button>
+                    <button
+                        onClick={handleSyncMcpDocIntel}
+                        className="rounded bg-emerald-600 px-4 py-2 text-sm text-white transition hover:bg-emerald-700"
+                    >
+                        Sync MCP To DocIntel
                     </button>
                     <button
                         onClick={() => setIsCreateModalOpen(true)}

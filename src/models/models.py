@@ -1,5 +1,5 @@
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 class TaskRequestContext(BaseModel):
     tenant_id: Optional[str] = Field(None, alias="tenantId")
@@ -12,6 +12,8 @@ class TaskRequestContext(BaseModel):
     preferred_sources: Optional[List[str]] = Field(None, alias="preferredSources")
     preferred_mcp_servers: Optional[List[str]] = Field(None, alias="preferredMcpServers")
 
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
+
 class ConversationMessage(BaseModel):
     role: str  # "user" or "assistant"
     content: str
@@ -21,15 +23,21 @@ class TaskRequest(BaseModel):
     context: Optional[TaskRequestContext] = None
     conversation_history: Optional[List[ConversationMessage]] = Field(None, alias="conversationHistory")
 
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
+
 class PlanStep(BaseModel):
     step: int
     description: str
     command: str
     params: Dict[str, Any] = {} # pathParams, queryParams, body
 
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
+
 class RiskAssessment(BaseModel):
     level: str # normal, high, critical
     message: Optional[str] = None
+
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
 
 
 class RetrievalDiagnostics(BaseModel):
@@ -50,6 +58,8 @@ class RetrievalDiagnostics(BaseModel):
     system_state_loaded: Optional[bool] = None
     top_commands: List[str] = []
 
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
+
 
 class DirectResult(BaseModel):
     server_name: str = Field(..., alias="serverName")
@@ -57,6 +67,18 @@ class DirectResult(BaseModel):
     params: Dict[str, Any] = {}
     content: str
     data: Dict[str, Any] = {}
+
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
+
+
+class UserPlanSummary(BaseModel):
+    headline: str
+    summary: str
+    steps: List[str] = []
+    next_action: Optional[str] = Field(None, alias="nextAction")
+    debug_hint: Optional[str] = Field(None, alias="debugHint")
+
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
 
 class TaskPlanResponse(BaseModel):
     type: str = "plan_ready" # plan_ready, clarification_needed
@@ -67,3 +89,9 @@ class TaskPlanResponse(BaseModel):
     resolved_mode: Optional[str] = Field(None, alias="resolvedMode")
     retrieval_diagnostics: Optional[RetrievalDiagnostics] = Field(None, alias="retrievalDiagnostics")
     direct_result: Optional[DirectResult] = Field(None, alias="directResult")
+    assistant_message: Optional[str] = Field(None, alias="assistantMessage")
+    user_plan: Optional[UserPlanSummary] = Field(None, alias="userPlan")
+    llm_summary: Optional[str] = Field(None, alias="llmSummary")
+    debug_available: bool = Field(default=True, alias="debugAvailable")
+
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)

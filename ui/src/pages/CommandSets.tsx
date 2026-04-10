@@ -106,6 +106,20 @@ export default function CommandSets() {
         }
     });
 
+    const syncMcpDocIntelMutation = useMutation({
+        mutationFn: async () => {
+            const response = await api.post('/command-index/sync-mcp-docintel');
+            return response.data;
+        },
+        onSuccess: async (data: any) => {
+            setAdminStatus(`✅ Synced ${data.synced_mcp_docs} MCP tools to DocIntel.`);
+            await refetchIndexStatus();
+        },
+        onError: (err: any) => {
+            setAdminStatus(`❌ MCP DocIntel sync failed: ${err.response?.data?.detail || err.message}`);
+        }
+    });
+
     const handleCreateSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         setCreateStatus('Creating...');
@@ -196,6 +210,13 @@ export default function CommandSets() {
                         className="bg-purple-600 hover:bg-purple-500 px-4 py-2 rounded transition text-sm disabled:opacity-50"
                     >
                         Refresh MCP Index
+                    </button>
+                    <button
+                        onClick={() => syncMcpDocIntelMutation.mutate()}
+                        disabled={syncMcpDocIntelMutation.isPending}
+                        className="bg-emerald-600 hover:bg-emerald-500 px-4 py-2 rounded transition text-sm disabled:opacity-50"
+                    >
+                        Sync MCP To DocIntel
                     </button>
                     <button
                         onClick={() => setIsCreateModalOpen(true)}

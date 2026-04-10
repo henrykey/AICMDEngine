@@ -12,6 +12,28 @@ export interface PlanResponse {
     confidence: number;
     plan?: PlanStep[];
     question?: string;
+    llmSummary?: string;
+    llm_summary?: string;
+    assistantMessage?: string;
+    assistant_message?: string;
+    userPlan?: {
+        headline: string;
+        summary: string;
+        steps: string[];
+        nextAction?: string;
+        debugHint?: string;
+    };
+    user_plan?: {
+        headline: string;
+        summary: string;
+        steps: string[];
+        nextAction?: string;
+        next_action?: string;
+        debugHint?: string;
+        debug_hint?: string;
+    };
+    debugAvailable?: boolean;
+    debug_available?: boolean;
     resolvedMode?: string;
     retrievalDiagnostics?: {
         requested_retrieval_backend?: string;
@@ -33,6 +55,15 @@ export interface PlanResponse {
     directResult?: {
         serverName: string;
         toolName: string;
+        params: Record<string, any>;
+        content: string;
+        data: Record<string, any>;
+    };
+    direct_result?: {
+        serverName?: string;
+        server_name?: string;
+        toolName?: string;
+        tool_name?: string;
         params: Record<string, any>;
         content: string;
         data: Record<string, any>;

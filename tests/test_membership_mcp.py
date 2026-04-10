@@ -22,7 +22,7 @@ class TestMembershipMCPServer:
         assert self.mcp.name == "membership"
         assert self.mcp.version == "2.0"
         assert self.mcp.tenant_id == 1
-        assert len(self.mcp.get_tools()) == 15
+        assert len(self.mcp.get_tools()) >= 16
 
     async def test_list_members_tool_registered(self):
         """Test that list_members tool is registered."""
@@ -35,6 +35,32 @@ class TestMembershipMCPServer:
         assert self.mcp.has_tool("get_member")
         tool = self.mcp.get_tool("get_member")
         assert tool.name == "get_member"
+
+    async def test_get_member_id_tool_registered(self):
+        """Test that get_member_id tool is registered."""
+        assert self.mcp.has_tool("get_member_id")
+        tool = self.mcp.get_tool("get_member_id")
+        assert tool.name == "get_member_id"
+
+    async def test_lookup_role_tool_registered(self):
+        """Test that lookup_role tool is registered."""
+        assert self.mcp.has_tool("lookup_role")
+
+    async def test_lookup_resource_tool_registered(self):
+        """Test that lookup_resource tool is registered."""
+        assert self.mcp.has_tool("lookup_resource")
+
+    async def test_get_subject_permissions_tool_registered(self):
+        """Test that get_subject_permissions tool is registered."""
+        assert self.mcp.has_tool("get_subject_permissions")
+
+    async def test_get_member_effective_permissions_tool_registered(self):
+        """Test that get_member_effective_permissions tool is registered."""
+        assert self.mcp.has_tool("get_member_effective_permissions")
+
+    async def test_create_resource_tool_registered(self):
+        """Test that create_resource tool is registered."""
+        assert self.mcp.has_tool("create_resource")
 
     async def test_create_member_tool_registered(self):
         """Test that create_member tool is registered."""
@@ -97,6 +123,75 @@ class TestMembershipMCPServer:
         assert result.is_error is False
         assert "testuser" in result.content
         assert result.data["id"] == "123"
+
+    @patch('src.services.http_client.HTTPClient.execute')
+    async def test_get_member_with_query_success(self, mock_execute):
+        """Test get_member resolving member_id from query."""
+        mock_execute.side_effect = [
+            {
+                "data": [
+                    {"id": 1, "username": "admin", "fullName": "System Administrator", "email": "admin@joinkey.com"}
+                ]
+            },
+            {
+                "id": 1,
+                "username": "admin",
+                "fullName": "System Administrator",
+                "email": "admin@joinkey.com",
+                "status": "active",
+            },
+        ]
+
+        result = await self.mcp.execute_tool("get_member", query="admin", auth_token="test_token", tenant_id=1)
+
+        assert result.is_error is False
+        assert result.data["resolved_member_id"] == "1"
+        assert result.data["resolved_member"]["username"] == "admin"
+
+    async def test_get_member_id_success_from_members_payload(self):
+        """Test resolving member id from full member payload."""
+        result = await self.mcp.execute_tool(
+            "get_member_id",
+            query="admin",
+            members=[
+                {"id": 1, "username": "admin", "fullName": "System Administrator", "email": "admin@joinkey.com"},
+                {"id": 2, "username": "user2", "fullName": "User Two", "email": "user2@example.com"},
+            ],
+        )
+
+        assert result.is_error is False
+        assert result.data["member_id"] == 1
+        assert result.data["matched_member"]["username"] == "admin"
+
+    async def test_lookup_role_success_from_roles_payload(self):
+        """Test resolving role id from full role payload."""
+        result = await self.mcp.execute_tool(
+            "lookup_role",
+            query="System Administrator",
+            roles=[
+                {"id": 9, "name": "System Administrator", "code": "SYS_ADMIN"},
+                {"id": 10, "name": "User", "code": "USER"},
+            ],
+        )
+
+        assert result.is_error is False
+        assert result.data["role_id"] == 9
+        assert result.data["matched_role"]["code"] == "SYS_ADMIN"
+
+    async def test_lookup_resource_success_from_resources_payload(self):
+        """Test resolving resource id from full resource payload."""
+        result = await self.mcp.execute_tool(
+            "lookup_resource",
+            query="HOST_LOGIN",
+            resources=[
+                {"id": 101, "system_code": "HOST", "name": "HOST_LOGIN", "type": "function"},
+                {"id": 102, "system_code": "HOST", "name": "HOST_VIEW", "type": "function"},
+            ],
+        )
+
+        assert result.is_error is False
+        assert result.data["resource_id"] == 101
+        assert result.data["matched_resource"]["name"] == "HOST_LOGIN"
 
     @patch('src.services.http_client.HTTPClient.execute')
     async def test_create_member_success(self, mock_execute):
@@ -175,6 +270,35 @@ class TestMembershipMCPServer:
         assert result.is_error is False
         assert "Assigned role admin to member 123" in result.content
 
+    @patch('src.services.http_client.HTTPClient.execute')
+    async def test_assign_role_with_queries_success(self, mock_execute):
+        """Test assign_role resolving member and role from queries."""
+        mock_execute.side_effect = [
+            {
+                "data": [
+                    {"id": 1, "username": "admin", "fullName": "System Administrator"}
+                ]
+            },
+            {
+                "data": [
+                    {"id": 9, "name": "System Administrator", "code": "SYS_ADMIN"}
+                ]
+            },
+            {"success": True},
+        ]
+
+        result = await self.mcp.execute_tool(
+            "assign_role",
+            member_query="admin",
+            role_query="System Administrator",
+            auth_token="test_token",
+            tenant_id=1,
+        )
+
+        assert result.is_error is False
+        assert result.data["member_id"] == "1"
+        assert result.data["role_id"] == "9"
+
     async def test_update_member_no_fields_provided(self):
         """Test update_member with no fields to update."""
         result = await self.mcp.execute_tool("update_member", member_id="123", auth_token="test_token", tenant_id=1)
@@ -201,6 +325,138 @@ class TestMembershipMCPServer:
         assert result.is_error is False
 
     @patch('src.services.http_client.HTTPClient.execute')
+    async def test_get_org_with_query_success(self, mock_execute):
+        """Test get_org resolving org_id from query."""
+        mock_execute.side_effect = [
+            {
+                "data": [
+                    {"id": 12, "name": "Engineering", "code": "ENG"}
+                ]
+            },
+            {
+                "id": 12,
+                "name": "Engineering",
+                "code": "ENG",
+                "type": "dept",
+            },
+        ]
+
+        result = await self.mcp.execute_tool("get_org", query="Engineering", auth_token="test_token", tenant_id=1)
+
+        assert result.is_error is False
+        assert result.data["resolved_org_id"] == "12"
+        assert result.data["resolved_org"]["name"] == "Engineering"
+
+    @patch('src.services.http_client.HTTPClient.execute')
+    async def test_get_subject_permissions_for_role_success(self, mock_execute):
+        """Test get_subject_permissions for role."""
+        mock_execute.side_effect = [
+            {
+                "data": [
+                    {"id": 9, "name": "System Administrator", "code": "SYS_ADMIN"}
+                ]
+            },
+            [
+                {"id": 1001, "code": "HOST_LOGIN", "resource": "host", "action": "login"}
+            ],
+        ]
+
+        result = await self.mcp.execute_tool(
+            "get_subject_permissions",
+            subject_type="role",
+            query="System Administrator",
+            auth_token="test_token",
+            tenant_id=1,
+        )
+
+        assert result.is_error is False
+        assert result.data["subject_type"] == "role"
+        assert result.data["subject_id"] == "9"
+        assert len(result.data["permissions"]) == 1
+
+    @patch('src.services.http_client.HTTPClient.execute')
+    async def test_get_member_effective_permissions_success(self, mock_execute):
+        """Test get_member_effective_permissions aggregates direct and role permissions."""
+        mock_execute.side_effect = [
+            {
+                "data": [
+                    {"id": 1, "username": "admin", "fullName": "System Administrator"}
+                ]
+            },
+            {
+                "id": 1,
+                "username": "admin",
+                "fullName": "System Administrator",
+                "status": "active",
+            },
+            {
+                "member_id": 1,
+                "direct_permissions": [
+                    {"id": 501, "code": "HOST_VIEW", "resource": "host", "action": "view"}
+                ],
+                "role_permissions": [
+                    {
+                        "role": {"id": 9, "name": "System Administrator"},
+                        "permissions": [
+                            {"id": 502, "code": "HOST_LOGIN", "resource": "host", "action": "login"}
+                        ],
+                    }
+                ],
+            },
+            [
+                {"role": {"id": 9, "name": "System Administrator"}, "org_id": 12}
+            ],
+            {
+                "data": [
+                    {"id": 12, "name": "Engineering", "parentId": 2}
+                ]
+            },
+            {
+                "data": [
+                    {"id": 12, "name": "Engineering", "parentId": 2},
+                    {"id": 2, "name": "Headquarters", "parentId": None},
+                ]
+            },
+        ]
+
+        result = await self.mcp.execute_tool(
+            "get_member_effective_permissions",
+            query="admin",
+            auth_token="test_token",
+            tenant_id=1,
+        )
+
+        assert result.is_error is False
+        assert result.data["member_id"] == "1"
+        assert len(result.data["direct_permissions"]) == 1
+        assert len(result.data["effective_permissions"]) == 2
+        assert result.data["ancestor_orgs"][0]["name"] == "Headquarters"
+        assert result.data["limitations"]
+
+    @patch('src.services.http_client.HTTPClient.execute')
+    async def test_create_resource_success(self, mock_execute):
+        """Test successful create_resource call."""
+        mock_execute.return_value = {
+            "id": 101,
+            "system_code": "HOST",
+            "name": "HOST_LOGIN",
+            "type": "function",
+            "access_mode": "whitelist",
+        }
+
+        result = await self.mcp.execute_tool(
+            "create_resource",
+            system_code="HOST",
+            name="HOST_LOGIN",
+            type="function",
+            auth_token="test_token",
+            tenant_id=1,
+        )
+
+        assert result.is_error is False
+        assert result.data["id"] == 101
+
+    @patch('src.services.http_client.HTTPClient.execute')
     async def test_api_error_handling(self, mock_execute):
         """Test error handling when API call fails."""
         mock_execute.side_effect = Exception("API connection failed")
@@ -216,7 +472,7 @@ class TestMembershipMCPServer:
         info = self.mcp.get_info()
         assert info["name"] == "membership"
         assert info["version"] == "2.0"
-        assert len(info["tools"]) == 15
+        assert len(info["tools"]) == len(self.mcp.get_tools())
 
     async def test_auth_token_in_headers(self):
         """Test that auth token is included in headers."""

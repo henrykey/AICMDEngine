@@ -152,7 +152,18 @@ class CommandDocumentBuilder:
 
         command = f"MCP.{mcp_name}.{tool_info.get('name', '')}"
         summary = str(tool_info.get("description", ""))
+        semantic_description = str(tool_info.get("semantic_description", "") or "")
+        output_description = str(tool_info.get("output_description", "") or "")
+        use_cases = [str(item) for item in tool_info.get("use_cases", []) if str(item).strip()]
+        examples = [str(item) for item in tool_info.get("natural_language_examples", []) if str(item).strip()]
+        tags = [str(tag) for tag in tool_info.get("tags", []) if str(tag).strip()] or [mcp_name, "mcp"]
         doc_id = f"mcp:{tenant_id}:{mcp_name}:{tool_info.get('name', '')}"
+        description = semantic_description or f"MCP Tool from {mcp_name} server"
+        combined_parameter_descriptions = list(parameter_descriptions)
+        if output_description:
+            combined_parameter_descriptions.append(f"Output: {output_description}")
+        if use_cases:
+            combined_parameter_descriptions.append(f"Use Cases: {'; '.join(use_cases)}")
 
         return {
             "doc_id": doc_id,
@@ -161,23 +172,23 @@ class CommandDocumentBuilder:
             "source_name": mcp_name,
             "command": command,
             "summary": summary,
-            "description": f"MCP Tool from {mcp_name} server",
-            "tags": [mcp_name, "mcp"],
-            "examples": [],
+            "description": description,
+            "tags": tags,
+            "examples": examples,
             "parameters": parameters,
             "parameter_names": parameter_names,
-            "parameter_descriptions": parameter_descriptions,
+            "parameter_descriptions": combined_parameter_descriptions,
             "risk_level": "normal",
             "retrieval_text": self._build_retrieval_text(
                 command=command,
                 source_type="mcp_tool",
                 source_name=mcp_name,
                 summary=summary,
-                description=f"MCP Tool from {mcp_name} server",
-                tags=[mcp_name, "mcp"],
-                examples=[],
+                description=description,
+                tags=tags,
+                examples=examples,
                 parameter_names=parameter_names,
-                parameter_descriptions=parameter_descriptions,
+                parameter_descriptions=combined_parameter_descriptions,
                 risk_level="normal",
             ),
             "embedding_provider": embedding_metadata.get("provider"),
@@ -251,6 +262,7 @@ class CommandDocumentBuilder:
                 "risk_level": "normal",
                 "tags": base_doc["tags"],
                 "parameter_names": base_doc["parameter_names"],
+                "examples": base_doc["examples"],
                 "mcp_server": mcp_name,
                 "mcp_tool_name": tool_info.get("name", ""),
             }

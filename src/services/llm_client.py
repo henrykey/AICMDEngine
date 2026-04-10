@@ -57,6 +57,7 @@ class LLMClient:
 
         # 当前使用的提供商索引
         self.current_provider_index = 0
+        self.last_call_info: Dict[str, Any] = {}
 
     async def generate_response(
         self,
@@ -113,6 +114,16 @@ class LLMClient:
                     finish_reason,
                     len(content),
                 )
+                self.last_call_info = {
+                    "route": route,
+                    "provider": current_provider["name"],
+                    "model": current_provider["model"],
+                    "base_url": str(base_url),
+                    "finish_reason": finish_reason,
+                    "message_count": len(messages),
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                }
                 return content
 
             except RateLimitError as e:
@@ -174,5 +185,9 @@ class LLMClient:
             return True
 
         return False
+
+    def get_last_call_info(self) -> Dict[str, Any]:
+        """Return metadata of the last successful LLM call."""
+        return dict(self.last_call_info)
 
 llm_client = LLMClient()

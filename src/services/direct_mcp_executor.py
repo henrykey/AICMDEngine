@@ -1,8 +1,9 @@
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from src.models.models import DirectResult, RetrievalDiagnostics, TaskPlanResponse
+from src.models.models import DirectResult, RetrievalDiagnostics, TaskPlanResponse, UserPlanSummary
 from src.mcp.registry import MCPRegistry
 from src.services.command_retriever import CommandRetriever
 from src.services.llm_client import llm_client
@@ -24,6 +25,16 @@ class DirectMCPExecutor:
         if len(parts) != 3:
             return None, None
         return parts[1], parts[2]
+
+    def _build_user_summary(self, content: str) -> tuple[str, UserPlanSummary]:
+        message = content.strip() or "我已经直接完成这项请求。"
+        return message, UserPlanSummary(
+            headline="已直接完成请求",
+            summary=message,
+            steps=[],
+            nextAction=None,
+            debugHint="如需查看调用的工具、参数和原始数据，可展开调试详情。",
+        )
 
     def _get_tool_schema(self, server_name: str, tool_name: str) -> Optional[Dict[str, Any]]:
         tool_info = self.mcp_registry.get_tool_info(server_name, tool_name)
@@ -107,6 +118,43 @@ class DirectMCPExecutor:
             elif isinstance(value, str) and not value.strip():
                 missing.append(param)
         return missing
+
+    def _extract_member_query_from_goal(self, goal: str) -> Optional[str]:
+        patterns = [
+            r"显示(?:用户|成员)?[\"'“”]?([\u4e00-\u9fffA-Za-z0-9@._\-]{2,64})[\"'“”]?的(?:详细)?信息",
+            r"(?:用户|成员)[\"'“”]?([\u4e00-\u9fffA-Za-z0-9@._\-]{2,64})[\"'“”]?(?:的)?(?:详细)?信息",
+            r"[\"'“”]?([\u4e00-\u9fffA-Za-z0-9@._\-]{2,64})[\"'“”]?(?:成员)?有哪些(?:访问权|权限)",
+            r"显示用户[\"'“”]?([\u4e00-\u9fffA-Za-z0-9@._\-]{2,64})[\"'“”]?",
+            r"显示成员[\"'“”]?([\u4e00-\u9fffA-Za-z0-9@._\-]{2,64})[\"'“”]?",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, goal or "")
+            if match:
+                return match.group(1).strip()
+        return None
+
+    def _apply_membership_param_fallback(
+        self,
+        goal: str,
+        server_name: str,
+        tool_name: str,
+        params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        patched = dict(params)
+        if server_name != "membership":
+            return patched
+
+        member_query_tools = {
+            "get_member",
+            "get_member_id",
+            "get_member_effective_permissions",
+        }
+        if tool_name in member_query_tools and not patched.get("query") and not patched.get("member_id"):
+            inferred_query = self._extract_member_query_from_goal(goal)
+            if inferred_query:
+                patched["query"] = inferred_query
+
+        return patched
 
     async def _extract_params(
         self,
@@ -210,6 +258,7 @@ class DirectMCPExecutor:
         confidence = float(extracted.get("confidence", 0.0) or 0.0)
         raw_params = extracted.get("params", {}) if isinstance(extracted.get("params"), dict) else {}
         params = self._sanitize_params(raw_params, tool_schema)
+        params = self._apply_membership_param_fallback(goal, server_name, tool_name, params)
         question = extracted.get("question")
 
         if auth_token and "auth_token" not in params:
@@ -219,22 +268,43 @@ class DirectMCPExecutor:
 
         missing_required = self._missing_required_params(params, tool_schema)
 
+        if question and not self._missing_required_params(params, tool_schema):
+            question = None
+
         if question:
+            assistant_message = str(question)
             return TaskPlanResponse(
                 type="clarification_needed",
                 confidence=confidence,
-                question=str(question),
+                question=assistant_message,
                 resolved_mode="mcp",
                 retrieval_diagnostics=RetrievalDiagnostics(**diagnostics_data),
+                assistant_message=assistant_message,
+                user_plan=UserPlanSummary(
+                    headline="需要你补充一点信息",
+                    summary=assistant_message,
+                    steps=[],
+                    nextAction="补充参数后我会继续直接执行。",
+                    debugHint="调试详情中会保留工具选择和参数提取信息。",
+                ),
             )
 
         if missing_required:
+            question_text = f"Missing required parameters for direct MCP execution: {', '.join(missing_required)}"
             return TaskPlanResponse(
                 type="clarification_needed",
                 confidence=confidence,
-                question=f"Missing required parameters for direct MCP execution: {', '.join(missing_required)}",
+                question=question_text,
                 resolved_mode="mcp",
                 retrieval_diagnostics=RetrievalDiagnostics(**diagnostics_data),
+                assistant_message=question_text,
+                user_plan=UserPlanSummary(
+                    headline="还缺少执行参数",
+                    summary=question_text,
+                    steps=[],
+                    nextAction="补充参数后，我会继续直接执行。",
+                    debugHint="调试详情中会显示缺失的必填参数。",
+                ),
             )
 
         if confidence < 0.75:
@@ -249,11 +319,15 @@ class DirectMCPExecutor:
             logger.warning("Direct MCP execution failed for %s: %s", command_name, result.content)
             return None
 
+        assistant_message, user_plan = self._build_user_summary(result.content)
+
         return TaskPlanResponse(
             type="direct_result",
             confidence=confidence,
             resolved_mode="mcp",
             retrieval_diagnostics=RetrievalDiagnostics(**diagnostics_data),
+            assistant_message=assistant_message,
+            user_plan=user_plan,
             direct_result=DirectResult(
                 serverName=server_name,
                 toolName=tool_name,

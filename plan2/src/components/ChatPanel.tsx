@@ -5,8 +5,24 @@ import { useTask, PlanResponse } from '../contexts/TaskContext';
 type PlanningMode = 'auto' | 'cmdengine' | 'mcp';
 type RetrievalBackend = 'auto' | 'docintel';
 
+function getAssistantContent(data: PlanResponse): string | undefined {
+    return data.assistantMessage || data.assistant_message || data.question || data.userPlan?.summary || data.user_plan?.summary;
+}
+
 const ChatPanel: React.FC = () => {
-    const { conversationHistory, setConversationHistory, lastQuestion, setLastQuestion, setCurrentPlanResponse, selectedCommandSets, planningMode, setPlanningMode, retrievalBackend, setRetrievalBackend } = useTask();
+    const {
+        conversationHistory,
+        setConversationHistory,
+        lastQuestion,
+        setLastQuestion,
+        currentPlanResponse,
+        setCurrentPlanResponse,
+        selectedCommandSets,
+        planningMode,
+        setPlanningMode,
+        retrievalBackend,
+        setRetrievalBackend
+    } = useTask();
     const [goal, setGoal] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState('');
@@ -35,9 +51,27 @@ const ChatPanel: React.FC = () => {
             // 立即清除输入框
             setGoal('');
 
+            const contextualHistory = [...newHistory];
+
+            if (currentPlanResponse?.plan?.length) {
+                const activeTaskSummary =
+                    currentPlanResponse.assistantMessage ||
+                    currentPlanResponse.assistant_message ||
+                    currentPlanResponse.userPlan?.summary ||
+                    currentPlanResponse.user_plan?.summary ||
+                    'An active task has already been planned.';
+
+                contextualHistory.push({
+                    role: 'assistant' as const,
+                    content:
+                        `[Task Context] There is an active planned task that has not necessarily been executed yet. ` +
+                        `Previous plan summary: ${activeTaskSummary}`
+                });
+            }
+
             const payload: any = {
                 goal,
-                conversationHistory: conversationHistory.length > 0 ? conversationHistory : undefined
+                conversationHistory: contextualHistory.length > 0 ? contextualHistory : undefined
             };
 
             payload.context = {
@@ -61,15 +95,20 @@ const ChatPanel: React.FC = () => {
                 ...newHistory
             ];
 
+            const assistantContent = getAssistantContent(data);
+
             if (data.question) {
                 setLastQuestion(data.question);
-                finalHistory.push({ role: 'assistant' as const, content: data.question });
-                setConversationHistory(finalHistory);
             } else {
                 setLastQuestion(null);
-                setConversationHistory(finalHistory);
-                setCurrentPlanResponse(data);
             }
+
+            if (assistantContent) {
+                finalHistory.push({ role: 'assistant' as const, content: assistantContent });
+            }
+
+            setConversationHistory(finalHistory);
+            setCurrentPlanResponse(data);
         } catch (err: any) {
             // 移除加载占位符，保留用户消息
             setConversationHistory(
