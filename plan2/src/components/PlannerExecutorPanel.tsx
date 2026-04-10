@@ -178,7 +178,13 @@ const PlannerExecutorPanel: React.FC = () => {
         setExecutionError(null);
 
         try {
-            const result = await executePlan(currentPlanResponse.plan, originalGoal);
+            // Get goal from: 1) originalGoal state, 2) last user message in conversation history
+            const goalForExecution =
+                originalGoal ||
+                [...conversationHistory].reverse().find((msg) => msg.role === 'user')?.content ||
+                null;
+            console.log('[Bilingual] Executing with goal:', goalForExecution?.substring(0, 100));
+            const result = await executePlan(currentPlanResponse.plan, goalForExecution);
             setExecutionId(result.execution_id);
             setExecutionStatus('started');
             setRepairHint(null);
@@ -196,6 +202,20 @@ const PlannerExecutorPanel: React.FC = () => {
             try {
                 const res = await api.get<ExecutionDetail>(`/executions/${execId}`);
                 const data = res.data;
+
+                // Debug: log execution details
+                console.log('Execution poll result:', {
+                    execution_id: data.execution_id,
+                    status: data.status,
+                    steps_count: data.steps?.length,
+                    steps: data.steps?.map((s: any) => ({
+                        step_number: s.step_number,
+                        status: s.status,
+                        has_result_content: !!s.result_content,
+                        result_content: s.result_content?.substring(0, 100),
+                        has_response_data: !!s.response_data,
+                    }))
+                });
 
                 // Update steps with status and results
                 const updatedSteps = executionSteps.map((step, index) => {
@@ -244,6 +264,57 @@ const PlannerExecutorPanel: React.FC = () => {
                 if (['completed', 'failed', 'partial_failed', 'timeout', 'rollback'].includes(data.status)) {
                     clearInterval(interval);
                     setIsExecuting(false);
+
+                    // Add execution result to conversation history when completed
+                    if (data.status === 'completed' || data.status === 'partial_failed') {
+                        let resultContent = '';
+
+                        // Build result from step results
+                        const completedSteps = data.steps?.filter(s => s.status === 'completed' || s.status === 'success') || [];
+                        if (completedSteps.length > 0) {
+                            const stepResults: string[] = [];
+                            for (const step of completedSteps) {
+                                if (step.result_content) {
+                                    stepResults.push(step.result_content);
+                                } else if (step.response_data) {
+                                    // Fallback: try to extract meaningful info from response_data
+                                    const rd = step.response_data;
+                                    if (rd.permissions && Array.isArray(rd.permissions)) {
+                                        stepResults.push(`Found ${rd.permissions.length} permissions`);
+                                    }
+                                }
+                            }
+                            if (stepResults.length > 0) {
+                                resultContent = stepResults.join('\n\n');
+                            }
+                        }
+
+                        // Also try execution summary
+                        const executionSummary = normalizeExecutionSummary(data.userSummary ?? data.user_summary);
+                        if (executionSummary && (executionSummary.headline || executionSummary.summary)) {
+                            const summaryParts: string[] = [];
+                            if (executionSummary.headline) summaryParts.push(`**${executionSummary.headline}**`);
+                            if (executionSummary.summary) summaryParts.push(executionSummary.summary);
+                            if (summaryParts.length > 0) {
+                                resultContent = summaryParts.join('\n\n') + (resultContent ? '\n\n' + resultContent : '');
+                            }
+                        }
+
+                        // Only add to conversation if we have content
+                        if (resultContent.trim()) {
+                            const lastMsg = conversationHistory[conversationHistory.length - 1];
+                            // Check if we already added a result for this execution
+                            const alreadyHasResult = lastMsg?.role === 'assistant' &&
+                                (lastMsg.content.includes('permissions') || lastMsg.content.includes('Found') || lastMsg.content.includes('permission'));
+
+                            if (!alreadyHasResult) {
+                                setConversationHistory([
+                                    ...conversationHistory,
+                                    { role: 'assistant', content: resultContent.trim() }
+                                ]);
+                            }
+                        }
+                    }
                 }
             } catch (err) {
                 console.error('Failed to fetch execution details:', err);
@@ -383,6 +454,16 @@ const PlannerExecutorPanel: React.FC = () => {
                             {summaryCard.nextAction && (
                                 <div className="mt-3 text-xs text-slate-600">{summaryCard.nextAction}</div>
                             )}
+                        </div>
+                    )}
+                    {/* Render direct result data with expandable lists */}
+                    {directResult.data && Object.keys(directResult.data).length > 0 && (
+                        <div className="rounded-lg border border-slate-200 bg-white p-4">
+                            <div className="mb-2 text-sm font-semibold text-slate-700">执行结果</div>
+                            <ExecutionResultRenderer
+                                data={directResult.data}
+                                resultContent={directResult.content}
+                            />
                         </div>
                     )}
                     <div className="rounded-lg border border-slate-200 bg-white p-4">

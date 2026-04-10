@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { api } from '../lib/api';
 import { useTask, PlanResponse } from '../contexts/TaskContext';
+import ReactMarkdown from 'react-markdown';
 
 type PlanningMode = 'auto' | 'cmdengine' | 'mcp';
 type RetrievalBackend = 'auto' | 'docintel';
@@ -143,7 +144,7 @@ const ChatPanel: React.FC = () => {
                 {conversationHistory.map((msg, idx) => (
                     <div
                         key={idx}
-                        className={`max-w-[85%] p-3 rounded-lg text-sm leading-relaxed shadow-sm ${msg.role === 'user'
+                        className={`max-w-[85%] p-3 rounded-lg text-sm leading-relaxed shadow-sm overflow-auto ${msg.role === 'user'
                             ? 'ml-auto rounded-br-none bg-blue-500 text-white'
                             : 'rounded-bl-none bg-slate-100 text-slate-800'
                             }`}
@@ -151,7 +152,9 @@ const ChatPanel: React.FC = () => {
                         {msg.content === '__LOADING__' ? (
                             <LoadingDots />
                         ) : (
-                            msg.content
+                            <div className="markdown-content">
+                                <ReactMarkdown>{msg.content}</ReactMarkdown>
+                            </div>
                         )}
                     </div>
                 ))}
