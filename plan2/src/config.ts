@@ -2,12 +2,16 @@ export interface AppConfig {
     nlTpsApiUrl: string;
     membershipApiUrl?: string;
     membershipLoginPath?: string;
+    membershipSwitchTenantPath?: string;
     membershipUserPath?: string;
 }
 
 // Default config matches the JSON structure but serves as fallback
 let config: AppConfig = {
-    nlTpsApiUrl: 'http://localhost:8000/v1'
+    nlTpsApiUrl: 'http://localhost:8000/v1',
+    membershipApiUrl: 'http://localhost:8080',
+    membershipLoginPath: '/v2/auth/unified/login',
+    membershipSwitchTenantPath: '/v2/auth/unified/switch-tenant'
 };
 
 export const loadConfig = async (): Promise<void> => {

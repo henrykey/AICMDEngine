@@ -11,6 +11,19 @@ const TOKEN_REFRESH_SKEW_MS = 5 * 60 * 1000;
 
 type JwtPayload = {
     exp?: number;
+    tenant_id?: number | string;
+    tenantId?: number | string;
+    member_id?: number | string;
+    memberId?: number | string;
+    username?: string;
+    preferred_username?: string;
+    name?: string;
+    fullName?: string;
+    roles?: unknown;
+    permissions?: unknown;
+    permissions_v2?: unknown;
+    perms?: unknown;
+    superAdmin?: boolean;
 };
 
 type RetriableRequestConfig = typeof api.defaults & {
@@ -55,6 +68,100 @@ function clearAuthStorage() {
     localStorage.removeItem('refreshToken');
     localStorage.removeItem('username');
     localStorage.removeItem('tenantId');
+    localStorage.removeItem('memberId');
+    localStorage.removeItem('roles');
+    localStorage.removeItem('permissions');
+}
+
+type AuthResponseData = {
+    access_token?: string;
+    token?: string;
+    refresh_token?: string;
+    expires_in?: number;
+    tenant_id?: number | string;
+    tenantId?: number | string;
+    member_id?: number | string;
+    memberId?: number | string;
+    username?: string;
+    full_name?: string;
+    fullName?: string;
+    data?: {
+        token?: string;
+        access_token?: string;
+        refresh_token?: string;
+    };
+};
+
+export type AuthSession = {
+    token: string;
+    refreshToken?: string;
+    tenantId?: string;
+    memberId?: string;
+    username: string;
+};
+
+function extractArray(value: unknown): unknown[] {
+    return Array.isArray(value) ? value : [];
+}
+
+export function saveAuthSession(username: string, responseData: AuthResponseData, fallbackTenantId?: string | number): AuthSession {
+    const token = responseData.access_token || responseData.token || responseData.data?.access_token || responseData.data?.token;
+
+    if (!token) {
+        throw new Error('No access token returned from Membership Service');
+    }
+
+    const payload = decodeJwtPayload(token) || {};
+    const refreshToken = responseData.refresh_token || responseData.data?.refresh_token;
+    const tenantId = responseData.tenant_id
+        ?? responseData.tenantId
+        ?? fallbackTenantId
+        ?? payload.tenant_id
+        ?? payload.tenantId;
+    const memberId = responseData.member_id
+        ?? responseData.memberId
+        ?? payload.member_id
+        ?? payload.memberId;
+    const resolvedUsername = responseData.username
+        || payload.preferred_username
+        || payload.username
+        || responseData.full_name
+        || responseData.fullName
+        || payload.name
+        || payload.fullName
+        || username;
+    const roles = payload.superAdmin === true ? ['SUPER_ADMIN'] : extractArray(payload.roles);
+    const permissions = payload.superAdmin === true
+        ? ['*']
+        : extractArray(payload.permissions || payload.permissions_v2 || payload.perms);
+
+    localStorage.setItem('token', token);
+    if (refreshToken) {
+        localStorage.setItem('refreshToken', refreshToken);
+    } else {
+        localStorage.removeItem('refreshToken');
+    }
+    localStorage.setItem('username', resolvedUsername);
+    if (tenantId != null) {
+        localStorage.setItem('tenantId', String(tenantId));
+    } else {
+        localStorage.removeItem('tenantId');
+    }
+    if (memberId != null) {
+        localStorage.setItem('memberId', String(memberId));
+    } else {
+        localStorage.removeItem('memberId');
+    }
+    localStorage.setItem('roles', JSON.stringify(roles));
+    localStorage.setItem('permissions', JSON.stringify(permissions));
+
+    return {
+        token,
+        refreshToken,
+        tenantId: tenantId != null ? String(tenantId) : undefined,
+        memberId: memberId != null ? String(memberId) : undefined,
+        username: resolvedUsername
+    };
 }
 
 function redirectToLogin() {
@@ -115,6 +222,7 @@ api.interceptors.request.use(async (reqConfig) => {
 
     let token = localStorage.getItem('token');
     const tenantId = localStorage.getItem('tenantId');
+    const memberId = localStorage.getItem('memberId');
 
     if (token && isTokenExpiringSoon(token)) {
         token = await refreshAccessToken();
@@ -126,6 +234,10 @@ api.interceptors.request.use(async (reqConfig) => {
 
     if (tenantId) {
         reqConfig.headers['X-Tenant-ID'] = tenantId;
+    }
+
+    if (memberId) {
+        reqConfig.headers['X-User-ID'] = memberId;
     }
 
     return reqConfig;
@@ -199,5 +311,5 @@ membershipApi.interceptors.request.use((reqConfig) => {
 });
 
 export function hasUsableSession(): boolean {
-    return Boolean(localStorage.getItem('token') || localStorage.getItem('refreshToken'));
+    return Boolean((localStorage.getItem('token') || localStorage.getItem('refreshToken')) && localStorage.getItem('tenantId'));
 }
