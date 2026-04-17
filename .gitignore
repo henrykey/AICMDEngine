@@ -40,6 +40,7 @@ tests/__pycache__
 
 # Node frontend artifacts
 plan-ui/node_modules/
+plan2/node_modules/
 plan-ui/dist/
 plan-ui/.vite/
 
