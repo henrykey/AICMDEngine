@@ -599,13 +599,28 @@ Membership MCP 任务型工具分为四组：
   - `get_org`
 - `Phase 2` 已完成代码实现：
   - `lookup_role`
+  - `lookup_org`
   - `lookup_resource`
   - `get_subject_permissions`
   - `get_member_effective_permissions`
+  - `get_member_roles`
   - `create_resource`
-- 当前 Membership MCP 工具总数：`26`
+- 当前 Membership MCP 工具总数：`39`
 - 当前已知限制：
   - 公开 command set 中没有组织自身权限查询 API，因此 `get_subject_permissions(subject_type=org)` 和 `get_member_effective_permissions` 会显式返回 limitation，而不会伪造 org 权限结果。
+  - `get_member_effective_permissions` 已复用 `get_member_roles` 获取成员角色；组织归属通过 `get_member_orgs` 获取，但组织作为 subject 的权限仍依赖 Membership API 暴露相应查询能力。
+  - 新版 Membership OpenAPI 已补充 LLM Provider / Usage Config 管理接口；Membership MCP 已新增 11 个 LLM 管理工具：
+    - `list_llm_providers`
+    - `get_llm_provider`
+    - `create_llm_provider`
+    - `update_llm_provider`
+    - `delete_llm_provider`
+    - `set_llm_provider_enabled`
+    - `set_active_llm_provider`
+    - `list_llm_usage_configs`
+    - `upsert_llm_usage_config`
+    - `delete_llm_usage_config`
+    - `resolve_llm_usage_config`
 
 ### Phase 1
 
