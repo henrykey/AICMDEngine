@@ -1,4 +1,6 @@
 import React from 'react';
+import ReactMarkdown from 'react-markdown';
+import MermaidBlock from './MermaidBlock';
 
 interface ExecutionResultRendererProps {
   data: any;
@@ -14,6 +16,36 @@ interface ExecutionResultRendererProps {
 const ExecutionResultRenderer: React.FC<ExecutionResultRendererProps> = ({ data, resultContent }) => {
   if (!data && !resultContent) {
     return null;
+  }
+
+  if (data && typeof data === 'object') {
+    const markdown = typeof data.markdown === 'string' ? data.markdown : null;
+    const mermaid = typeof data.mermaid === 'string' ? data.mermaid : null;
+    if (markdown || mermaid) {
+      const content = markdown || `\`\`\`mermaid\n${mermaid}\n\`\`\``;
+      return (
+        <div className="markdown-content">
+          <ReactMarkdown
+            components={{
+              code({ inline, className, children, ...props }: any) {
+                const match = /language-(\w+)/.exec(className || '');
+                const code = String(children || '').replace(/\n$/, '');
+                if (!inline && match?.[1] === 'mermaid') {
+                  return <MermaidBlock chart={code} />;
+                }
+                return (
+                  <code className={className} {...props}>
+                    {children}
+                  </code>
+                );
+              }
+            }}
+          >
+            {content}
+          </ReactMarkdown>
+        </div>
+      );
+    }
   }
 
   // Handle arrays (list of items) - prioritize structured data over resultContent
@@ -286,7 +318,19 @@ function renderCellValue(value: any): string {
   }
 
   if (typeof value === 'object') {
-    return '[Object]';
+    const label =
+      value.fullName ||
+      value.full_name ||
+      value.name ||
+      value.username ||
+      value.code ||
+      value.title ||
+      value.id;
+    if (label) {
+      const suffix = value.id !== undefined && String(value.id) !== String(label) ? ` (ID: ${value.id})` : '';
+      return `${label}${suffix}`;
+    }
+    return JSON.stringify(value);
   }
 
   return String(value);

@@ -96,7 +96,7 @@ export interface MCPServerInfo {
 export interface TaskContextType {
     // Chat state
     conversationHistory: ConversationMessage[];
-    setConversationHistory: (messages: ConversationMessage[]) => void;
+    setConversationHistory: React.Dispatch<React.SetStateAction<ConversationMessage[]>>;
     lastQuestion: string | null;
     setLastQuestion: (question: string | null) => void;
 

@@ -92,6 +92,16 @@ body {
 /* Markdown content styles for chat messages */
 .markdown-content {
   line-height: 1.6;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.markdown-content > :first-child {
+  margin-top: 0;
+}
+
+.markdown-content > :last-child {
+  margin-bottom: 0;
 }
 
 .markdown-content p {
@@ -158,4 +168,28 @@ body {
 
 .markdown-content h3 {
   font-size: 1em;
+}
+
+.mermaid-block {
+  width: 100%;
+  min-width: 320px;
+  overflow-x: auto;
+  padding: 0.75rem;
+  border-radius: 0.5rem;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.mermaid-block svg {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 0 auto;
+}
+
+.mermaid-fallback {
+  background-color: rgba(0, 0, 0, 0.05);
+  padding: 0.75em;
+  border-radius: 4px;
+  overflow-x: auto;
+  margin: 0.5em 0;
 }

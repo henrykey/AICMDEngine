@@ -2,12 +2,24 @@ import { useState, useRef, useEffect } from 'react';
 import { api } from '../lib/api';
 import { useTask, PlanResponse } from '../contexts/TaskContext';
 import ReactMarkdown from 'react-markdown';
+import MermaidBlock from './MermaidBlock';
 
 type PlanningMode = 'auto' | 'cmdengine' | 'mcp';
 type RetrievalBackend = 'auto' | 'docintel';
 
 function getAssistantContent(data: PlanResponse): string | undefined {
-    return data.assistantMessage || data.assistant_message || data.question || data.userPlan?.summary || data.user_plan?.summary;
+    const directContent = data.directResult?.content || data.direct_result?.content;
+    return directContent || data.assistantMessage || data.assistant_message || data.question || data.userPlan?.summary || data.user_plan?.summary;
+}
+
+function normalizeToolTextAsMarkdown(content: string): string {
+    return content
+        .replace(/^(Found .+)$/gm, '**$1**')
+        .replace(/^(Members|Organizations):$/gm, '**$1:**')
+        .replace(/^Member:\s*(.+)$/gm, '**Member: $1**')
+        .replace(/^\s*•\s+/gm, '- ')
+        .replace(/^\s*\.\.\. and/gm, '- ... and')
+        .replace(/^(ID|Email|Status):\s*(.+)$/gm, '- **$1**: $2');
 }
 
 const ChatPanel: React.FC = () => {
@@ -153,7 +165,24 @@ const ChatPanel: React.FC = () => {
                             <LoadingDots />
                         ) : (
                             <div className="markdown-content">
-                                <ReactMarkdown>{msg.content}</ReactMarkdown>
+                                <ReactMarkdown
+                                    components={{
+                                        code({ inline, className, children, ...props }: any) {
+                                            const match = /language-(\w+)/.exec(className || '');
+                                            const code = String(children || '').replace(/\n$/, '');
+                                            if (!inline && match?.[1] === 'mermaid') {
+                                                return <MermaidBlock chart={code} />;
+                                            }
+                                            return (
+                                                <code className={className} {...props}>
+                                                    {children}
+                                                </code>
+                                            );
+                                        }
+                                    }}
+                                >
+                                    {msg.role === 'assistant' ? normalizeToolTextAsMarkdown(msg.content) : msg.content}
+                                </ReactMarkdown>
                             </div>
                         )}
                     </div>

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { api } from '../lib/api';
 import { useTask } from '../contexts/TaskContext';
 import MCPSelector from './MCPSelector';
@@ -42,6 +42,123 @@ function normalizeExecutionSummary(summary: any) {
         detailLines: summary.detailLines || summary.detail_lines || [],
         debugHint: summary.debugHint || summary.debug_hint,
     };
+}
+
+function extractResultPayload(data: any) {
+    if (!data || typeof data !== 'object') return data;
+    return data.data || data.member || data.organization || data.org || data.role || data.resource || data;
+}
+
+function getDisplayName(item: any) {
+    const nestedRole = item?.role && typeof item.role === 'object' ? item.role : null;
+    const nestedSubject = item?.member && typeof item.member === 'object' ? item.member : null;
+    const nestedOrg = item?.org && typeof item.org === 'object' ? item.org : null;
+    const nested = nestedRole || nestedSubject || nestedOrg;
+    return item?.fullName || item?.full_name || item?.name || item?.username || item?.code || item?.title ||
+        nested?.fullName || nested?.full_name || nested?.name || nested?.username || nested?.code || nested?.title ||
+        item?.id || nested?.id || 'Unknown';
+}
+
+function formatFieldValue(value: any) {
+    if (value === undefined || value === null || value === '') return 'N/A';
+    if (typeof value === 'object') return `\`${JSON.stringify(value)}\``;
+    return String(value);
+}
+
+function formatObjectDetails(payload: Record<string, any>, isChinese: boolean) {
+    const labels: Record<string, string> = isChinese
+        ? {
+            id: 'ID',
+            username: '用户名',
+            fullName: '姓名',
+            full_name: '姓名',
+            name: '名称',
+            email: '邮箱',
+            status: '状态',
+            phone: '电话',
+            alias: '别名',
+            code: '编码',
+            type: '类型',
+        }
+        : {
+            id: 'ID',
+            username: 'Username',
+            fullName: 'Full name',
+            full_name: 'Full name',
+            name: 'Name',
+            email: 'Email',
+            status: 'Status',
+            phone: 'Phone',
+            alias: 'Alias',
+            code: 'Code',
+            type: 'Type',
+        };
+    const preferredKeys = ['id', 'username', 'fullName', 'full_name', 'name', 'email', 'status', 'phone', 'alias', 'code', 'type'];
+    const lines = preferredKeys
+        .filter((key) => payload[key] !== undefined && payload[key] !== null)
+        .map((key) => `- **${labels[key] || key}**: ${formatFieldValue(payload[key])}`);
+    return lines.join('\n');
+}
+
+function formatListItem(item: any) {
+    if (!item || typeof item !== 'object') return `- ${formatFieldValue(item)}`;
+    const role = item.role && typeof item.role === 'object' ? item.role : null;
+    const details = [
+        role?.id !== undefined ? `role ID: ${role.id}` : null,
+        role?.code ? `code: ${role.code}` : null,
+        role?.description ? `description: ${role.description}` : null,
+        item.id !== undefined ? `ID: ${item.id}` : null,
+        item.username ? `username: ${item.username}` : null,
+        item.email ? `email: ${item.email}` : null,
+        item.status ? `status: ${item.status}` : null,
+        item.org_id !== undefined ? `org ID: ${item.org_id}` : null,
+    ].filter(Boolean);
+    return details.length > 0
+        ? `- **${getDisplayName(item)}** (${details.join(', ')})`
+        : `- **${getDisplayName(item)}**`;
+}
+
+function formatGenericExecutionResult(step: ExecutionDetail['steps'][number], isChinese: boolean) {
+    const data = step.response_data || step.result;
+    if (!data) {
+        return step.result_content?.trim() || '';
+    }
+
+    if (typeof data === 'object' && data !== null) {
+        const markdown = (data as any).markdown;
+        const mermaid = (data as any).mermaid;
+        if (typeof markdown === 'string' && markdown.trim()) {
+            return markdown.trim();
+        }
+        if (typeof mermaid === 'string' && mermaid.trim()) {
+            return `\`\`\`mermaid\n${mermaid.trim()}\n\`\`\``;
+        }
+    }
+
+    if (Array.isArray(data)) {
+        const title = isChinese ? `**查询完成，共 ${data.length} 条结果：**` : `**Query completed with ${data.length} result(s):**`;
+        return [title, '', ...data.map(formatListItem)].join('\n');
+    }
+
+    if (typeof data === 'object') {
+        const payload = extractResultPayload(data);
+        if (Array.isArray(payload)) {
+            const title = isChinese ? `**查询完成，共 ${payload.length} 条结果：**` : `**Query completed with ${payload.length} result(s):**`;
+            return [title, '', ...payload.map(formatListItem)].join('\n');
+        }
+
+        if (payload && typeof payload === 'object') {
+            const lines = formatObjectDetails(payload, isChinese);
+            if (lines) {
+                const title = isChinese ? `**查询结果：**` : `**Result:**`;
+                return `${title}\n\n${lines}`;
+            }
+        }
+
+        return JSON.stringify(data, null, 2);
+    }
+
+    return String(data);
 }
 
 interface ExecutionStep {
@@ -134,6 +251,21 @@ const PlannerExecutorPanel: React.FC = () => {
     const [originalGoal, setOriginalGoal] = useState<string | null>(null);
     const [repairGuidance, setRepairGuidance] = useState('');
     const [isRepairing, setIsRepairing] = useState(false);
+    const postedExecutionResultsRef = useRef<Set<string>>(new Set());
+
+    // Helper to detect if current goal is Chinese
+    // Check multiple sources: originalGoal, question, userPlan summary, or last user message in conversation
+    const isChinese = useMemo(() => {
+        const goalText =
+            originalGoal ||
+            currentPlanResponse?.question ||
+            currentPlanResponse?.userPlan?.summary ||
+            currentPlanResponse?.user_plan?.summary ||
+            (conversationHistory.length > 0
+                ? [...conversationHistory].reverse().find(msg => msg.role === 'user')?.content || ''
+                : '');
+        return /[\u4e00-\u9fff]/.test(goalText);
+    }, [originalGoal, currentPlanResponse?.question, currentPlanResponse?.userPlan?.summary, currentPlanResponse?.user_plan?.summary, conversationHistory]);
 
     // Initialize steps from plan response
     useEffect(() => {
@@ -152,6 +284,7 @@ const PlannerExecutorPanel: React.FC = () => {
             setRepairHint(null);
             setOriginalGoal(null);
             setRepairGuidance('');
+            postedExecutionResultsRef.current.clear();
             setShowDebugDetails(false);
         }
     }, [currentPlanResponse]);
@@ -235,7 +368,10 @@ const PlannerExecutorPanel: React.FC = () => {
                 });
                 setExecutionSteps(updatedSteps);
                 setExecutionStatus(data.status);
-                setExecutionSummary(normalizeExecutionSummary(data.userSummary ?? data.user_summary));
+                const normalizedSummary = normalizeExecutionSummary(data.userSummary ?? data.user_summary);
+                console.log('[Bilingual] Execution poll - userSummary from API:', data.userSummary ?? data.user_summary);
+                console.log('[Bilingual] Normalized summary:', normalizedSummary);
+                setExecutionSummary(normalizedSummary);
                 setRepairHint((data.repairHint ?? data.repair_hint ?? null) as any);
                 setOriginalGoal(data.originalGoal ?? data.original_goal ?? null);
                 if (data.error_message) {
@@ -269,50 +405,91 @@ const PlannerExecutorPanel: React.FC = () => {
                     if (data.status === 'completed' || data.status === 'partial_failed') {
                         let resultContent = '';
 
-                        // Build result from step results
+                        // Build result from step results - focus on final outcome, not intermediate steps
                         const completedSteps = data.steps?.filter(s => s.status === 'completed' || s.status === 'success') || [];
+
+                        // Debug: log completed steps
+                        console.log('[Result] Completed steps:', completedSteps.length);
+                        console.log('[Result] Steps data:', completedSteps.map(s => ({
+                            step: s.step_number || s.step,
+                            command: s.command,
+                            has_response_data: !!s.response_data,
+                            response_keys: s.response_data ? Object.keys(s.response_data) : [],
+                            permissions: s.response_data?.permissions ? Array.isArray(s.response_data.permissions) : false,
+                        })));
+
                         if (completedSteps.length > 0) {
                             const stepResults: string[] = [];
                             for (const step of completedSteps) {
-                                if (step.result_content) {
-                                    stepResults.push(step.result_content);
-                                } else if (step.response_data) {
-                                    // Fallback: try to extract meaningful info from response_data
+                                if (step.response_data) {
+                                    // Extract meaningful data from response_data
                                     const rd = step.response_data;
-                                    if (rd.permissions && Array.isArray(rd.permissions)) {
-                                        stepResults.push(`Found ${rd.permissions.length} permissions`);
+                                    console.log('[Result] Processing step:', step.command, 'response_data keys:', Object.keys(rd));
+
+                                    // Check for permissions in response_data.data.permissions (MCP tool result structure)
+                                    const permissions = rd?.data?.permissions || rd?.permissions;
+                                    if (permissions && Array.isArray(permissions)) {
+                                        // Detect language from original goal for bilingual output
+                                        // Use data.originalGoal directly to avoid stale closure issues
+                                        const goalText = (data.originalGoal ?? data.original_goal ?? originalGoal) || '';
+                                        const hasChinese = /[\u4e00-\u9fff]/.test(goalText);
+                                        const isChinese = hasChinese;
+                                        console.log('[Result] Language detection:', { goalText: goalText.substring(0, 50), hasChinese, isChinese });
+
+                                        // Format permissions as a readable list
+                                        const permissionList = permissions.map((p: any) => {
+                                            const parts = [];
+                                            if (p.name) parts.push(p.name);
+                                            if (p.code) parts.push(`[${p.code}]`);
+                                            if (p.resource) parts.push(`on ${p.resource}`);
+                                            if (p.action) parts.push(`(${p.action})`);
+                                            return `- ${parts.join(' ')}`;
+                                        }).join('\n');
+                                        const resultText = isChinese
+                                            ? `**找到 ${permissions.length} 个权限：**\n${permissionList}`
+                                            : `**Found ${permissions.length} permission(s):**\n${permissionList}`;
+                                        console.log('[Result] Added permission result:', resultText.substring(0, 100));
+                                        stepResults.push(resultText);
+                                    } else if (rd.matched_role || rd.matched_member) {
+                                        // Skip intermediate resolution steps
+                                        console.log('[Result] Skipping intermediate resolution step');
+                                        continue;
+                                    } else if (rd.data && Array.isArray(rd.data) && rd.data.length > 0 && !permissions) {
+                                        // Skip generic list results (like list_roles, list_members) unless it's the final answer
+                                        console.log('[Result] Skipping generic list result, data length:', rd.data.length);
+                                        continue;
+                                    } else {
+                                        console.log('[Result] Step has response_data but no permissions:', {
+                                            has_data_permissions: !!rd?.data?.permissions,
+                                            has_direct_permissions: !!rd?.permissions,
+                                            response_keys: Object.keys(rd)
+                                        });
                                     }
                                 }
                             }
                             if (stepResults.length > 0) {
                                 resultContent = stepResults.join('\n\n');
+                                console.log('[Result] Final resultContent:', resultContent.substring(0, 200));
+                            } else {
+                                console.log('[Result] No stepResults accumulated');
+                                const finalStep = [...completedSteps]
+                                    .reverse()
+                                    .find((step) => step.result_content || step.response_data || step.result);
+                                if (finalStep) {
+                                    resultContent = formatGenericExecutionResult(finalStep, isChinese).trim();
+                                    console.log('[Result] Generic resultContent:', resultContent.substring(0, 200));
+                                }
                             }
                         }
 
-                        // Also try execution summary
-                        const executionSummary = normalizeExecutionSummary(data.userSummary ?? data.user_summary);
-                        if (executionSummary && (executionSummary.headline || executionSummary.summary)) {
-                            const summaryParts: string[] = [];
-                            if (executionSummary.headline) summaryParts.push(`**${executionSummary.headline}**`);
-                            if (executionSummary.summary) summaryParts.push(executionSummary.summary);
-                            if (summaryParts.length > 0) {
-                                resultContent = summaryParts.join('\n\n') + (resultContent ? '\n\n' + resultContent : '');
-                            }
-                        }
-
-                        // Only add to conversation if we have content
-                        if (resultContent.trim()) {
-                            const lastMsg = conversationHistory[conversationHistory.length - 1];
-                            // Check if we already added a result for this execution
-                            const alreadyHasResult = lastMsg?.role === 'assistant' &&
-                                (lastMsg.content.includes('permissions') || lastMsg.content.includes('Found') || lastMsg.content.includes('permission'));
-
-                            if (!alreadyHasResult) {
-                                setConversationHistory([
-                                    ...conversationHistory,
-                                    { role: 'assistant', content: resultContent.trim() }
-                                ]);
-                            }
+                        if (resultContent.trim() && !postedExecutionResultsRef.current.has(data.execution_id)) {
+                            postedExecutionResultsRef.current.add(data.execution_id);
+                            setConversationHistory((previous) => [
+                                ...previous,
+                                { role: 'assistant', content: resultContent.trim() }
+                            ]);
+                        } else {
+                            console.log('[Result] No resultContent to add');
                         }
                     }
                 }
@@ -346,11 +523,11 @@ const PlannerExecutorPanel: React.FC = () => {
                 plan: repaired.repairedPlan || repaired.repaired_plan || [],
                 assistantMessage: repaired.repairPlanDescription || repaired.repair_plan_description || repaired.repairSummary,
                 userPlan: {
-                    headline: '我已根据你的提示修复方案',
-                    summary: repaired.repairPlanDescription || repaired.repair_plan_description || '我会按修复后的方案继续执行。',
+                    headline: isChinese ? '我已根据你的提示修复方案' : 'I have repaired the plan based on your guidance',
+                    summary: repaired.repairPlanDescription || repaired.repair_plan_description || (isChinese ? '我会按修复后的方案继续执行。' : 'I will continue executing with the repaired plan.'),
                     steps: [],
-                    nextAction: '系统将继续按修复后的方案执行。',
-                    debugHint: '调试详情中会保留修复后的工具选择和步骤。',
+                    nextAction: isChinese ? '系统将继续按修复后的方案执行。' : 'The system will continue executing with the repaired plan.',
+                    debugHint: isChinese ? '调试详情中会保留修复后的工具选择和步骤。' : 'Debug details retain the repaired tool selections and steps.',
                 },
                 retrievalDiagnostics: currentPlanResponse?.retrievalDiagnostics,
                 resolvedMode: currentPlanResponse?.resolvedMode,
@@ -472,8 +649,8 @@ const PlannerExecutorPanel: React.FC = () => {
                             onClick={() => setShowDebugDetails((value) => !value)}
                             className="flex w-full items-center justify-between text-left text-sm font-semibold text-slate-700"
                         >
-                            <span>调试详情</span>
-                            <span className="text-xs text-slate-500">{showDebugDetails ? '隐藏' : '展开'}</span>
+                            <span>{isChinese ? '调试详情' : 'Debug Details'}</span>
+                            <span className="text-xs text-slate-500">{showDebugDetails ? (isChinese ? '隐藏' : 'Hide') : (isChinese ? '展开' : 'Expand')}</span>
                         </button>
                         {showDebugDetails && (
                             <div className="mt-4 space-y-3">
@@ -523,7 +700,7 @@ const PlannerExecutorPanel: React.FC = () => {
 
         return (
             <div className="flex flex-1 flex-col items-center justify-center text-center p-6 text-slate-600">
-                <p className="text-sm">在左侧对话中发起任务，这里会显示任务摘要和可展开的调试详情。</p>
+                <p className="text-sm">{isChinese ? '在左侧对话中发起任务，这里会显示任务摘要和可展开的调试详情。' : 'Start a task in the conversation on the left; task summaries and expandable debug details will appear here.'}</p>
             </div>
         );
     }
@@ -562,11 +739,11 @@ const PlannerExecutorPanel: React.FC = () => {
             {executionId && (
                 <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
                     <div className="text-sm">
-                        <span className="font-medium text-slate-700">Execution ID:</span>
+                        <span className="font-medium text-slate-700">{isChinese ? '执行 ID:' : 'Execution ID:'}</span>
                         <span className="text-blue-600 ml-2 font-mono">{executionId}</span>
                     </div>
                     <div className="text-sm mt-1">
-                        <span className="font-medium text-slate-700">Status:</span>
+                        <span className="font-medium text-slate-700">{isChinese ? '状态:' : 'Status:'}</span>
                         <span className="text-slate-600 ml-2 capitalize">{executionStatus}</span>
                     </div>
                 </div>
@@ -630,12 +807,16 @@ const PlannerExecutorPanel: React.FC = () => {
                     className="flex w-full items-center justify-between text-left"
                 >
                     <div>
-                        <div className="text-sm font-semibold text-slate-700">调试详情</div>
+                        <div className="text-sm font-semibold text-slate-700">
+                            {isChinese ? '调试详情' : 'Debug Details'}
+                        </div>
                         <div className="mt-1 text-xs text-slate-500">
-                            这里保留内部规划、检索诊断、步骤状态和技术错误，默认对正式用户隐藏。
+                            {isChinese
+                                ? '这里保留内部规划、检索诊断、步骤状态和技术错误，默认对正式用户隐藏。'
+                                : 'Internal planning, retrieval diagnostics, step status, and technical errors are shown here, hidden from production users by default.'}
                         </div>
                     </div>
-                    <span className="text-xs text-slate-500">{showDebugDetails ? '隐藏' : '展开'}</span>
+                    <span className="text-xs text-slate-500">{showDebugDetails ? (isChinese ? '隐藏' : 'Hide') : (isChinese ? '展开' : 'Expand')}</span>
                 </button>
 
                 {showDebugDetails && (

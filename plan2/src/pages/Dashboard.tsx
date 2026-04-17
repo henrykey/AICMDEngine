@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import ChatPanel from '../components/ChatPanel';
 import PlannerExecutorPanel from '../components/PlannerExecutorPanel';
@@ -29,6 +29,47 @@ const Dashboard = () => {
   const navigate = useNavigate();
   const { planningMode, setPlanningMode } = useTask();
   const [activeNav, setActiveNav] = useState<string>('planner');
+  const [chatPanelWidth, setChatPanelWidth] = useState(50); // percent
+  const [isDraggingDivider, setIsDraggingDivider] = useState(false);
+
+  const handleDividerMouseDown = useCallback(() => {
+    setIsDraggingDivider(true);
+  }, []);
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isDraggingDivider) return;
+
+      const viewportWidth = window.innerWidth;
+      const sidebarWidth = 240; // w-60
+      const contentLeft = sidebarWidth;
+      const contentWidth = viewportWidth - contentLeft;
+      const relativeX = e.clientX - contentLeft;
+      const nextPercent = (relativeX / contentWidth) * 100;
+
+      if (nextPercent >= 25 && nextPercent <= 75) {
+        setChatPanelWidth(nextPercent);
+      }
+    };
+
+    const handleMouseUp = () => {
+      setIsDraggingDivider(false);
+    };
+
+    if (isDraggingDivider) {
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+    }
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+  }, [isDraggingDivider]);
 
   const handleLogout = () => {
     localStorage.clear();
@@ -128,9 +169,12 @@ const Dashboard = () => {
 
         {/* 中部：左右布局 - 始终 flex-row */}
         {activeNav === 'planner' ? (
-          <div className="flex-1 flex flex-row p-6 gap-6 overflow-hidden" style={{ display: 'flex', flexDirection: 'row' }}>
+          <div className="flex-1 flex flex-row p-6 overflow-hidden" style={{ display: 'flex', flexDirection: 'row' }}>
             {/* CHAT 面板 */}
-            <div className="flex-1 bg-white rounded-xl shadow-md flex flex-col" style={{ flex: '1 1 0%' }}>
+            <div
+              className="bg-white rounded-xl shadow-md flex flex-col min-w-0"
+              style={{ width: `calc(${chatPanelWidth}% - 6px)` }}
+            >
               <div className="p-5 border-b border-slate-200 flex items-center justify-between">
                 <div className="text-base font-bold text-slate-800 flex items-center gap-2.5">
                   <span>💬</span> CHAT
@@ -142,8 +186,19 @@ const Dashboard = () => {
               </div>
             </div>
 
+            <div
+              className={`mx-3 w-1 rounded-full bg-slate-200 hover:bg-blue-500 cursor-col-resize transition-colors ${
+                isDraggingDivider ? 'bg-blue-500' : ''
+              }`}
+              onMouseDown={handleDividerMouseDown}
+              title="Drag to resize panels"
+            />
+
             {/* Planner & Executor 面板 */}
-            <div className="flex-1 bg-white rounded-xl shadow-md flex flex-col" style={{ flex: '1 1 0%' }}>
+            <div
+              className="bg-white rounded-xl shadow-md flex flex-col min-w-0"
+              style={{ width: `calc(${100 - chatPanelWidth}% - 6px)` }}
+            >
               <div className="p-5 border-b border-slate-200">
                 <div className="text-base font-bold text-slate-800 flex items-center gap-2.5">
                   <span>🧠</span> Planner & Executor
