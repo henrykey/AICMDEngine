@@ -230,8 +230,11 @@ class CommandRetriever:
         supplemented = list(candidates)
         helpers = [
             "MCP.membership.list_orgs",
+            "MCP.membership.lookup_org",
+            "MCP.membership.render_org_chart",
             "MCP.membership.list_roles",
             "MCP.membership.list_members",
+            "MCP.membership.get_member_roles",
         ]
         for helper in helpers:
             if helper not in existing:
@@ -246,6 +249,46 @@ class CommandRetriever:
                     "tags": ["membership", "mcp", "helper"],
                 })
         return supplemented
+
+    def _matches_org_chart_intent(self, goal: str) -> bool:
+        text = str(goal or "").strip().lower()
+        if not text:
+            return False
+        keywords = [
+            "organization structure",
+            "organization chart",
+            "org chart",
+            "org tree",
+            "organizational tree",
+            "mermaid",
+            "组织结构",
+            "组织机构",
+            "组织关系",
+            "组织树",
+            "机构关系",
+            "机构结构",
+        ]
+        return any(keyword in text for keyword in keywords)
+
+    def _prioritize_membership_commands_by_intent(self, candidates: List[Dict[str, Any]], goal: str) -> List[Dict[str, Any]]:
+        if not self._matches_org_chart_intent(goal):
+            return candidates
+
+        preferred = []
+        others = []
+        preferred_commands = {
+            "MCP.membership.render_org_chart",
+            "MCP.membership.get_org_hierarchy",
+            "MCP.membership.list_orgs",
+            "MCP.membership.lookup_org",
+        }
+        for candidate in candidates:
+            command = str(candidate.get("command", ""))
+            if command in preferred_commands:
+                preferred.append(candidate)
+            else:
+                others.append(candidate)
+        return preferred + others
 
     async def _retrieve_local(
         self,
@@ -263,7 +306,10 @@ class CommandRetriever:
         merged = self._merge_hits(keyword_hits, vector_hits)
 
         raw_candidates = [self._to_planner_command(item["source"]) for _, item in merged[:limit]]
-        prompt_candidates = self._supplement_membership_commands(raw_candidates)[: self.prompt_top_k]
+        prompt_candidates = self._prioritize_membership_commands_by_intent(
+            self._supplement_membership_commands(raw_candidates),
+            goal,
+        )[: self.prompt_top_k]
         metadata = self.embedding_service.get_embedding_metadata()
 
         logger.info(
@@ -333,7 +379,10 @@ class CommandRetriever:
         if top_score is not None and top_score < self.remote_min_top_score:
             raise ValueError(f"DocIntel top score below threshold: {top_score}")
 
-        prompt_candidates = self._supplement_membership_commands(raw_candidates)[: self.prompt_top_k]
+        prompt_candidates = self._prioritize_membership_commands_by_intent(
+            self._supplement_membership_commands(raw_candidates),
+            goal,
+        )[: self.prompt_top_k]
         return {
             "raw_candidates": raw_candidates,
             "prompt_candidates": prompt_candidates,

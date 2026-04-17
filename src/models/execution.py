@@ -67,7 +67,7 @@ class StepExecution(BaseModel):
     status: StepStatus = Field(default=StepStatus.PENDING)
     timeout: int = Field(default=30)  # 秒
     request_data: Dict[str, Any] = Field(default_factory=dict)  # 实际发送的请求
-    response_data: Optional[Dict[str, Any]] = None  # API 响应
+    response_data: Any = None  # API/MCP 响应，可能是对象或列表
     result_content: Optional[str] = None  # Human-readable result content from MCP tools
     error_message: Optional[str] = None
     started_at: Optional[datetime] = None

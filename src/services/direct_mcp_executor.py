@@ -124,6 +124,8 @@ class DirectMCPExecutor:
             r"显示(?:用户|成员)?[\"'“”]?([\u4e00-\u9fffA-Za-z0-9@._\-]{2,64})[\"'“”]?的(?:详细)?信息",
             r"(?:用户|成员)[\"'“”]?([\u4e00-\u9fffA-Za-z0-9@._\-]{2,64})[\"'“”]?(?:的)?(?:详细)?信息",
             r"[\"'“”]?([\u4e00-\u9fffA-Za-z0-9@._\-]{2,64})[\"'“”]?(?:成员)?有哪些(?:访问权|权限)",
+            r"(?:list|show|get)\s+(?:all\s+)?roles\s+(?:for|of|user|member)\s+[\"']?([A-Za-z0-9@._\-]{2,64})[\"']?",
+            r"(?:user|member)\s+[\"']?([A-Za-z0-9@._\-]{2,64})[\"']?\s+(?:roles|belong)",
             r"显示用户[\"'“”]?([\u4e00-\u9fffA-Za-z0-9@._\-]{2,64})[\"'“”]?",
             r"显示成员[\"'“”]?([\u4e00-\u9fffA-Za-z0-9@._\-]{2,64})[\"'“”]?",
         ]
@@ -148,6 +150,7 @@ class DirectMCPExecutor:
             "get_member",
             "get_member_id",
             "get_member_effective_permissions",
+            "get_member_roles",
         }
         if tool_name in member_query_tools and not patched.get("query") and not patched.get("member_id"):
             inferred_query = self._extract_member_query_from_goal(goal)

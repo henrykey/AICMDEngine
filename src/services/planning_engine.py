@@ -1,6 +1,8 @@
 from typing import List, Dict, Any, Optional
 from motor.motor_asyncio import AsyncIOMotorDatabase
 import json
+from json import JSONEncoder
+from datetime import datetime
 import logging
 import re
 from difflib import SequenceMatcher
@@ -21,6 +23,75 @@ from src.services.task_mode_selector import TaskModeSelector
 from src.mcp.registry import MCPRegistry
 
 logger = logging.getLogger(__name__)
+
+class DateTimeEncoder(JSONEncoder):
+    def default(self, o):
+        if isinstance(o, datetime):
+            return o.isoformat()
+        return super().default(o)
+
+
+def _detect_language(text: str) -> str:
+    """Detect if text is primarily Chinese or English.
+
+    Returns 'zh' if Chinese characters dominate, 'en' otherwise.
+    """
+    if not text:
+        return 'en'
+    chinese_chars = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+    # Consider it Chinese if more than 30% are Chinese characters
+    return 'zh' if chinese_chars > len(text) * 0.3 else 'en'
+
+
+class BilingualMessages:
+    """Bilingual message templates for user-facing responses."""
+
+    MESSAGES = {
+        'zh': {
+            'question_headline': '需要你补充一点信息',
+            'question_next_action': '补充必要信息后，我会继续处理这个请求。',
+            'question_debug_hint': '调试详情包含规划失败或待确认的技术原因。',
+            'direct_result_headline': '已直接完成请求',
+            'direct_result_default': '我已经直接完成这项请求。',
+            'direct_result_debug_hint': '如需查看调用的工具、参数和原始结果，可展开调试详情。',
+            'plan_headline': '我会按这个思路处理',
+            'plan_summary_prefix': '我会先',
+            'plan_summary_connector': '，然后',
+            'plan_detail_hint': '执行时默认只展示对你有用的过程和结果，内部步骤会放在调试详情里。',
+            'plan_next_action': '确认后即可执行；正式结果会用自然语言返回。',
+            'plan_debug_hint': '调试详情会保留具体命令、参数和步骤状态，便于测试。',
+            'fallback_headline': '已接收请求',
+            'fallback_summary_prefix': '我会处理这个请求：',
+            'fallback_default': '我会继续处理这个请求。',
+            'fallback_next_action': '执行后我会返回自然语言结果。',
+            'fallback_debug_hint': '调试详情中仍可查看内部规划。',
+        },
+        'en': {
+            'question_headline': 'Need more information',
+            'question_next_action': 'After you provide the necessary information, I will continue processing this request.',
+            'question_debug_hint': 'Debug details contain planning failures or technical clarifications needed.',
+            'direct_result_headline': 'Request completed',
+            'direct_result_default': 'I have completed this request directly.',
+            'direct_result_debug_hint': 'Expand debug details to view tools called, parameters, and raw results.',
+            'plan_headline': 'I will process this',
+            'plan_summary_prefix': 'I will first',
+            'plan_summary_connector': ', then',
+            'plan_detail_hint': 'By default, only useful process and results are shown; internal steps are in debug details.',
+            'plan_next_action': 'Confirm to execute; results will be returned in natural language.',
+            'plan_debug_hint': 'Debug details retain specific commands, parameters, and step status for testing.',
+            'fallback_headline': 'Request received',
+            'fallback_summary_prefix': 'I will process this request: ',
+            'fallback_default': 'I will continue processing this request.',
+            'fallback_next_action': 'After execution, I will return results in natural language.',
+            'fallback_debug_hint': 'Debug details still show internal planning.',
+        },
+    }
+
+    @classmethod
+    def get(cls, language: str, key: str, default: str = None) -> str:
+        """Get a message in the specified language."""
+        return cls.MESSAGES.get(language, cls.MESSAGES['en']).get(key, default or '')
+
 
 class PlanningEngine:
     def __init__(
@@ -160,58 +231,64 @@ class PlanningEngine:
         direct_result: Optional[Dict[str, Any]] = None,
     ) -> tuple[str, Optional[UserPlanSummary]]:
         normalized_goal = goal.strip()
+        # Detect language from goal
+        language = _detect_language(goal)
 
         if question:
-            headline = "需要你补充一点信息"
+            headline = BilingualMessages.get(language, 'question_headline')
             summary = question
             user_plan = UserPlanSummary(
                 headline=headline,
                 summary=summary,
                 steps=[],
-                nextAction="补充必要信息后，我会继续处理这个请求。",
-                debugHint="调试详情包含规划失败或待确认的技术原因。",
+                nextAction=BilingualMessages.get(language, 'question_next_action'),
+                debugHint=BilingualMessages.get(language, 'question_debug_hint'),
             )
             return summary, user_plan
 
         if direct_result:
             content = str(direct_result.get("content", "")).strip()
-            headline = "已直接完成请求"
-            summary = content or "我已经直接完成这项请求。"
+            headline = BilingualMessages.get(language, 'direct_result_headline')
+            summary = content or BilingualMessages.get(language, 'direct_result_default')
             user_plan = UserPlanSummary(
                 headline=headline,
                 summary=summary,
                 steps=[],
                 nextAction=None,
-                debugHint="如需查看调用的工具、参数和原始结果，可展开调试详情。",
+                debugHint=BilingualMessages.get(language, 'direct_result_debug_hint'),
             )
             return summary, user_plan
 
         natural_steps = [step.description.strip() for step in (steps or []) if step.description.strip()]
         if natural_steps:
-            headline = "我会按这个思路处理"
+            headline = BilingualMessages.get(language, 'plan_headline')
             if len(natural_steps) == 1:
                 summary = natural_steps[0]
             else:
-                summary = "我会先" + natural_steps[0].lstrip("先") + "，然后" + "，再".join(natural_steps[1:])
+                # Build summary with language-appropriate connectors
+                if language == 'zh':
+                    summary = BilingualMessages.get(language, 'plan_summary_prefix') + natural_steps[0].lstrip("先") + BilingualMessages.get(language, 'plan_summary_connector') + "，再".join(natural_steps[1:])
+                else:
+                    summary = BilingualMessages.get(language, 'plan_summary_prefix') + " " + natural_steps[0].lstrip("先").lstrip("first ").lstrip("First ") + BilingualMessages.get(language, 'plan_summary_connector') + " " + BilingualMessages.get(language, 'plan_summary_connector').join(natural_steps[1:])
             assistant_lines = [summary]
             if len(natural_steps) > 1:
-                assistant_lines.append("执行时默认只展示对你有用的过程和结果，内部步骤会放在调试详情里。")
+                assistant_lines.append(BilingualMessages.get(language, 'plan_detail_hint'))
             user_plan = UserPlanSummary(
                 headline=headline,
                 summary=summary,
                 steps=natural_steps,
-                nextAction="确认后即可执行；正式结果会用自然语言返回。",
-                debugHint="调试详情会保留具体命令、参数和步骤状态，便于测试。",
+                nextAction=BilingualMessages.get(language, 'plan_next_action'),
+                debugHint=BilingualMessages.get(language, 'plan_debug_hint'),
             )
             return "\n".join(assistant_lines), user_plan
 
-        fallback = f"我会处理这个请求：{normalized_goal}" if normalized_goal else "我会继续处理这个请求。"
+        fallback = BilingualMessages.get(language, 'fallback_summary_prefix', '') + normalized_goal if normalized_goal else BilingualMessages.get(language, 'fallback_default')
         return fallback, UserPlanSummary(
-            headline="已接收请求",
+            headline=BilingualMessages.get(language, 'fallback_headline'),
             summary=fallback,
             steps=[],
-            nextAction="执行后我会返回自然语言结果。",
-            debugHint="调试详情中仍可查看内部规划。",
+            nextAction=BilingualMessages.get(language, 'fallback_next_action'),
+            debugHint=BilingualMessages.get(language, 'fallback_debug_hint'),
         )
 
     def _extract_member_name_from_goal(self, goal: str) -> Optional[str]:
@@ -350,7 +427,8 @@ class PlanningEngine:
                 updated_steps.append(lookup_step)
                 rewritten_params = dict(step.params or {})
                 rewritten_params.pop("query", None)
-                rewritten_params["member_id"] = f"$.steps[{lookup_step.step - 1}].response.member_id"
+                # lookup_step 被插入到 dependent_step_index 位置，所以下一步应该引用这个索引
+                rewritten_params["member_id"] = f"$.steps[{dependent_step_index}].response.member_id"
                 description = step.description
                 description = re.sub(r"\bstep\s+0\b", "step 1", description, flags=re.IGNORECASE)
                 description = re.sub(r"\bstep\s+1\b", "step 2", description, flags=re.IGNORECASE)
@@ -1025,12 +1103,16 @@ Each command is either an API endpoint or an MCP tool.
 2. Command Mapping: For each step, find the most appropriate command from the available COMMANDS.
    - **PRIORITY: Always check for MCP commands first (commands starting with "MCP."), as they are preferred.**
    - For example, if you see both "GET /v2/orgs/{id}/hierarchy" and "MCP.membership.get_org_hierarchy", always choose the MCP version.
+   - If the user asks to visualize, display, draw, chart, or show an organization structure/tree/relationship graph, prefer `MCP.membership.render_org_chart`.
+   - Treat these phrases as the same intent: "organization structure", "organization chart", "org tree", "organizational tree", "组织结构", "组织机构", "组织关系", "组织树", "机构关系", "机构结构".
+   - For organization-chart requests, do NOT decompose into `list_orgs` plus manual reasoning if `MCP.membership.render_org_chart` is available.
    - For role/position creation tasks, use `MCP.membership.create_role` (NOT `MCP.membership.create_org`).
    - For organization creation, treat semantically similar names as potential duplicates (e.g., "Joinkey Software" ~ "Joinkey Software Company"). Reuse existing org when likely same; if uncertain, ask a clarification question before creating.
 3. **Execution Completeness (Critical)**:
    - If the user asks to CREATE/UPDATE/ASSIGN/DEPLOY/START entities, the plan MUST include those write operations.
    - Read/list/check steps can be used for idempotency and lookup, but MUST be followed by concrete write/execute steps in the same plan.
    - NEVER return a read-only plan when the user's request is clearly an execution task.
+   - If the user asks for a visual chart/diagram of an organization structure, a single-step plan using `MCP.membership.render_org_chart` is complete.
 4. **Parameter Validation**: Check required parameters carefully.
    - Ask clarification ONLY when a truly required business parameter is missing for execution.
    - Do NOT ask clarification for optional/internal flags if safe defaults exist.
@@ -1178,8 +1260,8 @@ Each command is either an API endpoint or an MCP tool.
         guidance: Optional[str] = None,
         conversation_history: Optional[List[ConversationMessage]] = None,
     ) -> List[Dict[str, str]]:
-        commands_json = json.dumps(commands, indent=2, ensure_ascii=False)
-        failed_plan_json = json.dumps(failed_plan, indent=2, ensure_ascii=False)
+        commands_json = json.dumps(commands, indent=2, ensure_ascii=False, cls=DateTimeEncoder)
+        failed_plan_json = json.dumps(failed_plan, indent=2, ensure_ascii=False, cls=DateTimeEncoder)
 
         system_prompt = f"""
 # ROLE
@@ -1203,6 +1285,7 @@ You are an expert AI Task Planner repairing a failed execution plan.
 3. If a command requires an id and the user only provided a name, you MUST include explicit lookup/resolution steps.
 4. Never conclude that an entity does not exist unless the repaired plan explicitly checks and proves that.
 5. The repaired plan must be ready for execution.
+6. For permission queries: if a member has no direct permissions, their effective permissions come from their assigned roles.
 
 # OUTPUT_SCHEMA
 {{

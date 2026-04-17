@@ -181,6 +181,18 @@ class MembershipMCPServer(BaseMCPServer):
         self.register_tool(Tool(
             name="create_member",
             description="Create a new member",
+            semantic_description="创建新成员账号。用于新增真实成员或虚拟成员，为后续组织关联、角色分配和权限授予提供主体。",
+            use_cases=[
+                "创建新用户",
+                "创建测试成员或虚拟成员",
+                "在给成员分配组织和角色前先建档",
+            ],
+            natural_language_examples=[
+                "创建一个用户名为 zhangsan 的成员",
+                "新增测试用户 test_user_01，邮箱 test@example.com",
+            ],
+            output_description="返回新建成员的详细信息，通常包含 id、username、email、status、is_virtual 等字段。",
+            tags=["membership", "member", "create", "management", "task_tool"],
             input_schema={
                 "type": "object",
                 "properties": {
@@ -219,6 +231,18 @@ class MembershipMCPServer(BaseMCPServer):
         self.register_tool(Tool(
             name="update_member",
             description="Update a member's information",
+            semantic_description="更新成员基本资料，如用户名、邮箱或虚拟成员状态。适用于成员档案维护。",
+            use_cases=[
+                "修改成员资料",
+                "修正用户名或邮箱",
+                "调整成员虚拟身份标记",
+            ],
+            natural_language_examples=[
+                "把成员 19 的邮箱改成 wangwh@example.com",
+                "更新 admin 用户的资料",
+            ],
+            output_description="返回更新后的成员信息或更新结果，通常包含 member_id 和最新成员对象。",
+            tags=["membership", "member", "update", "management", "task_tool"],
             input_schema={
                 "type": "object",
                 "properties": {
@@ -256,6 +280,17 @@ class MembershipMCPServer(BaseMCPServer):
         self.register_tool(Tool(
             name="delete_member",
             description="Delete a member",
+            semantic_description="删除成员账号。用于移除不再需要的成员记录，此操作通常是管理类高风险操作。",
+            use_cases=[
+                "删除测试成员",
+                "移除错误创建的成员",
+            ],
+            natural_language_examples=[
+                "删除成员 25",
+                "把这个测试用户删掉",
+            ],
+            output_description="返回删除操作结果，通常包含删除状态、member_id 或后端确认信息。",
+            tags=["membership", "member", "delete", "management", "dangerous_tool"],
             input_schema={
                 "type": "object",
                 "properties": {
@@ -281,6 +316,18 @@ class MembershipMCPServer(BaseMCPServer):
         self.register_tool(Tool(
             name="update_member_password",
             description="Update a member's password",
+            semantic_description="重置或修改成员密码。用于密码过期处理、人工重置密码或初始化账号密码。",
+            use_cases=[
+                "重置成员密码",
+                "处理密码过期",
+                "初始化成员登录密码",
+            ],
+            natural_language_examples=[
+                "把 admin 的密码改成新密码",
+                "重置成员 1 的密码",
+            ],
+            output_description="返回密码更新结果，通常包含 member_id、操作状态和后端确认信息。",
+            tags=["membership", "member", "password", "security", "task_tool"],
             input_schema={
                 "type": "object",
                 "properties": {
@@ -400,6 +447,18 @@ class MembershipMCPServer(BaseMCPServer):
         self.register_tool(Tool(
             name="create_role",
             description="Create a new role/position in an organization",
+            semantic_description="在指定组织下创建角色或岗位。用于后续给成员赋角色，并通过角色集中管理权限。",
+            use_cases=[
+                "创建岗位角色",
+                "创建组织内的新角色",
+                "为权限建模新增角色",
+            ],
+            natural_language_examples=[
+                "在研发部创建一个 DevOps 角色",
+                "新增一个 code 为 hr_admin 的角色",
+            ],
+            output_description="返回新建角色信息，通常包含 id、name、code、org_id、description、active。",
+            tags=["membership", "role", "create", "management", "task_tool"],
             input_schema={
                 "type": "object",
                 "properties": {
@@ -535,6 +594,50 @@ class MembershipMCPServer(BaseMCPServer):
             handler=self.list_orgs
         ))
 
+        self.register_tool(Tool(
+            name="lookup_org",
+            description="Resolve an organization unit ID from organization details such as name, code, or type",
+            semantic_description="根据组织名称、编码或类型解析唯一组织 ID。可直接接收完整组织数组，也可内部自动查询组织列表。",
+            use_cases=[
+                "根据自然语言线索获取组织 ID",
+                "为组织详情、成员入组织、组织层级查询提供 org_id",
+            ],
+            natural_language_examples=[
+                "研发部对应哪个组织 ID？",
+                "Engineering 这个组织的 ID 是多少？",
+            ],
+            output_description="返回 status、org_id、matched_org、candidates，用于后续步骤继续执行。",
+            tags=["membership", "org", "id_resolution", "lookup", "task_tool"],
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The organization name, code, type, or descriptive text to match"
+                    },
+                    "orgs": {
+                        "type": "array",
+                        "description": "Optional full organization objects from a previous list_orgs step"
+                    },
+                    "match_fields": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional fields to match against. Defaults to name/code/type"
+                    },
+                    "auth_token": {
+                        "type": "string",
+                        "description": "Authentication token (optional, will use default if not provided)"
+                    },
+                    "tenant_id": {
+                        "type": "integer",
+                        "description": "Tenant ID (optional, will use default if not provided)"
+                    }
+                },
+                "required": ["query"]
+            },
+            handler=self.lookup_org
+        ))
+
         # Get organization tool
         self.register_tool(Tool(
             name="get_org",
@@ -578,6 +681,18 @@ class MembershipMCPServer(BaseMCPServer):
         self.register_tool(Tool(
             name="create_org",
             description="Create a new organization unit",
+            semantic_description="创建新的组织单元，可用于公司、部门、团队、项目组等组织结构维护。",
+            use_cases=[
+                "新增部门或团队",
+                "创建临时项目组",
+                "维护组织架构",
+            ],
+            natural_language_examples=[
+                "创建一个叫 Engineering Platform 的团队",
+                "在研发中心下面新增测试部",
+            ],
+            output_description="返回新建组织信息，通常包含 id、name、type、parent_id、description、is_temporary。",
+            tags=["membership", "org", "create", "management", "task_tool"],
             input_schema={
                 "type": "object",
                 "properties": {
@@ -771,6 +886,50 @@ class MembershipMCPServer(BaseMCPServer):
         ))
 
         self.register_tool(Tool(
+            name="get_member_roles",
+            description="Get all roles assigned to a member by member ID or by member query",
+            semantic_description="获取成员拥有的所有角色。支持 member_id，也支持按用户名、姓名、邮箱等 query 自动解析成员后查询角色。",
+            use_cases=[
+                "查看成员属于哪些角色",
+                "查询用户拥有哪些岗位/角色",
+                "为成员有效权限汇总提供角色来源",
+            ],
+            natural_language_examples=[
+                "list all roles user wangwh belong to",
+                "王维宏有哪些角色？",
+                "admin 属于哪些角色？",
+            ],
+            output_description="返回 member_id、resolved_member、roles、raw。roles 中通常包含 role 对象、org_id、granted_at、granted_by。",
+            tags=["membership", "member", "role", "lookup", "task_tool"],
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "member_id": {
+                        "type": "string",
+                        "description": "Member ID"
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Member lookup text such as username, full name, or email"
+                    },
+                    "org_id": {
+                        "type": "integer",
+                        "description": "Optional org scope for member roles"
+                    },
+                    "auth_token": {
+                        "type": "string",
+                        "description": "Authentication token (optional, will use default if not provided)"
+                    },
+                    "tenant_id": {
+                        "type": "integer",
+                        "description": "Tenant ID (optional, will use default if not provided)"
+                    }
+                }
+            },
+            handler=self.get_member_roles
+        ))
+
+        self.register_tool(Tool(
             name="create_resource",
             description="Create a new resource",
             semantic_description="创建资源，用于后续权限点和访问控制。适合先创建 application/system 下的 function 或 data 资源。",
@@ -828,6 +987,18 @@ class MembershipMCPServer(BaseMCPServer):
         self.register_tool(Tool(
             name="update_org",
             description="Update an organization unit",
+            semantic_description="更新组织单元的基本资料，如名称、描述、临时属性或有效期。",
+            use_cases=[
+                "修改组织名称",
+                "更新组织描述",
+                "调整临时组织有效期",
+            ],
+            natural_language_examples=[
+                "把 org 5 的名字改成 Platform Team",
+                "更新测试部的说明信息",
+            ],
+            output_description="返回更新后的组织信息或更新结果，通常包含 org_id 和最新组织对象。",
+            tags=["membership", "org", "update", "management", "task_tool"],
             input_schema={
                 "type": "object",
                 "properties": {
@@ -870,6 +1041,17 @@ class MembershipMCPServer(BaseMCPServer):
         self.register_tool(Tool(
             name="delete_org",
             description="Delete/archive an organization unit",
+            semantic_description="删除或归档组织单元。用于清理错误创建或停用的组织结构节点，属于管理类高风险操作。",
+            use_cases=[
+                "删除错误创建的组织",
+                "归档不再使用的临时组织",
+            ],
+            natural_language_examples=[
+                "删除 org 12",
+                "把这个临时项目组归档",
+            ],
+            output_description="返回删除或归档结果，通常包含 org_id、状态和后端确认信息。",
+            tags=["membership", "org", "delete", "management", "dangerous_tool"],
             input_schema={
                 "type": "object",
                 "properties": {
@@ -894,7 +1076,18 @@ class MembershipMCPServer(BaseMCPServer):
         # Assign member to organization tool
         self.register_tool(Tool(
             name="assign_member_to_org",
-            description="Assign a member to an organization unit",
+            description="Assign a member to an organization unit by IDs or by member/org query",
+            semantic_description="将成员加入组织。支持直接传 member_id/org_id，也支持按成员名称和组织名称自动解析后完成关联。",
+            use_cases=[
+                "把成员加入组织",
+                "根据自然语言指定成员和组织完成关联",
+            ],
+            natural_language_examples=[
+                "把 kehongwei 加入研发部",
+                "add wangwh to Engineering",
+            ],
+            output_description="返回 member_id、org_id、resolved_member、resolved_org 以及关联结果。",
+            tags=["membership", "member", "org", "assignment", "task_tool"],
             input_schema={
                 "type": "object",
                 "properties": {
@@ -906,6 +1099,14 @@ class MembershipMCPServer(BaseMCPServer):
                         "type": "string",
                         "description": "Organization unit ID"
                     },
+                    "member_query": {
+                        "type": "string",
+                        "description": "Member lookup text such as username, full name, or email"
+                    },
+                    "org_query": {
+                        "type": "string",
+                        "description": "Organization lookup text such as organization name or code"
+                    },
                     "auth_token": {
                         "type": "string",
                         "description": "Authentication token (optional, will use default if not provided)"
@@ -914,8 +1115,7 @@ class MembershipMCPServer(BaseMCPServer):
                         "type": "integer",
                         "description": "Tenant ID (optional, will use default if not provided)"
                     }
-                },
-                "required": ["member_id", "org_id"]
+                }
             },
             handler=self.assign_member_to_org
         ))
@@ -924,6 +1124,18 @@ class MembershipMCPServer(BaseMCPServer):
         self.register_tool(Tool(
             name="get_member_orgs",
             description="Get all organizations a member belongs to",
+            semantic_description="查询成员所属的全部组织。常用于分析成员所在部门、计算成员继承权限、继续查询组织层级。",
+            use_cases=[
+                "查看成员所在组织",
+                "为权限分析获取组织上下文",
+                "确认成员是否属于某部门",
+            ],
+            natural_language_examples=[
+                "wangwh 属于哪些组织？",
+                "显示成员 19 的所属部门",
+            ],
+            output_description="返回成员组织列表，通常包含 org_id、name、type、parent_id，以及成员与组织关联信息。",
+            tags=["membership", "member", "org", "relation", "task_tool"],
             input_schema={
                 "type": "object",
                 "properties": {
@@ -949,6 +1161,17 @@ class MembershipMCPServer(BaseMCPServer):
         self.register_tool(Tool(
             name="remove_member_from_org",
             description="Remove a member from an organization unit",
+            semantic_description="将成员从指定组织中移除。用于组织调整、离岗或撤销成员与组织的关联。",
+            use_cases=[
+                "把成员移出部门",
+                "撤销成员所属组织关系",
+            ],
+            natural_language_examples=[
+                "把成员 19 从 org 3 移除",
+                "remove wangwh from Engineering",
+            ],
+            output_description="返回移除操作结果，通常包含 member_id、org_id 和后端确认状态。",
+            tags=["membership", "member", "org", "unassignment", "task_tool"],
             input_schema={
                 "type": "object",
                 "properties": {
@@ -978,6 +1201,18 @@ class MembershipMCPServer(BaseMCPServer):
         self.register_tool(Tool(
             name="get_org_hierarchy",
             description="Get the hierarchical relationships (ancestors/descendants) of an organization unit",
+            semantic_description="查询组织层级关系，包括上级组织、下级组织或双向层级。用于组织树分析和权限继承分析。",
+            use_cases=[
+                "查看组织上下级关系",
+                "分析组织树",
+                "为成员有效权限计算补充组织链路",
+            ],
+            natural_language_examples=[
+                "显示研发部的上级和下级组织",
+                "Engineering 的组织层级是什么？",
+            ],
+            output_description="返回层级结构数据，通常包含 org_id、ancestors、descendants、depth 或相关层级节点数组。",
+            tags=["membership", "org", "hierarchy", "relation", "task_tool"],
             input_schema={
                 "type": "object",
                 "properties": {
@@ -1012,10 +1247,80 @@ class MembershipMCPServer(BaseMCPServer):
             handler=self.get_org_hierarchy
         ))
 
+        self.register_tool(Tool(
+            name="render_org_chart",
+            description="Render an organization's structure as Mermaid graph markdown for chat display",
+            semantic_description="将当前租户或指定根组织的组织结构渲染成 Mermaid 图，适合在 AI 助手对话中直接展示组织树。",
+            use_cases=[
+                "显示整个租户的组织结构图",
+                "查看某个组织节点下面的树形结构",
+                "在聊天里可视化组织机构",
+            ],
+            natural_language_examples=[
+                "显示当前租户的组织结构图",
+                "用 mermaid 画出研发部下面的组织树",
+            ],
+            output_description="返回 markdown 文本，其中包含 ```mermaid 代码块，以及 org_count、root_org、nodes 等结构化数据。",
+            tags=["membership", "org", "tree", "visualization", "mermaid", "task_tool"],
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "org_id": {
+                        "type": "string",
+                        "description": "Optional root organization ID. If omitted, render the tenant/root organization tree."
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Optional organization lookup text such as name or code"
+                    },
+                    "include_inactive": {
+                        "type": "boolean",
+                        "description": "Whether to include inactive organizations in the chart",
+                        "default": True
+                    },
+                    "max_nodes": {
+                        "type": "integer",
+                        "description": "Maximum nodes to render in the Mermaid chart",
+                        "default": 80
+                    },
+                    "direction": {
+                        "type": "string",
+                        "enum": ["TD", "LR"],
+                        "description": "Mermaid graph direction: top-down or left-right",
+                        "default": "TD"
+                    },
+                    "auth_token": {
+                        "type": "string",
+                        "description": "Authentication token (optional, will use default if not provided)"
+                    },
+                    "tenant_id": {
+                        "type": "integer",
+                        "description": "Tenant ID (optional, will use default if not provided)"
+                    }
+                }
+            },
+            handler=self.render_org_chart
+        ))
+
+        self._register_root_admin_tools()
+        self._register_llm_tools()
+
         # Submit audit event tool
         self.register_tool(Tool(
             name="submit_audit_event",
             description="Submit a single audit event to the membership audit service",
+            semantic_description="向审计服务提交单条审计事件。适用于记录登录、系统操作、API 调用、数据变更等行为。",
+            use_cases=[
+                "记录单条审计日志",
+                "MCP 或系统调用后补充审计事件",
+                "安全与合规留痕",
+            ],
+            natural_language_examples=[
+                "提交一条用户登录审计日志",
+                "记录一次 MCP 客户端连接事件",
+            ],
+            output_description="返回审计写入结果，通常包含事件接收状态、事件标识或后端确认信息。",
+            tags=["membership", "audit", "logging", "write", "task_tool"],
             input_schema={
                 "type": "object",
                 "properties": {
@@ -1087,6 +1392,18 @@ class MembershipMCPServer(BaseMCPServer):
         self.register_tool(Tool(
             name="submit_audit_events_batch",
             description="Submit multiple audit events to the membership audit service",
+            semantic_description="批量提交多条审计事件。适用于批处理同步、日志回灌或一次性补录多条操作轨迹。",
+            use_cases=[
+                "批量写入审计日志",
+                "同步历史操作事件",
+                "批处理导入审计记录",
+            ],
+            natural_language_examples=[
+                "批量提交这 10 条审计事件",
+                "把这些 API 调用记录写入审计系统",
+            ],
+            output_description="返回批量写入结果，通常包含接收数量、成功数量、失败项或后端确认信息。",
+            tags=["membership", "audit", "logging", "batch", "task_tool"],
             input_schema={
                 "type": "object",
                 "properties": {
@@ -1120,6 +1437,379 @@ class MembershipMCPServer(BaseMCPServer):
                 "required": ["events"]
             },
             handler=self.submit_audit_events_batch
+        ))
+
+    def _register_root_admin_tools(self) -> None:
+        """Register root/admin task tools."""
+        auth_props = {
+            "auth_token": {
+                "type": "string",
+                "description": "Authentication token (optional, will use default if not provided)"
+            },
+            "tenant_id": {
+                "type": "integer",
+                "description": "Tenant ID header override when the API requires tenant context"
+            }
+        }
+
+        self.register_tool(Tool(
+            name="manage_tenant",
+            description="Root tenant administration task tool for tenant lifecycle and tenant-member management",
+            semantic_description="面向 root/admin 的租户管理任务工具。统一处理租户列表、详情、创建、更新、启用、停用、初始化，以及成员加入或移出租户等系统管理操作。",
+            use_cases=["创建租户", "初始化租户", "启用或停用租户", "把成员加入或移出租户", "检查多租户一致性和统计信息"],
+            natural_language_examples=["创建一个新的租户 Acme", "初始化租户 33", "把成员 15 加入租户 33", "检查当前系统的租户一致性"],
+            output_description="根据 action 返回租户列表、租户详情、初始化结果、租户成员操作结果、统计信息或一致性检查结果。",
+            tags=["membership", "root", "tenant", "admin", "task_tool"],
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["list", "get", "create", "update", "activate", "deactivate", "initialize", "add_member", "remove_member", "statistics", "validate_system_orgs", "validate_consistency"],
+                        "description": "Tenant administration action"
+                    },
+                    "tenant_id_param": {"type": "integer", "description": "Target tenant ID for tenant-specific actions"},
+                    "member_id": {"type": "integer", "description": "Member ID for add_member/remove_member actions"},
+                    "name": {"type": "string", "description": "Tenant name for create/update"},
+                    "description": {"type": "string", "description": "Tenant description for create/update"},
+                    "page": {"type": "integer", "description": "Page number for list action", "default": 1},
+                    "page_size": {"type": "integer", "description": "Page size for list action", "default": 20},
+                    **auth_props,
+                },
+                "required": ["action"]
+            },
+            handler=self.manage_tenant
+        ))
+
+        self.register_tool(Tool(
+            name="manage_agent",
+            description="Root/admin task tool for agent inventory, credentials, policy, and execution logs",
+            semantic_description="面向 root/admin 的 Agent 管理任务工具。统一处理 Agent 列表、凭证查看与创建、策略查看与更新，以及运行日志查询。",
+            use_cases=["查看所有 Agent", "给 Agent 创建凭证", "检查或更新 Agent policy", "查看 Agent 运行日志"],
+            natural_language_examples=["列出所有 llm agents", "给 agent 12 创建 api_key 凭证", "查看 agent 12 的策略", "查询 agent 12 最近的执行日志"],
+            output_description="根据 action 返回 agent 列表、凭证信息、策略对象、更新结果或日志列表。",
+            tags=["membership", "root", "agent", "admin", "task_tool"],
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["list", "get_credentials", "create_credentials", "get_policy", "update_policy", "get_logs"],
+                        "description": "Agent administration action"
+                    },
+                    "agent_id": {"type": "integer", "description": "Agent/member ID for credential/policy/log actions"},
+                    "page": {"type": "integer", "description": "Page number for list/log actions", "default": 1},
+                    "page_size": {"type": "integer", "description": "Page size for list/log actions", "default": 20},
+                    "agent_type": {"type": "string", "description": "Agent type filter for list action"},
+                    "owner_id": {"type": "integer", "description": "Owner member ID filter for list action"},
+                    "credential_type": {"type": "string", "enum": ["api_key", "oauth2", "jwt"], "description": "Credential type for create_credentials"},
+                    "expires_at": {"type": "string", "format": "date-time", "description": "Credential expiration for create_credentials"},
+                    "scope_json": {"type": "object", "description": "Credential scope for create_credentials"},
+                    "policy": {"type": "object", "description": "Full AgentPolicy object for update_policy"},
+                    "start_time": {"type": "string", "format": "date-time", "description": "Log query start time"},
+                    "end_time": {"type": "string", "format": "date-time", "description": "Log query end time"},
+                    "status": {"type": "string", "description": "Log status filter"},
+                    **auth_props,
+                },
+                "required": ["action"]
+            },
+            handler=self.manage_agent
+        ))
+
+        self.register_tool(Tool(
+            name="manage_settings",
+            description="Root/admin task tool for global or org-level settings management",
+            semantic_description="面向 root/admin 的系统配置管理任务工具。统一处理配置列表、单项读取、添加或更新配置、删除配置。",
+            use_cases=["查看全局配置", "查询某个 org 的配置项", "更新系统设置", "删除指定配置"],
+            natural_language_examples=["列出全局 settings", "查看 org 0 的 llm.default_provider 配置", "把 org 0 的某个 key 改成新值", "删除 org 12 的某个设置"],
+            output_description="根据 action 返回 settings 列表、单项配置对象、写入结果或删除结果。",
+            tags=["membership", "root", "settings", "admin", "task_tool"],
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "get", "upsert", "delete"], "description": "Settings administration action"},
+                    "org_id": {"type": "integer", "description": "Organization ID, use 0 for global settings", "default": 0},
+                    "key": {"type": "string", "description": "Setting key"},
+                    "value": {"type": "string", "description": "Setting value for upsert"},
+                    "description": {"type": "string", "description": "Optional setting description for upsert"},
+                    **auth_props,
+                },
+                "required": ["action"]
+            },
+            handler=self.manage_settings
+        ))
+
+        self.register_tool(Tool(
+            name="query_audit_logs",
+            description="Root/admin task tool for querying audit logs with common filters",
+            semantic_description="面向 root/admin 的审计日志查询任务工具。支持按时间范围、操作者、动作类型和目标类型检索审计记录。",
+            use_cases=["排查系统操作历史", "查询某成员的管理动作", "按时间窗口检查安全审计事件"],
+            natural_language_examples=["查询今天的审计日志", "查看 operator 19 的所有管理操作", "列出 target_type 为 member 的审计记录"],
+            output_description="返回审计日志数组和分页信息，日志包含 operator_id、action_type、target_type、before_data、after_data、created_at 等字段。",
+            tags=["membership", "root", "audit", "admin", "task_tool"],
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "page": {"type": "integer", "description": "Page number", "default": 1},
+                    "page_size": {"type": "integer", "description": "Page size", "default": 20},
+                    "start_time": {"type": "string", "format": "date-time", "description": "Query start time"},
+                    "end_time": {"type": "string", "format": "date-time", "description": "Query end time"},
+                    "operator_id": {"type": "integer", "description": "Operator member ID"},
+                    "action_type": {"type": "string", "description": "Action type filter"},
+                    "target_type": {"type": "string", "description": "Target type filter"},
+                    **auth_props,
+                }
+            },
+            handler=self.query_audit_logs
+        ))
+
+        self.register_tool(Tool(
+            name="manage_auth_session",
+            description="Admin/session task tool for login, token issuing, OTP flow, auto-login, token refresh, and authz checks",
+            semantic_description="认证与会话管理任务工具。支持密码登录、令牌签发、OTP 请求与登录、自动登录、刷新 access token，以及 resource/action 级鉴权检查。适合管理员或系统集成场景，不应作为普通查询工具默认使用。",
+            use_cases=["登录获取 access token", "给 agent 或集成签发 token", "发起 OTP 登录流程", "刷新 access token", "检查某资源动作是否允许"],
+            natural_language_examples=["用用户名密码登录", "给这个 client 签发 access token", "请求 admin@example.com 的登录 OTP", "刷新当前 access token", "检查某成员是否允许访问某资源"],
+            output_description="根据 action 返回 access_token、refresh_token、otp_token、expires_in、member_id、allowed 或错误信息。",
+            tags=["membership", "auth", "session", "admin", "sensitive_tool", "task_tool"],
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["issue_token", "login", "request_otp", "otp_login", "auto_login", "refresh_token", "check_authz"], "description": "Authentication/session action"},
+                    "grant_type": {"type": "string", "enum": ["password", "client_credentials", "refresh_token"], "description": "Grant type for issue_token"},
+                    "username": {"type": "string", "description": "Username for login or password grant"},
+                    "password": {"type": "string", "description": "Password for login or password grant"},
+                    "device_id": {"type": "string", "description": "Device ID for login or auto-login"},
+                    "client_id": {"type": "string", "description": "Client ID for client_credentials grant"},
+                    "client_secret": {"type": "string", "description": "Client secret for client_credentials grant"},
+                    "refresh_token": {"type": "string", "description": "Refresh token for issue_token(refresh_token)"},
+                    "contact": {"type": "string", "description": "Phone number or email for OTP"},
+                    "channel": {"type": "string", "enum": ["SMS", "EMAIL"], "description": "OTP delivery channel"},
+                    "purpose": {"type": "string", "enum": ["login", "register", "reset_password"], "description": "OTP purpose"},
+                    "otp_code": {"type": "string", "description": "OTP verification code"},
+                    "otp_token": {"type": "string", "description": "OTP token returned by request_otp"},
+                    "auto_login_token": {"type": "string", "description": "Auto login token"},
+                    "resource": {"type": "string", "description": "Resource code for check_authz"},
+                    "permission_action": {"type": "string", "description": "Action name for check_authz"},
+                    "org_id": {"type": "integer", "description": "Organization context for check_authz"},
+                    "on_behalf_of": {"type": "integer", "description": "Member ID to evaluate authz on behalf of"},
+                    **auth_props,
+                },
+                "required": ["action"]
+            },
+            handler=self.manage_auth_session
+        ))
+
+    def _register_llm_tools(self) -> None:
+        """Register Membership LLM provider/config management tools."""
+        auth_props = {
+            "auth_token": {
+                "type": "string",
+                "description": "Authentication token (optional, will use default if not provided)"
+            },
+            "tenant_id": {
+                "type": "integer",
+                "description": "Tenant ID (optional, will use default if not provided)"
+            }
+        }
+        provider_props = {
+            "name": {"type": "string", "description": "Provider unique name"},
+            "type": {"type": "string", "description": "Provider type, e.g. openai, qwen, ollama"},
+            "baseUrl": {"type": "string", "description": "OpenAI-compatible API base URL"},
+            "model": {"type": "string", "description": "Default model name"},
+            "apiKeyRef": {"type": "string", "description": "Environment variable reference for the API key, e.g. QWEN_API_KEY"},
+            "apiKey": {"type": "string", "description": "Direct API key value when the Membership API accepts it; prefer apiKeyRef for safer configuration"},
+            "enabled": {"type": "boolean", "description": "Whether this provider is enabled", "default": True},
+            "active": {"type": "boolean", "description": "Whether this provider is the active/default provider", "default": False},
+            "priority": {"type": "integer", "description": "Provider priority, smaller usually means higher priority", "default": 1},
+            "timeout": {"type": "integer", "description": "Timeout in seconds", "default": 30},
+            "temperature": {"type": "number", "description": "Default temperature", "default": 0.7},
+            "maxTokens": {"type": "integer", "description": "Default max tokens", "default": 2048},
+            "topP": {"type": "number", "description": "Default top_p", "default": 1.0},
+            "costPer1kTokens": {"type": "number", "description": "Estimated cost per 1k tokens", "default": 0.001},
+            "capabilities": {"type": "array", "items": {"type": "string"}, "description": "Capability tags, e.g. chat, embedding, vision"},
+            "contextWindow": {"type": "integer", "description": "Context window size", "default": 4096},
+            "supportsMultimodal": {"type": "boolean", "description": "Whether multimodal inputs are supported", "default": False},
+            "supportedFormats": {"type": "array", "items": {"type": "string"}, "description": "Supported input formats"},
+            "embeddingDimensions": {"type": "integer", "description": "Embedding dimensions when this provider supports embeddings"},
+            "metadata": {"type": "object", "description": "Provider metadata"}
+        }
+
+        self.register_tool(Tool(
+            name="list_llm_providers",
+            description="List all LLM providers managed by Membership",
+            semantic_description="列出 Membership 统一管理的 LLM Provider 配置，用于查看可用模型提供方、模型、能力、启停状态和优先级。",
+            use_cases=["查看所有 LLM providers", "检查可用模型配置", "查看 DocIntel 可用的 LLM 提供方"],
+            natural_language_examples=["列出所有 LLM providers", "有哪些模型提供商？", "show llm providers"],
+            output_description="返回 providers 数组，包含 name、type、baseUrl、model、enabled、active、priority、capabilities 等字段。",
+            tags=["membership", "llm", "provider", "list", "task_tool"],
+            input_schema={"type": "object", "properties": {**auth_props}},
+            handler=self.list_llm_providers
+        ))
+
+        self.register_tool(Tool(
+            name="get_llm_provider",
+            description="Get a specific LLM provider by name",
+            semantic_description="按 Provider 名称查询单个 LLM Provider 配置详情。",
+            use_cases=["查看指定 LLM provider", "检查某个模型提供方配置"],
+            natural_language_examples=["查看 qwen provider", "get llm provider deepseek"],
+            output_description="返回指定 Provider 的完整配置。",
+            tags=["membership", "llm", "provider", "profile", "task_tool"],
+            input_schema={
+                "type": "object",
+                "properties": {"name": provider_props["name"], **auth_props},
+                "required": ["name"]
+            },
+            handler=self.get_llm_provider
+        ))
+
+        self.register_tool(Tool(
+            name="create_llm_provider",
+            description="Create an LLM provider",
+            semantic_description="创建新的 LLM Provider 配置，写入 Membership 共享 MongoDB 的 llm_providers 集合。",
+            use_cases=["新增 LLM provider", "配置新的模型提供商", "添加 OpenAI-compatible LLM"],
+            natural_language_examples=["创建一个 qwen LLM provider", "add an OpenAI compatible provider"],
+            output_description="返回创建后的 Provider 配置。",
+            tags=["membership", "llm", "provider", "create", "task_tool"],
+            input_schema={
+                "type": "object",
+                "properties": {**provider_props, **auth_props},
+                "required": ["name"]
+            },
+            handler=self.create_llm_provider
+        ))
+
+        self.register_tool(Tool(
+            name="update_llm_provider",
+            description="Update an LLM provider",
+            semantic_description="更新指定 LLM Provider 配置。name 用于路径定位，其余字段作为配置内容发送。",
+            use_cases=["更新 LLM provider", "修改模型名称/baseUrl/能力/优先级"],
+            natural_language_examples=["把 qwen provider 的 model 改成 qwen-plus", "update deepseek provider"],
+            output_description="返回更新后的 Provider 配置。",
+            tags=["membership", "llm", "provider", "update", "task_tool"],
+            input_schema={
+                "type": "object",
+                "properties": {**provider_props, **auth_props},
+                "required": ["name"]
+            },
+            handler=self.update_llm_provider
+        ))
+
+        self.register_tool(Tool(
+            name="delete_llm_provider",
+            description="Delete an LLM provider by name",
+            semantic_description="删除指定名称的 LLM Provider 配置。",
+            use_cases=["删除 LLM provider", "移除模型提供方配置"],
+            natural_language_examples=["删除 qwen provider", "remove llm provider deepseek"],
+            output_description="返回 deleted Provider 名称。",
+            tags=["membership", "llm", "provider", "delete", "task_tool"],
+            input_schema={
+                "type": "object",
+                "properties": {"name": provider_props["name"], **auth_props},
+                "required": ["name"]
+            },
+            handler=self.delete_llm_provider
+        ))
+
+        self.register_tool(Tool(
+            name="set_llm_provider_enabled",
+            description="Enable or disable an LLM provider",
+            semantic_description="启用或禁用指定 LLM Provider。",
+            use_cases=["启用 LLM provider", "禁用某个模型提供商"],
+            natural_language_examples=["禁用 qwen provider", "enable llm provider deepseek"],
+            output_description="返回 name 和 enabled 状态。",
+            tags=["membership", "llm", "provider", "enabled", "task_tool"],
+            input_schema={
+                "type": "object",
+                "properties": {"name": provider_props["name"], "enabled": provider_props["enabled"], **auth_props},
+                "required": ["name", "enabled"]
+            },
+            handler=self.set_llm_provider_enabled
+        ))
+
+        self.register_tool(Tool(
+            name="set_active_llm_provider",
+            description="Set an LLM provider as the active/default provider",
+            semantic_description="将指定 LLM Provider 设置为当前租户默认/active Provider。",
+            use_cases=["设置默认 LLM provider", "切换当前活动模型提供方"],
+            natural_language_examples=["把 qwen 设置为默认 LLM provider", "set deepseek as active provider"],
+            output_description="返回 success 和 active Provider 名称。",
+            tags=["membership", "llm", "provider", "active", "default", "task_tool"],
+            input_schema={
+                "type": "object",
+                "properties": {"name": provider_props["name"], **auth_props},
+                "required": ["name"]
+            },
+            handler=self.set_active_llm_provider
+        ))
+
+        purpose_prop = {
+            "type": "string",
+            "description": "LLM usage purpose, e.g. translation, docintel.chat, docintel.embedding, docintel.extraction"
+        }
+        self.register_tool(Tool(
+            name="list_llm_usage_configs",
+            description="List all LLM usage configurations",
+            semantic_description="列出当前租户的 LLM 用途配置，例如 translation、docintel.chat、docintel.embedding、docintel.extraction 使用哪些 Provider。",
+            use_cases=["查看 LLM 用途配置", "检查 DocIntel chat/embedding 使用哪个 provider"],
+            natural_language_examples=["列出 LLM usage configs", "DocIntel chat 用哪个 provider？"],
+            output_description="返回 configs 数组和 total。",
+            tags=["membership", "llm", "usage_config", "list", "task_tool"],
+            input_schema={"type": "object", "properties": {**auth_props}},
+            handler=self.list_llm_usage_configs
+        ))
+
+        self.register_tool(Tool(
+            name="upsert_llm_usage_config",
+            description="Create or update an LLM usage configuration",
+            semantic_description="为指定用途保存 LLM Provider 配置。providerNames 是有序列表，第一个为主 provider，后续为 fallback。",
+            use_cases=["配置 DocIntel chat 的 provider", "配置 embedding provider", "设置 translation fallback providers"],
+            natural_language_examples=["把 docintel.chat 配置为 qwen, deepseek", "set embedding providers to qwen-embedding"],
+            output_description="返回 success 和 config。",
+            tags=["membership", "llm", "usage_config", "upsert", "task_tool"],
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "purpose": purpose_prop,
+                    "providerNames": {"type": "array", "items": {"type": "string"}, "description": "Ordered provider names"},
+                    "fallbackToEnv": {"type": "boolean", "description": "Whether to fall back to .env config", "default": True},
+                    "description": {"type": "string", "description": "Optional note"},
+                    **auth_props
+                },
+                "required": ["purpose", "providerNames"]
+            },
+            handler=self.upsert_llm_usage_config
+        ))
+
+        self.register_tool(Tool(
+            name="delete_llm_usage_config",
+            description="Delete an LLM usage configuration",
+            semantic_description="删除指定用途的 LLM 配置，之后将回退到环境变量配置。",
+            use_cases=["删除某个 LLM 用途配置", "恢复到环境变量 LLM 配置"],
+            natural_language_examples=["删除 docintel.chat 的 LLM 配置", "remove translation usage config"],
+            output_description="返回 success 和 deleted purpose。",
+            tags=["membership", "llm", "usage_config", "delete", "task_tool"],
+            input_schema={
+                "type": "object",
+                "properties": {"purpose": purpose_prop, **auth_props},
+                "required": ["purpose"]
+            },
+            handler=self.delete_llm_usage_config
+        ))
+
+        self.register_tool(Tool(
+            name="resolve_llm_usage_config",
+            description="Preview resolved providers for an LLM usage purpose",
+            semantic_description="预览指定用途实际解析出的 LLM Provider 列表，包括 MongoDB 配置和 .env fallback。",
+            use_cases=["查看 DocIntel chat 实际会用哪些 provider", "检查 embedding provider 解析结果"],
+            natural_language_examples=["解析 docintel.chat 的 provider", "which providers are used for docintel.embedding?"],
+            output_description="返回 purpose、count、providers，providers 包含 name、model、baseUrl、source。",
+            tags=["membership", "llm", "usage_config", "resolve", "task_tool"],
+            input_schema={
+                "type": "object",
+                "properties": {"purpose": purpose_prop, **auth_props},
+                "required": ["purpose"]
+            },
+            handler=self.resolve_llm_usage_config
         ))
 
     async def list_members(
@@ -2121,6 +2811,78 @@ class MembershipMCPServer(BaseMCPServer):
                 error_code="LIST_ORGS_FAILED"
             )
 
+    async def lookup_org(
+        self,
+        query: str,
+        orgs: Optional[List[Dict[str, Any]]] = None,
+        match_fields: Optional[List[str]] = None,
+        auth_token: Optional[str] = None,
+        tenant_id: Optional[int] = None,
+    ) -> ToolResult:
+        """Resolve an organization ID from organization details or by querying the membership service."""
+        try:
+            if not query or not str(query).strip():
+                return ToolResult.error(
+                    content="Organization query cannot be empty",
+                    error_code="INVALID_ORG_QUERY",
+                )
+
+            effective_token = auth_token or self.auth_token
+            effective_tenant = tenant_id or self.tenant_id or 1
+            fields = match_fields or ["name", "code", "type"]
+
+            candidate_orgs = orgs
+            if not candidate_orgs:
+                if not effective_token:
+                    return ToolResult.error(
+                        content="Authentication required to fetch organizations for org ID resolution.",
+                        error_code="AUTH_REQUIRED",
+                    )
+                response = await self.http_client.execute(
+                    command="GET /v2/orgs",
+                    params={"query": {"page": 1, "limit": 100, "search": query}},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                candidate_orgs = response.get("data", response.get("orgs", []))
+
+            candidate_orgs = [item for item in (candidate_orgs or []) if isinstance(item, dict)]
+            matches = self._resolve_generic_matches(candidate_orgs, query, fields)
+
+            if len(matches) == 1:
+                org = matches[0]
+                result = {
+                    "status": "unique",
+                    "query": query,
+                    "org_id": org.get("id"),
+                    "matched_org": org,
+                    "reason": "matched using exact organization fields",
+                    "match_method": "deterministic",
+                }
+                return ToolResult.success(
+                    content=f"Resolved organization '{query}' to ID {org.get('id')}",
+                    data=result,
+                )
+
+            if not matches:
+                return ToolResult.error(
+                    content=f"No organization matched query '{query}'",
+                    error_code="ORG_NOT_FOUND",
+                    data={"status": "not_found", "query": query},
+                )
+
+            return ToolResult.error(
+                content=f"Multiple organizations matched query '{query}'",
+                error_code="MULTIPLE_ORG_MATCHES",
+                data={"status": "multiple", "query": query, "candidates": matches[:10]},
+            )
+        except Exception as e:
+            logger.error(f"Error resolving organization ID for query '{query}': {e}")
+            return ToolResult.error(
+                content=f"Failed to resolve organization ID: {str(e)}",
+                error_code="LOOKUP_ORG_FAILED",
+            )
+
     async def get_org(
         self,
         org_id: Optional[str] = None,
@@ -2295,6 +3057,80 @@ class MembershipMCPServer(BaseMCPServer):
             return ToolResult.error(
                 content=f"Failed to get organization hierarchy: {str(e)}",
                 error_code="GET_ORG_HIERARCHY_FAILED"
+            )
+
+    async def render_org_chart(
+        self,
+        org_id: Optional[str] = None,
+        query: Optional[str] = None,
+        include_inactive: bool = True,
+        max_nodes: int = 80,
+        direction: str = "TD",
+        auth_token: Optional[str] = None,
+        tenant_id: Optional[int] = None,
+    ) -> ToolResult:
+        """Render organization tree as Mermaid markdown."""
+        try:
+            effective_token = auth_token or self.auth_token
+            effective_tenant = tenant_id or self.tenant_id or 1
+
+            resolved_org_id: Optional[int] = None
+            resolved_org: Optional[Dict[str, Any]] = None
+            if org_id or query:
+                resolved_org_id_str, resolved_org = await self._resolve_org_id(
+                    org_id=org_id,
+                    query=query,
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                resolved_org_id = int(resolved_org_id_str)
+
+            response = await self.http_client.execute(
+                command="GET /v2/orgs",
+                params={"query": {"page": 1, "limit": max(100, min(max_nodes * 2, 500))}},
+                auth_token=effective_token,
+                tenant_id=effective_tenant,
+            )
+            orgs = response.get("data", response.get("orgs", [])) if isinstance(response, dict) else []
+            chart = self._org_mermaid_body(
+                orgs=orgs,
+                root_org_id=resolved_org_id,
+                include_inactive=include_inactive,
+                max_nodes=max(10, min(max_nodes, 200)),
+                direction=direction if direction in {"TD", "LR"} else "TD",
+            )
+            if chart.get("error"):
+                return ToolResult.error(
+                    content=chart["error"],
+                    error_code="RENDER_ORG_CHART_FAILED",
+                )
+
+            title = self._safe_mermaid_label((resolved_org or {}).get("name") or f"Tenant {effective_tenant} Organization Structure")
+            markdown = f"## {title}\n\n```mermaid\n{chart['mermaid']}\n```"
+            if chart.get("truncated"):
+                markdown += f"\n\nShowing first {chart['displayed']} of {chart['total_available']} organizations."
+
+            rendered_ids = {str(i) for i in chart["ordered_ids"]}
+            rendered_nodes = [org for org in orgs if isinstance(org, dict) and str(org.get("id")) in rendered_ids]
+
+            return ToolResult.success(
+                content=markdown,
+                data={
+                    "markdown": markdown,
+                    "mermaid": chart["mermaid"],
+                    "org_count": chart["displayed"],
+                    "total_available": chart["total_available"],
+                    "root_org": chart.get("root_org") or resolved_org,
+                    "nodes": rendered_nodes,
+                    "resolved_org_id": resolved_org_id,
+                    "resolved_org": resolved_org,
+                }
+            )
+        except Exception as e:
+            logger.error(f"Error rendering org chart for {org_id or query}: {e}")
+            return ToolResult.error(
+                content=f"Failed to render organization chart: {str(e)}",
+                error_code="RENDER_ORG_CHART_FAILED"
             )
 
     async def create_org(
@@ -2478,32 +3314,148 @@ class MembershipMCPServer(BaseMCPServer):
                 error_code="DELETE_ORG_FAILED"
             )
 
-    async def assign_member_to_org(self, member_id: str, org_id: str, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
+    async def assign_member_to_org(
+        self,
+        member_id: Optional[str] = None,
+        org_id: Optional[str] = None,
+        member_query: Optional[str] = None,
+        org_query: Optional[str] = None,
+        auth_token: Optional[str] = None,
+        tenant_id: Optional[int] = None,
+    ) -> ToolResult:
         """Assign a member to an organization unit."""
         try:
-            payload = {"org_id": org_id}
+            effective_token = auth_token or self.auth_token
+            effective_tenant = tenant_id or self.tenant_id
+
+            resolved_member_id = member_id
+            resolved_member = None
+            if not resolved_member_id:
+                if not member_query:
+                    return ToolResult.error(
+                        content="Either member_id or member_query is required",
+                        error_code="INVALID_MEMBER_LOOKUP",
+                    )
+                member_lookup = await self.get_member_id(
+                    query=member_query,
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                if member_lookup.is_error:
+                    return member_lookup
+                resolved_member_id = str(member_lookup.data.get("member_id"))
+                resolved_member = member_lookup.data.get("matched_member")
+
+            resolved_org_id, resolved_org = await self._resolve_org_id(
+                org_id=org_id,
+                query=org_query,
+                auth_token=effective_token,
+                tenant_id=effective_tenant,
+            )
+
+            payload = {"org_id": resolved_org_id}
             params = {
                 "path": {
-                    "member_id": member_id
+                    "member_id": resolved_member_id
                 },
                 "body": payload
             }
             response = await self.http_client.execute(
                 command="POST /v2/members/{member_id}/orgs",
                 params=params,
-                auth_token=auth_token or self.auth_token,
-                tenant_id=tenant_id or self.tenant_id
+                auth_token=effective_token,
+                tenant_id=effective_tenant
             )
 
             return ToolResult.success(
-                content=f"Assigned member {member_id} to organization {org_id}",
-                data=response
+                content=f"Assigned member {resolved_member_id} to organization {resolved_org_id}",
+                data={
+                    **(response if isinstance(response, dict) else {"result": response}),
+                    "member_id": resolved_member_id,
+                    "org_id": resolved_org_id,
+                    "resolved_member": resolved_member,
+                    "resolved_org": resolved_org,
+                }
             )
         except Exception as e:
             logger.error(f"Error assigning member to organization: {e}")
             return ToolResult.error(
                 content=f"Failed to assign member to organization: {str(e)}",
                 error_code="ASSIGN_MEMBER_TO_ORG_FAILED"
+            )
+
+    async def get_member_roles(
+        self,
+        member_id: Optional[str] = None,
+        query: Optional[str] = None,
+        org_id: Optional[int] = None,
+        auth_token: Optional[str] = None,
+        tenant_id: Optional[int] = None,
+    ) -> ToolResult:
+        """Get all roles a member has."""
+        try:
+            effective_token = auth_token or self.auth_token
+            effective_tenant = tenant_id or self.tenant_id or 1
+            resolved_member_id = member_id
+            resolved_member = None
+
+            if not resolved_member_id:
+                if not query:
+                    return ToolResult.error(
+                        content="Either member_id or query is required",
+                        error_code="INVALID_MEMBER_LOOKUP",
+                    )
+                member_lookup = await self.get_member_id(
+                    query=query,
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                if member_lookup.is_error:
+                    return member_lookup
+                resolved_member_id = str(member_lookup.data.get("member_id"))
+                resolved_member = member_lookup.data.get("matched_member")
+
+            params: Dict[str, Any] = {"path": {"id": int(resolved_member_id)}}
+            if org_id is not None:
+                params["query"] = {"org_id": org_id}
+
+            response = await self.http_client.execute(
+                command="GET /v2/members/{id}/roles",
+                params=params,
+                auth_token=effective_token,
+                tenant_id=effective_tenant,
+            )
+            roles = response if isinstance(response, list) else response.get("data", response.get("roles", []))
+            if not isinstance(roles, list):
+                roles = []
+
+            role_names = []
+            for role_entry in roles[:5]:
+                if not isinstance(role_entry, dict):
+                    continue
+                role = role_entry.get("role") if isinstance(role_entry.get("role"), dict) else role_entry
+                role_names.append(role.get("name") or role.get("code") or str(role.get("id", "Unknown")))
+            content_lines = [f"Found {len(roles)} roles for member {resolved_member_id}"]
+            if role_names:
+                content_lines.append("\nRoles:")
+                content_lines.extend(f"  • {name}" for name in role_names)
+                if len(roles) > len(role_names):
+                    content_lines.append(f"  ... and {len(roles) - len(role_names)} more")
+
+            return ToolResult.success(
+                content="\n".join(content_lines),
+                data={
+                    "member_id": str(resolved_member_id),
+                    "resolved_member": resolved_member,
+                    "roles": roles,
+                    "raw": response,
+                },
+            )
+        except Exception as e:
+            logger.error(f"Error getting member roles for {member_id or query}: {e}")
+            return ToolResult.error(
+                content=f"Failed to get member roles: {str(e)}",
+                error_code="GET_MEMBER_ROLES_FAILED",
             )
 
     async def get_member_orgs(self, member_id: str, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
@@ -2533,6 +3485,737 @@ class MembershipMCPServer(BaseMCPServer):
                 error_code="GET_MEMBER_ORGS_FAILED"
             )
 
+    def _build_llm_provider_payload(self, **kwargs: Any) -> Dict[str, Any]:
+        allowed_fields = [
+            "name", "type", "baseUrl", "model", "apiKeyRef", "apiKey",
+            "enabled", "active", "priority", "timeout", "temperature",
+            "maxTokens", "topP", "costPer1kTokens", "capabilities",
+            "contextWindow", "supportsMultimodal", "supportedFormats",
+            "embeddingDimensions", "metadata",
+        ]
+        return {key: kwargs[key] for key in allowed_fields if kwargs.get(key) is not None}
+
+    async def list_llm_providers(self, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
+        """List all LLM providers."""
+        try:
+            response = await self.http_client.execute(
+                command="GET /v2/llm/providers",
+                params={},
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id,
+            )
+            providers = response.get("providers", []) if isinstance(response, dict) else []
+            return ToolResult.success(content=f"Found {len(providers)} LLM providers", data=response)
+        except Exception as e:
+            logger.error(f"Error listing LLM providers: {e}")
+            return ToolResult.error(content=f"Failed to list LLM providers: {str(e)}", error_code="LIST_LLM_PROVIDERS_FAILED")
+
+    async def get_llm_provider(self, name: str, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
+        """Get an LLM provider by name."""
+        try:
+            response = await self.http_client.execute(
+                command="GET /v2/llm/providers/{name}",
+                params={"path": {"name": name}},
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id,
+            )
+            return ToolResult.success(content=f"Retrieved LLM provider {name}", data=response)
+        except Exception as e:
+            logger.error(f"Error getting LLM provider {name}: {e}")
+            return ToolResult.error(content=f"Failed to get LLM provider: {str(e)}", error_code="GET_LLM_PROVIDER_FAILED")
+
+    async def create_llm_provider(
+        self,
+        name: str,
+        type: Optional[str] = None,
+        baseUrl: Optional[str] = None,
+        model: Optional[str] = None,
+        apiKeyRef: Optional[str] = None,
+        apiKey: Optional[str] = None,
+        enabled: Optional[bool] = None,
+        active: Optional[bool] = None,
+        priority: Optional[int] = None,
+        timeout: Optional[int] = None,
+        temperature: Optional[float] = None,
+        maxTokens: Optional[int] = None,
+        topP: Optional[float] = None,
+        costPer1kTokens: Optional[float] = None,
+        capabilities: Optional[List[str]] = None,
+        contextWindow: Optional[int] = None,
+        supportsMultimodal: Optional[bool] = None,
+        supportedFormats: Optional[List[str]] = None,
+        embeddingDimensions: Optional[int] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        auth_token: Optional[str] = None,
+        tenant_id: Optional[int] = None,
+    ) -> ToolResult:
+        """Create an LLM provider."""
+        try:
+            payload = self._build_llm_provider_payload(**locals())
+            response = await self.http_client.execute(
+                command="POST /v2/llm/providers",
+                params={"body": payload},
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id,
+            )
+            return ToolResult.success(content=f"Created LLM provider {name}", data=response)
+        except Exception as e:
+            logger.error(f"Error creating LLM provider {name}: {e}")
+            return ToolResult.error(content=f"Failed to create LLM provider: {str(e)}", error_code="CREATE_LLM_PROVIDER_FAILED")
+
+    async def update_llm_provider(
+        self,
+        name: str,
+        type: Optional[str] = None,
+        baseUrl: Optional[str] = None,
+        model: Optional[str] = None,
+        apiKeyRef: Optional[str] = None,
+        apiKey: Optional[str] = None,
+        enabled: Optional[bool] = None,
+        active: Optional[bool] = None,
+        priority: Optional[int] = None,
+        timeout: Optional[int] = None,
+        temperature: Optional[float] = None,
+        maxTokens: Optional[int] = None,
+        topP: Optional[float] = None,
+        costPer1kTokens: Optional[float] = None,
+        capabilities: Optional[List[str]] = None,
+        contextWindow: Optional[int] = None,
+        supportsMultimodal: Optional[bool] = None,
+        supportedFormats: Optional[List[str]] = None,
+        embeddingDimensions: Optional[int] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        auth_token: Optional[str] = None,
+        tenant_id: Optional[int] = None,
+    ) -> ToolResult:
+        """Update an LLM provider."""
+        try:
+            payload = self._build_llm_provider_payload(**locals())
+            response = await self.http_client.execute(
+                command="PUT /v2/llm/providers/{name}",
+                params={"path": {"name": name}, "body": payload},
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id,
+            )
+            return ToolResult.success(content=f"Updated LLM provider {name}", data=response)
+        except Exception as e:
+            logger.error(f"Error updating LLM provider {name}: {e}")
+            return ToolResult.error(content=f"Failed to update LLM provider: {str(e)}", error_code="UPDATE_LLM_PROVIDER_FAILED")
+
+    async def delete_llm_provider(self, name: str, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
+        """Delete an LLM provider by name."""
+        try:
+            response = await self.http_client.execute(
+                command="DELETE /v2/llm/providers/{name}",
+                params={"path": {"name": name}},
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id,
+            )
+            return ToolResult.success(content=f"Deleted LLM provider {name}", data=response)
+        except Exception as e:
+            logger.error(f"Error deleting LLM provider {name}: {e}")
+            return ToolResult.error(content=f"Failed to delete LLM provider: {str(e)}", error_code="DELETE_LLM_PROVIDER_FAILED")
+
+    async def set_llm_provider_enabled(self, name: str, enabled: bool, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
+        """Enable or disable an LLM provider."""
+        try:
+            response = await self.http_client.execute(
+                command="PATCH /v2/llm/providers/{name}/enabled",
+                params={"path": {"name": name}, "body": {"enabled": enabled}},
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id,
+            )
+            return ToolResult.success(content=f"Set LLM provider {name} enabled={enabled}", data=response)
+        except Exception as e:
+            logger.error(f"Error setting LLM provider enabled state for {name}: {e}")
+            return ToolResult.error(content=f"Failed to set LLM provider enabled state: {str(e)}", error_code="SET_LLM_PROVIDER_ENABLED_FAILED")
+
+    async def set_active_llm_provider(self, name: str, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
+        """Set an LLM provider as active/default."""
+        try:
+            response = await self.http_client.execute(
+                command="PATCH /v2/llm/providers/{name}/active",
+                params={"path": {"name": name}},
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id,
+            )
+            return ToolResult.success(content=f"Set active LLM provider to {name}", data=response)
+        except Exception as e:
+            logger.error(f"Error setting active LLM provider {name}: {e}")
+            return ToolResult.error(content=f"Failed to set active LLM provider: {str(e)}", error_code="SET_ACTIVE_LLM_PROVIDER_FAILED")
+
+    async def list_llm_usage_configs(self, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
+        """List LLM usage configs."""
+        try:
+            response = await self.http_client.execute(
+                command="GET /v2/llm/usage-configs",
+                params={},
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id,
+            )
+            configs = response.get("configs", []) if isinstance(response, dict) else []
+            return ToolResult.success(content=f"Found {len(configs)} LLM usage configs", data=response)
+        except Exception as e:
+            logger.error(f"Error listing LLM usage configs: {e}")
+            return ToolResult.error(content=f"Failed to list LLM usage configs: {str(e)}", error_code="LIST_LLM_USAGE_CONFIGS_FAILED")
+
+    async def upsert_llm_usage_config(
+        self,
+        purpose: str,
+        providerNames: List[str],
+        fallbackToEnv: bool = True,
+        description: Optional[str] = None,
+        auth_token: Optional[str] = None,
+        tenant_id: Optional[int] = None,
+    ) -> ToolResult:
+        """Create or update an LLM usage config."""
+        try:
+            payload: Dict[str, Any] = {"providerNames": providerNames, "fallbackToEnv": fallbackToEnv}
+            if description is not None:
+                payload["description"] = description
+            response = await self.http_client.execute(
+                command="PUT /v2/llm/usage-configs/{purpose}",
+                params={"path": {"purpose": purpose}, "body": payload},
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id,
+            )
+            return ToolResult.success(content=f"Saved LLM usage config {purpose}", data=response)
+        except Exception as e:
+            logger.error(f"Error upserting LLM usage config {purpose}: {e}")
+            return ToolResult.error(content=f"Failed to upsert LLM usage config: {str(e)}", error_code="UPSERT_LLM_USAGE_CONFIG_FAILED")
+
+    async def delete_llm_usage_config(self, purpose: str, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
+        """Delete an LLM usage config."""
+        try:
+            response = await self.http_client.execute(
+                command="DELETE /v2/llm/usage-configs/{purpose}",
+                params={"path": {"purpose": purpose}},
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id,
+            )
+            return ToolResult.success(content=f"Deleted LLM usage config {purpose}", data=response)
+        except Exception as e:
+            logger.error(f"Error deleting LLM usage config {purpose}: {e}")
+            return ToolResult.error(content=f"Failed to delete LLM usage config: {str(e)}", error_code="DELETE_LLM_USAGE_CONFIG_FAILED")
+
+    async def resolve_llm_usage_config(self, purpose: str, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
+        """Preview resolved providers for an LLM usage purpose."""
+        try:
+            response = await self.http_client.execute(
+                command="GET /v2/llm/usage-configs/{purpose}/resolved",
+                params={"path": {"purpose": purpose}},
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id,
+            )
+            count = response.get("count", 0) if isinstance(response, dict) else 0
+            return ToolResult.success(content=f"Resolved {count} providers for LLM usage {purpose}", data=response)
+        except Exception as e:
+            logger.error(f"Error resolving LLM usage config {purpose}: {e}")
+            return ToolResult.error(content=f"Failed to resolve LLM usage config: {str(e)}", error_code="RESOLVE_LLM_USAGE_CONFIG_FAILED")
+
+    async def manage_tenant(
+        self,
+        action: str,
+        tenant_id_param: Optional[int] = None,
+        member_id: Optional[int] = None,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        page: int = 1,
+        page_size: int = 20,
+        auth_token: Optional[str] = None,
+        tenant_id: Optional[int] = None,
+    ) -> ToolResult:
+        """Root/admin tenant management task tool."""
+        try:
+            effective_token = auth_token or self.auth_token
+            effective_tenant = tenant_id or self.tenant_id or 1
+            normalized_action = str(action or "").strip().lower()
+
+            if normalized_action == "list":
+                response = await self.http_client.execute(
+                    command="GET /v2/tenants",
+                    params={"query": {"page": max(1, page), "pageSize": max(1, min(100, page_size))}},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                tenants = response.get("data", []) if isinstance(response, dict) else []
+                return ToolResult.success(content=f"Found {len(tenants)} tenants", data=response)
+
+            if normalized_action == "statistics":
+                response = await self.http_client.execute(
+                    command="GET /v2/tenants/statistics",
+                    params={},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                total = response.get("totalTenants", "unknown") if isinstance(response, dict) else "unknown"
+                return ToolResult.success(content=f"Tenant statistics loaded, totalTenants={total}", data=response)
+
+            if normalized_action == "validate_system_orgs":
+                response = await self.http_client.execute(
+                    command="GET /v2/tenants/validate-system-organizations",
+                    params={},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                valid = response.get("valid") if isinstance(response, dict) else None
+                return ToolResult.success(content=f"System organization validation complete, valid={valid}", data=response)
+
+            if normalized_action == "validate_consistency":
+                response = await self.http_client.execute(
+                    command="GET /v2/tenants/validate-consistency",
+                    params={},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                consistent = response.get("consistent") if isinstance(response, dict) else None
+                return ToolResult.success(content=f"Tenant consistency validation complete, consistent={consistent}", data=response)
+
+            if normalized_action in {"get", "update", "activate", "deactivate", "initialize", "add_member", "remove_member"} and tenant_id_param is None:
+                return ToolResult.error(content="tenant_id_param is required for this tenant action", error_code="TENANT_ID_REQUIRED")
+
+            if normalized_action == "get":
+                response = await self.http_client.execute(
+                    command="GET /v2/tenants/{id}",
+                    params={"path": {"id": int(tenant_id_param)}},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                return ToolResult.success(content=f"Loaded tenant {tenant_id_param}", data=response)
+
+            if normalized_action == "create":
+                if not name:
+                    return ToolResult.error(content="name is required for create tenant", error_code="TENANT_NAME_REQUIRED")
+                body = {"name": name}
+                if description is not None:
+                    body["description"] = description
+                response = await self.http_client.execute(
+                    command="POST /v2/tenants",
+                    params={"body": body},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                return ToolResult.success(content=f"Created tenant {name}", data=response)
+
+            if normalized_action == "update":
+                if name is None and description is None:
+                    return ToolResult.error(content="name or description is required for update tenant", error_code="TENANT_UPDATE_FIELDS_REQUIRED")
+                body: Dict[str, Any] = {}
+                if name is not None:
+                    body["name"] = name
+                if description is not None:
+                    body["description"] = description
+                response = await self.http_client.execute(
+                    command="PATCH /v2/tenants/{id}",
+                    params={"path": {"id": int(tenant_id_param)}, "body": body},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                return ToolResult.success(content=f"Updated tenant {tenant_id_param}", data=response)
+
+            if normalized_action == "activate":
+                response = await self.http_client.execute(
+                    command="POST /v2/tenants/{id}/activate",
+                    params={"path": {"id": int(tenant_id_param)}},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                return ToolResult.success(content=f"Activated tenant {tenant_id_param}", data=response)
+
+            if normalized_action == "deactivate":
+                response = await self.http_client.execute(
+                    command="POST /v2/tenants/{id}/deactivate",
+                    params={"path": {"id": int(tenant_id_param)}},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                return ToolResult.success(content=f"Deactivated tenant {tenant_id_param}", data=response)
+
+            if normalized_action == "initialize":
+                response = await self.http_client.execute(
+                    command="POST /v2/tenants/{tenantId}/initialize",
+                    params={"path": {"tenantId": int(tenant_id_param)}},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                status = response.get("status") if isinstance(response, dict) else "unknown"
+                return ToolResult.success(content=f"Initialized tenant {tenant_id_param}, status={status}", data=response)
+
+            if normalized_action in {"add_member", "remove_member"} and member_id is None:
+                return ToolResult.error(content="member_id is required for tenant member actions", error_code="MEMBER_ID_REQUIRED")
+
+            if normalized_action == "add_member":
+                response = await self.http_client.execute(
+                    command="POST /v2/tenants/{tenantId}/members/{memberId}",
+                    params={"path": {"tenantId": int(tenant_id_param), "memberId": int(member_id)}},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                return ToolResult.success(content=f"Added member {member_id} to tenant {tenant_id_param}", data=response)
+
+            if normalized_action == "remove_member":
+                response = await self.http_client.execute(
+                    command="DELETE /v2/tenants/{tenantId}/members/{memberId}",
+                    params={"path": {"tenantId": int(tenant_id_param), "memberId": int(member_id)}},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                return ToolResult.success(content=f"Removed member {member_id} from tenant {tenant_id_param}", data=response)
+
+            return ToolResult.error(content=f"Unsupported tenant action: {action}", error_code="UNSUPPORTED_TENANT_ACTION")
+        except Exception as e:
+            logger.error(f"Error managing tenant action={action}: {e}")
+            return ToolResult.error(content=f"Failed to manage tenant: {str(e)}", error_code="MANAGE_TENANT_FAILED")
+
+    async def manage_agent(
+        self,
+        action: str,
+        agent_id: Optional[int] = None,
+        page: int = 1,
+        page_size: int = 20,
+        agent_type: Optional[str] = None,
+        owner_id: Optional[int] = None,
+        credential_type: Optional[str] = None,
+        expires_at: Optional[str] = None,
+        scope_json: Optional[Dict[str, Any]] = None,
+        policy: Optional[Dict[str, Any]] = None,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
+        status: Optional[str] = None,
+        auth_token: Optional[str] = None,
+        tenant_id: Optional[int] = None,
+    ) -> ToolResult:
+        """Root/admin agent management task tool."""
+        try:
+            effective_token = auth_token or self.auth_token
+            effective_tenant = tenant_id or self.tenant_id or 1
+            normalized_action = str(action or "").strip().lower()
+
+            if normalized_action == "list":
+                query: Dict[str, Any] = {"page": max(1, page), "pageSize": max(1, min(100, page_size))}
+                if agent_type:
+                    query["agent_type"] = agent_type
+                if owner_id is not None:
+                    query["owner_id"] = owner_id
+                response = await self.http_client.execute(
+                    command="GET /v2/agents",
+                    params={"query": query},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                agents = response.get("data", []) if isinstance(response, dict) else []
+                return ToolResult.success(content=f"Found {len(agents)} agents", data=response)
+
+            if agent_id is None:
+                return ToolResult.error(content="agent_id is required for this agent action", error_code="AGENT_ID_REQUIRED")
+
+            if normalized_action == "get_credentials":
+                response = await self.http_client.execute(
+                    command="GET /v2/agents/{id}/credentials",
+                    params={"path": {"id": int(agent_id)}},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                count = len(response) if isinstance(response, list) else len(response.get("data", []))
+                return ToolResult.success(content=f"Loaded {count} credentials for agent {agent_id}", data=response)
+
+            if normalized_action == "create_credentials":
+                if not credential_type:
+                    return ToolResult.error(content="credential_type is required for create_credentials", error_code="CREDENTIAL_TYPE_REQUIRED")
+                body: Dict[str, Any] = {"type": credential_type}
+                if expires_at is not None:
+                    body["expires_at"] = expires_at
+                if scope_json is not None:
+                    body["scope_json"] = scope_json
+                response = await self.http_client.execute(
+                    command="POST /v2/agents/{id}/credentials",
+                    params={"path": {"id": int(agent_id)}, "body": body},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                return ToolResult.success(content=f"Created {credential_type} credential for agent {agent_id}", data=response)
+
+            if normalized_action == "get_policy":
+                response = await self.http_client.execute(
+                    command="GET /v2/agents/{id}/policy",
+                    params={"path": {"id": int(agent_id)}},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                return ToolResult.success(content=f"Loaded policy for agent {agent_id}", data=response)
+
+            if normalized_action == "update_policy":
+                if not policy:
+                    return ToolResult.error(content="policy is required for update_policy", error_code="POLICY_REQUIRED")
+                response = await self.http_client.execute(
+                    command="PUT /v2/agents/{id}/policy",
+                    params={"path": {"id": int(agent_id)}, "body": policy},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                return ToolResult.success(content=f"Updated policy for agent {agent_id}", data=response)
+
+            if normalized_action == "get_logs":
+                query = {"page": max(1, page), "pageSize": max(1, min(100, page_size))}
+                if start_time:
+                    query["start_time"] = start_time
+                if end_time:
+                    query["end_time"] = end_time
+                if status:
+                    query["status"] = status
+                response = await self.http_client.execute(
+                    command="GET /v2/agents/{id}/logs",
+                    params={"path": {"id": int(agent_id)}, "query": query},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                logs = response.get("data", []) if isinstance(response, dict) else []
+                return ToolResult.success(content=f"Loaded {len(logs)} logs for agent {agent_id}", data=response)
+
+            return ToolResult.error(content=f"Unsupported agent action: {action}", error_code="UNSUPPORTED_AGENT_ACTION")
+        except Exception as e:
+            logger.error(f"Error managing agent action={action}: {e}")
+            return ToolResult.error(content=f"Failed to manage agent: {str(e)}", error_code="MANAGE_AGENT_FAILED")
+
+    async def manage_settings(
+        self,
+        action: str,
+        org_id: int = 0,
+        key: Optional[str] = None,
+        value: Optional[str] = None,
+        description: Optional[str] = None,
+        auth_token: Optional[str] = None,
+        tenant_id: Optional[int] = None,
+    ) -> ToolResult:
+        """Root/admin settings management task tool."""
+        try:
+            effective_token = auth_token or self.auth_token
+            effective_tenant = tenant_id or self.tenant_id or 1
+            normalized_action = str(action or "").strip().lower()
+
+            if normalized_action == "list":
+                query: Dict[str, Any] = {"org_id": org_id}
+                if key:
+                    query["key"] = key
+                response = await self.http_client.execute(
+                    command="GET /v2/settings",
+                    params={"query": query},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                count = len(response) if isinstance(response, list) else len(response.get("data", []))
+                return ToolResult.success(content=f"Loaded {count} settings", data=response)
+
+            if not key:
+                return ToolResult.error(content="key is required for this settings action", error_code="SETTING_KEY_REQUIRED")
+
+            if normalized_action == "get":
+                response = await self.http_client.execute(
+                    command="GET /v2/settings/{org_id}/{key}",
+                    params={"path": {"org_id": int(org_id), "key": key}},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                return ToolResult.success(content=f"Loaded setting {key} for org {org_id}", data=response)
+
+            if normalized_action == "upsert":
+                if value is None:
+                    return ToolResult.error(content="value is required for upsert setting", error_code="SETTING_VALUE_REQUIRED")
+                body: Dict[str, Any] = {"org_id": int(org_id), "key": key, "value": value}
+                if description is not None:
+                    body["description"] = description
+                response = await self.http_client.execute(
+                    command="POST /v2/settings",
+                    params={"body": body},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                return ToolResult.success(content=f"Saved setting {key} for org {org_id}", data=response)
+
+            if normalized_action == "delete":
+                response = await self.http_client.execute(
+                    command="DELETE /v2/settings/{org_id}/{key}",
+                    params={"path": {"org_id": int(org_id), "key": key}},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                return ToolResult.success(content=f"Deleted setting {key} for org {org_id}", data=response)
+
+            return ToolResult.error(content=f"Unsupported settings action: {action}", error_code="UNSUPPORTED_SETTINGS_ACTION")
+        except Exception as e:
+            logger.error(f"Error managing settings action={action}: {e}")
+            return ToolResult.error(content=f"Failed to manage settings: {str(e)}", error_code="MANAGE_SETTINGS_FAILED")
+
+    async def query_audit_logs(
+        self,
+        page: int = 1,
+        page_size: int = 20,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
+        operator_id: Optional[int] = None,
+        action_type: Optional[str] = None,
+        target_type: Optional[str] = None,
+        auth_token: Optional[str] = None,
+        tenant_id: Optional[int] = None,
+    ) -> ToolResult:
+        """Query audit logs."""
+        try:
+            query: Dict[str, Any] = {"page": max(1, page), "pageSize": max(1, min(100, page_size))}
+            if start_time:
+                query["start_time"] = start_time
+            if end_time:
+                query["end_time"] = end_time
+            if operator_id is not None:
+                query["operator_id"] = operator_id
+            if action_type:
+                query["action_type"] = action_type
+            if target_type:
+                query["target_type"] = target_type
+
+            response = await self.http_client.execute(
+                command="GET /v2/audit/logs",
+                params={"query": query},
+                auth_token=auth_token or self.auth_token,
+                tenant_id=tenant_id or self.tenant_id or 1,
+            )
+            logs = response.get("data", []) if isinstance(response, dict) else []
+            return ToolResult.success(content=f"Found {len(logs)} audit logs", data=response)
+        except Exception as e:
+            logger.error(f"Error querying audit logs: {e}")
+            return ToolResult.error(content=f"Failed to query audit logs: {str(e)}", error_code="QUERY_AUDIT_LOGS_FAILED")
+
+    async def manage_auth_session(
+        self,
+        action: str,
+        grant_type: Optional[str] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        device_id: Optional[str] = None,
+        client_id: Optional[str] = None,
+        client_secret: Optional[str] = None,
+        refresh_token: Optional[str] = None,
+        contact: Optional[str] = None,
+        channel: Optional[str] = None,
+        purpose: Optional[str] = None,
+        otp_code: Optional[str] = None,
+        otp_token: Optional[str] = None,
+        auto_login_token: Optional[str] = None,
+        resource: Optional[str] = None,
+        permission_action: Optional[str] = None,
+        org_id: Optional[int] = None,
+        on_behalf_of: Optional[int] = None,
+        auth_token: Optional[str] = None,
+        tenant_id: Optional[int] = None,
+    ) -> ToolResult:
+        """Authentication/session management task tool."""
+        try:
+            effective_token = auth_token or self.auth_token
+            effective_tenant = tenant_id or self.tenant_id or 1
+            normalized_action = str(action or "").strip().lower()
+
+            if normalized_action == "issue_token":
+                if not grant_type:
+                    return ToolResult.error(content="grant_type is required for issue_token", error_code="GRANT_TYPE_REQUIRED")
+                body: Dict[str, Any] = {"grant_type": grant_type}
+                if username is not None:
+                    body["username"] = username
+                if password is not None:
+                    body["password"] = password
+                if client_id is not None:
+                    body["client_id"] = client_id
+                if client_secret is not None:
+                    body["client_secret"] = client_secret
+                if refresh_token is not None:
+                    body["refresh_token"] = refresh_token
+                response = await self.http_client.execute(
+                    command="POST /v2/auth/token",
+                    params={"body": body},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                return ToolResult.success(content="Issued access token", data=response)
+
+            if normalized_action == "login":
+                if not username or not password:
+                    return ToolResult.error(content="username and password are required for login", error_code="LOGIN_FIELDS_REQUIRED")
+                body = {"username": username, "password": password}
+                if device_id is not None:
+                    body["device_id"] = device_id
+                response = await self.http_client.execute(
+                    command="POST /v2/auth/login",
+                    params={"body": body},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                return ToolResult.success(content=f"Login completed for {username}", data=response)
+
+            if normalized_action == "request_otp":
+                if not contact or not channel:
+                    return ToolResult.error(content="contact and channel are required for request_otp", error_code="OTP_REQUEST_FIELDS_REQUIRED")
+                body = {"contact": contact, "channel": channel}
+                if purpose is not None:
+                    body["purpose"] = purpose
+                response = await self.http_client.execute(
+                    command="POST /v2/auth/otp-request",
+                    params={"body": body},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                return ToolResult.success(content=f"OTP requested for {contact}", data=response)
+
+            if normalized_action == "otp_login":
+                if not contact or not otp_code or not otp_token:
+                    return ToolResult.error(content="contact, otp_code, and otp_token are required for otp_login", error_code="OTP_LOGIN_FIELDS_REQUIRED")
+                response = await self.http_client.execute(
+                    command="POST /v2/auth/otp-login",
+                    params={"body": {"contact": contact, "otp_code": otp_code, "otp_token": otp_token}},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                return ToolResult.success(content=f"OTP login completed for {contact}", data=response)
+
+            if normalized_action == "auto_login":
+                if not device_id or not auto_login_token:
+                    return ToolResult.error(content="device_id and auto_login_token are required for auto_login", error_code="AUTO_LOGIN_FIELDS_REQUIRED")
+                response = await self.http_client.execute(
+                    command="POST /v2/auth/auto-login",
+                    params={"body": {"device_id": device_id, "auto_login_token": auto_login_token}},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                return ToolResult.success(content="Auto login completed", data=response)
+
+            if normalized_action == "refresh_token":
+                response = await self.http_client.execute(
+                    command="POST /v2/auth/token/refresh",
+                    params={},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                return ToolResult.success(content="Refreshed access token", data=response)
+
+            if normalized_action == "check_authz":
+                if not resource or not permission_action:
+                    return ToolResult.error(content="resource and permission_action are required for check_authz", error_code="AUTHZ_FIELDS_REQUIRED")
+                body: Dict[str, Any] = {"resource": resource, "action": permission_action}
+                if org_id is not None:
+                    body["org_id"] = org_id
+                if on_behalf_of is not None:
+                    body["on_behalf_of"] = on_behalf_of
+                response = await self.http_client.execute(
+                    command="POST /v2/authz/check",
+                    params={"body": body},
+                    auth_token=effective_token,
+                    tenant_id=effective_tenant,
+                )
+                allowed = response.get("allowed") if isinstance(response, dict) else None
+                return ToolResult.success(content=f"Authorization checked, allowed={allowed}", data=response)
+
+            return ToolResult.error(content=f"Unsupported auth/session action: {action}", error_code="UNSUPPORTED_AUTH_ACTION")
+        except Exception as e:
+            logger.error(f"Error managing auth/session action={action}: {e}")
+            return ToolResult.error(content=f"Failed to manage auth/session: {str(e)}", error_code="MANAGE_AUTH_SESSION_FAILED")
+
     async def get_subject_permissions(
         self,
         subject_type: str,
@@ -2547,6 +4230,15 @@ class MembershipMCPServer(BaseMCPServer):
             normalized_subject_type = str(subject_type or "").strip().lower()
             effective_token = auth_token or self.auth_token
             effective_tenant = tenant_id or self.tenant_id or 1
+
+            # Detect language from query for bilingual output
+            def _detect_language(text: Optional[str]) -> str:
+                if not text:
+                    return 'en'
+                chinese_chars = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+                return 'zh' if chinese_chars > len(text) * 0.3 else 'en'
+
+            is_zh = _detect_language(query)
 
             if normalized_subject_type not in {"member", "role", "org"}:
                 return ToolResult.error(
@@ -2587,7 +4279,7 @@ class MembershipMCPServer(BaseMCPServer):
                 )
                 permissions = response.get("direct_permissions", [])
                 return ToolResult.success(
-                    content=f"Found {len(permissions)} direct permissions for member {resolved_subject_id}",
+                    content=f"找到 {len(permissions)} 个直接权限" if is_zh else f"Found {len(permissions)} direct permissions for member {resolved_subject_id}",
                     data={
                         "subject_type": "member",
                         "subject_id": str(resolved_subject_id),
@@ -2613,7 +4305,7 @@ class MembershipMCPServer(BaseMCPServer):
                 )
                 permissions = response if isinstance(response, list) else response.get("data", response.get("permissions", []))
                 return ToolResult.success(
-                    content=f"Found {len(permissions)} direct permissions for role {resolved_subject_id}",
+                    content=f"找到 {len(permissions)} 个直接权限" if is_zh else f"Found {len(permissions)} direct permissions for role {resolved_subject_id}",
                     data={
                         "subject_type": "role",
                         "subject_id": str(resolved_subject_id),
@@ -2631,8 +4323,9 @@ class MembershipMCPServer(BaseMCPServer):
                 tenant_id=effective_tenant,
             )
             limitations.append("Organization direct-permission API is not available in the public Membership command set.")
+            org_content = f"组织 {resolved_org_id} 已解析，但组织直接权限查询功能暂不可用" if is_zh else f"Organization {resolved_org_id} was resolved, but direct organization permission lookup is unavailable."
             return ToolResult.success(
-                content=f"Organization {resolved_org_id} was resolved, but direct organization permission lookup is unavailable.",
+                content=org_content,
                 data={
                     "subject_type": "org",
                     "subject_id": str(resolved_org_id),
@@ -2682,9 +4375,9 @@ class MembershipMCPServer(BaseMCPServer):
                 auth_token=effective_token,
                 tenant_id=effective_tenant,
             )
-            roles_response = await self.http_client.execute(
-                command="GET /v2/members/{id}/roles",
-                params=params,
+            roles_result = await self.get_member_roles(
+                member_id=resolved_member_id,
+                org_id=org_id,
                 auth_token=effective_token,
                 tenant_id=effective_tenant,
             )
@@ -2723,7 +4416,11 @@ class MembershipMCPServer(BaseMCPServer):
 
             direct_permissions = permissions_response.get("direct_permissions", [])
             role_permissions = permissions_response.get("role_permissions", [])
-            member_roles = roles_response if isinstance(roles_response, list) else roles_response.get("data", roles_response.get("roles", []))
+            member_roles = []
+            roles_response: Any = None
+            if not roles_result.is_error:
+                roles_response = roles_result.data.get("raw")
+                member_roles = roles_result.data.get("roles", [])
 
             effective_permissions: List[Dict[str, Any]] = []
             permission_keys = set()
@@ -2876,6 +4573,117 @@ class MembershipMCPServer(BaseMCPServer):
         """Generate a normalized role code from role name."""
         raw = re.sub(r"[^A-Za-z0-9]+", "_", (name or "").strip().upper()).strip("_")
         return raw or "ROLE"
+
+    def _safe_mermaid_label(self, value: Any) -> str:
+        text = str(value or "").strip()
+        text = text.replace('"', "'").replace("\n", " ").replace("\r", " ")
+        return re.sub(r"\s+", " ", text)
+
+    def _org_parent_id(self, org: Dict[str, Any]) -> Optional[int]:
+        for key in ("parent_id", "parentId", "parentOrgId"):
+            if org.get(key) is not None:
+                try:
+                    return int(org.get(key))
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    def _org_active(self, org: Dict[str, Any]) -> bool:
+        status = str(org.get("status") or "").strip().lower()
+        if status:
+            return status in {"active", "enabled", "true"}
+        active_value = org.get("active")
+        if isinstance(active_value, bool):
+            return active_value
+        return True
+
+    def _org_mermaid_body(
+        self,
+        orgs: List[Dict[str, Any]],
+        root_org_id: Optional[int],
+        include_inactive: bool,
+        max_nodes: int,
+        direction: str,
+    ) -> Dict[str, Any]:
+        filtered_orgs = [org for org in orgs if isinstance(org, dict)]
+        if not include_inactive:
+            filtered_orgs = [org for org in filtered_orgs if self._org_active(org)]
+
+        org_map: Dict[int, Dict[str, Any]] = {}
+        children_map: Dict[Optional[int], List[int]] = {}
+        for org in filtered_orgs:
+            try:
+                org_id = int(org.get("id"))
+            except (TypeError, ValueError):
+                continue
+            org_map[org_id] = org
+            parent_id = self._org_parent_id(org)
+            children_map.setdefault(parent_id, []).append(org_id)
+
+        if root_org_id is not None and root_org_id not in org_map:
+            return {"error": f"Organization {root_org_id} not found in chart data"}
+
+        root_candidates: List[int]
+        if root_org_id is not None:
+            root_candidates = [root_org_id]
+        else:
+            root_candidates = sorted(children_map.get(None, []))
+            if not root_candidates:
+                root_candidates = sorted(
+                    [org_id for org_id, org in org_map.items() if self._org_parent_id(org) not in org_map]
+                )
+
+        visited: set[int] = set()
+        ordered_ids: List[int] = []
+        edges: List[tuple[int, int]] = []
+
+        def walk(node_id: int) -> None:
+            if node_id in visited or len(ordered_ids) >= max_nodes:
+                return
+            visited.add(node_id)
+            ordered_ids.append(node_id)
+            for child_id in sorted(children_map.get(node_id, [])):
+                if child_id not in org_map or len(ordered_ids) >= max_nodes:
+                    continue
+                edges.append((node_id, child_id))
+                walk(child_id)
+
+        for candidate in root_candidates:
+            walk(candidate)
+            if len(ordered_ids) >= max_nodes:
+                break
+
+        if not ordered_ids:
+            return {"error": "No organizations available to render"}
+
+        lines = [f"graph {direction}"]
+        for org_id in ordered_ids:
+            org = org_map[org_id]
+            label_parts = [self._safe_mermaid_label(org.get("name") or f"Org {org_id}")]
+            org_type = org.get("type")
+            if org_type:
+                label_parts.append(f"({self._safe_mermaid_label(org_type)})")
+            if not self._org_active(org):
+                label_parts.append("[inactive]")
+            label = " ".join(label_parts)
+            lines.append(f'  org_{org_id}["{label}"]')
+
+        for parent_id, child_id in edges:
+            if parent_id in visited and child_id in visited:
+                lines.append(f"  org_{parent_id} --> org_{child_id}")
+
+        truncated = len(org_map) > len(ordered_ids)
+        if truncated:
+            lines.append(f"  truncated_note[\"Showing first {len(ordered_ids)} of {len(org_map)} org nodes\"]")
+
+        return {
+            "mermaid": "\n".join(lines),
+            "ordered_ids": ordered_ids,
+            "truncated": truncated,
+            "total_available": len(org_map),
+            "displayed": len(ordered_ids),
+            "root_org": org_map.get(root_candidates[0]) if root_candidates else None,
+        }
 
     def _build_unique_role_code(self, base_code: str, org_id: int, existing_codes: set) -> str:
         """

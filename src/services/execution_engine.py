@@ -28,6 +28,93 @@ from src.mcp.registry import MCPRegistry
 logger = logging.getLogger(__name__)
 
 
+def _detect_language(text: str) -> str:
+    """Detect if text is primarily Chinese or English.
+
+    Returns 'zh' if Chinese characters dominate, 'en' otherwise.
+    """
+    if not text:
+        return 'en'
+    chinese_chars = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+    return 'zh' if chinese_chars > len(text) * 0.3 else 'en'
+
+
+class BilingualMessages:
+    """Bilingual message templates for execution-related user-facing responses."""
+
+    MESSAGES = {
+        'zh': {
+            'detail_success': '已完成 {succeeded}/{total} 个步骤',
+            'detail_failed': '{failed} 个步骤失败',
+            'detail_skipped': '{skipped} 个步骤已跳过',
+            'detail_running': '系统仍在执行中',
+            'completed_headline': '任务已完成',
+            'completed_summary': '系统已经完成这次请求，正式结果会以自然语言为主，内部步骤已放到调试详情中。',
+            'completed_debug': '如需查看具体命令、参数和原始响应，可展开调试详情。',
+            'running_headline': '任务执行中',
+            'running_summary': '系统正在按规划执行这次请求，界面会持续更新当前进度。',
+            'running_next': '等待执行完成后查看最终结果。',
+            'running_debug': '调试详情中可查看当前步骤状态和原始返回。',
+            'failed_headline': '任务未完整完成',
+            'failed_summary': '执行过程中出现异常，系统暂时没有完成这次请求。',
+            'failed_next': '可重试本次请求；如需排查原因，请展开调试详情。',
+            'failed_debug': '调试详情中保留了失败步骤、错误信息和原始响应。',
+            'updated_headline': '任务状态已更新',
+            'updated_summary': '系统已更新这次请求的执行状态。',
+            'updated_debug': '调试详情中可查看完整步骤轨迹。',
+            'repair_missing_dep_summary': '当前计划缺少中间依赖解析步骤，导致后续命令没有拿到必需参数。',
+            'repair_missing_dep_action': '请继续教系统如何从上一步结果中提取正确参数，然后重新规划执行。',
+            'repair_missing_dep_prompt': '请告诉我：应该怎样从前一步结果中取得后续命令需要的参数。例如是先从成员列表中按 username/fullName 匹配，再提取 member_id。',
+            'repair_jsonpath_summary': '当前计划引用了前一步结果，但结果提取路径或中间步骤设计不正确。',
+            'repair_jsonpath_action': '请补充更合适的中间步骤或更明确的结果提取方式。',
+            'repair_jsonpath_prompt': '请告诉我应如何从已有结果中更准确地定位目标对象或提取字段。',
+            'repair_business_action': '这是已确认的业务结果，不需要继续技术修复。',
+            'repair_unknown_summary': '执行失败，暂时无法自动修复。',
+            'repair_unknown_action': '请查看调试详情后决定是否人工提供新的求解思路。',
+        },
+        'en': {
+            'detail_success': 'Completed {succeeded}/{total} steps',
+            'detail_failed': '{failed} steps failed',
+            'detail_skipped': '{skipped} steps skipped',
+            'detail_running': 'System is still executing',
+            'completed_headline': 'Task completed',
+            'completed_summary': 'The system has completed this request. Results are returned in natural language; internal steps are in debug details.',
+            'completed_debug': 'Expand debug details to view specific commands, parameters, and raw responses.',
+            'running_headline': 'Task executing',
+            'running_summary': 'The system is executing the plan. Progress will update continuously.',
+            'running_next': 'Wait for execution to complete and view final results.',
+            'running_debug': 'Debug details show current step status and raw responses.',
+            'failed_headline': 'Task not fully completed',
+            'failed_summary': 'An exception occurred during execution. The system has not completed this request yet.',
+            'failed_next': 'You can retry this request; expand debug details to investigate.',
+            'failed_debug': 'Debug details contain failed steps, error messages, and raw responses.',
+            'updated_headline': 'Task status updated',
+            'updated_summary': 'The system has updated the execution status for this request.',
+            'updated_debug': 'Debug details show complete step trajectory.',
+            'repair_missing_dep_summary': 'The plan is missing intermediate dependency resolution steps, so subsequent commands did not receive required parameters.',
+            'repair_missing_dep_action': 'Please teach the system how to extract correct parameters from previous step results, then replan and execute.',
+            'repair_missing_dep_prompt': 'Tell me: How should I obtain parameters needed by subsequent commands from previous step results? For example, match by username/fullName from member list first, then extract member_id.',
+            'repair_jsonpath_summary': 'The plan references previous step results, but the extraction path or intermediate step design is incorrect.',
+            'repair_jsonpath_action': 'Please add more appropriate intermediate steps or a clearer extraction method.',
+            'repair_jsonpath_prompt': 'Tell me how to more accurately locate target objects or extract fields from existing results.',
+            'repair_business_action': 'This is a confirmed business outcome; no further technical repair is needed.',
+            'repair_unknown_summary': 'Execution failed; cannot auto-repair for now.',
+            'repair_unknown_action': 'View debug details and decide whether to provide new manual guidance.',
+        },
+    }
+
+    @classmethod
+    def get(cls, language: str, key: str, **kwargs) -> str:
+        """Get a message in the specified language with optional formatting."""
+        msg = cls.MESSAGES.get(language, cls.MESSAGES['en']).get(key, '')
+        if kwargs and msg:
+            try:
+                return msg.format(**kwargs)
+            except (KeyError, ValueError):
+                return msg
+        return msg
+
+
 class ExecutionEngine:
     """执行引擎 - 负责执行计划并管理步骤"""
 
@@ -93,17 +180,17 @@ class ExecutionEngine:
 
         raise ValueError(f"找到多个名为“{member_name}”的成员，无法唯一确定目标。")
 
-    def _friendly_execution_error(self, error_message: Optional[str]) -> Optional[str]:
+    def _friendly_execution_error(self, error_message: Optional[str], language: str = 'zh') -> Optional[str]:
         if not error_message:
             return None
         lowered = error_message.lower()
         if "could not resolve" in lowered or "failed to extract values" in lowered:
-            return "执行在解析上一步结果时失败了，因此无法继续后续查询。"
+            return BilingualMessages.get(language, 'repair_unknown_summary')
         if "missing 1 required positional argument" in lowered or "invalid parameters for tool" in lowered:
-            return "执行在参数解析阶段失败了，系统没有成功把上一步查到的信息传给下一步。"
+            return BilingualMessages.get(language, 'repair_missing_dep_summary')
         if "timed out" in lowered:
-            return "执行超时了，系统暂时没有完成这次查询。"
-        return "执行过程中出现异常，系统暂时没有完成这次请求。"
+            return BilingualMessages.get(language, 'failed_summary')
+        return BilingualMessages.get(language, 'failed_summary')
 
     def _build_repair_hint(
         self,
@@ -118,25 +205,25 @@ class ExecutionEngine:
         error_text = failed_step.error_message or execution.error_message or ""
         lowered = error_text.lower()
 
+        # Detect language from error text or goal
+        language = _detect_language(execution.original_goal or error_text)
+
         if "missing 1 required positional argument" in lowered or "invalid parameters for tool" in lowered:
             return RepairHint(
                 recoverable=True,
                 category="missing_intermediate_dependency",
-                summary="当前计划缺少中间依赖解析步骤，导致后续命令没有拿到必需参数。",
-                suggestedAction="请继续教系统如何从上一步结果中提取正确参数，然后重新规划执行。",
-                coachPrompt=(
-                    "请告诉我：应该怎样从前一步结果中取得后续命令需要的参数。"
-                    "例如是先从成员列表中按 username/fullName 匹配，再提取 member_id。"
-                ),
+                summary=BilingualMessages.get(language, 'repair_missing_dep_summary'),
+                suggestedAction=BilingualMessages.get(language, 'repair_missing_dep_action'),
+                coachPrompt=BilingualMessages.get(language, 'repair_missing_dep_prompt'),
             )
 
         if "could not resolve" in lowered or "failed to extract values" in lowered:
             return RepairHint(
                 recoverable=True,
                 category="jsonpath_or_result_extraction_failure",
-                summary="当前计划引用了前一步结果，但结果提取路径或中间步骤设计不正确。",
-                suggestedAction="请补充更合适的中间步骤或更明确的结果提取方式。",
-                coachPrompt="请告诉我应如何从已有结果中更准确地定位目标对象或提取字段。",
+                summary=BilingualMessages.get(language, 'repair_jsonpath_summary'),
+                suggestedAction=BilingualMessages.get(language, 'repair_jsonpath_action'),
+                coachPrompt=BilingualMessages.get(language, 'repair_jsonpath_prompt'),
             )
 
         if "未找到成员" in error_text or "找到多个名为" in error_text:
@@ -144,15 +231,15 @@ class ExecutionEngine:
                 recoverable=False,
                 category="business_outcome_confirmed",
                 summary=error_text,
-                suggestedAction="这是已确认的业务结果，不需要继续技术修复。",
+                suggestedAction=BilingualMessages.get(language, 'repair_business_action'),
                 coachPrompt=None,
             )
 
         return RepairHint(
             recoverable=False,
             category="unknown_execution_failure",
-            summary=self._friendly_execution_error(error_text) or "执行失败，暂时无法自动修复。",
-            suggestedAction="请查看调试详情后决定是否人工提供新的求解思路。",
+            summary=self._friendly_execution_error(error_text, language) or BilingualMessages.get(language, 'repair_unknown_summary'),
+            suggestedAction=BilingualMessages.get(language, 'repair_unknown_action'),
             coachPrompt=None,
         )
 
@@ -167,53 +254,59 @@ class ExecutionEngine:
         skipped = sum(1 for step in steps if step.status == StepStatus.SKIPPED)
         running = sum(1 for step in steps if step.status == StepStatus.RUNNING)
 
+        # Detect language from original goal
+        goal_text = execution.original_goal or ""
+        logger.info(f"[Bilingual] _build_execution_user_summary: original_goal={goal_text[:100] if goal_text else 'EMPTY'}")
+        language = _detect_language(goal_text)
+        logger.info(f"[Bilingual] detected language: {language} (goal_text len={len(goal_text)})")
+
         detail_lines = []
         if total:
-            detail_lines.append(f"已完成 {succeeded}/{total} 个步骤")
+            detail_lines.append(BilingualMessages.get(language, 'detail_success', succeeded=succeeded, total=total))
         if failed:
-            detail_lines.append(f"{failed} 个步骤失败")
+            detail_lines.append(BilingualMessages.get(language, 'detail_failed', failed=failed))
         if skipped:
-            detail_lines.append(f"{skipped} 个步骤已跳过")
+            detail_lines.append(BilingualMessages.get(language, 'detail_skipped', skipped=skipped))
         if running:
-            detail_lines.append("系统仍在执行中")
+            detail_lines.append(BilingualMessages.get(language, 'detail_running'))
 
         if execution.status == ExecutionStatus.COMPLETED:
             return UserExecutionSummary(
-                headline="任务已完成",
-                summary="系统已经完成这次请求，正式结果会以自然语言为主，内部步骤已放到调试详情中。",
+                headline=BilingualMessages.get(language, 'completed_headline'),
+                summary=BilingualMessages.get(language, 'completed_summary'),
                 statusLabel="completed",
                 nextAction=None,
                 detailLines=detail_lines,
-                debugHint="如需查看具体命令、参数和原始响应，可展开调试详情。",
+                debugHint=BilingualMessages.get(language, 'completed_debug'),
             )
 
         if execution.status == ExecutionStatus.RUNNING:
             return UserExecutionSummary(
-                headline="任务执行中",
-                summary="系统正在按规划执行这次请求，界面会持续更新当前进度。",
+                headline=BilingualMessages.get(language, 'running_headline'),
+                summary=BilingualMessages.get(language, 'running_summary'),
                 statusLabel="running",
-                nextAction="等待执行完成后查看最终结果。",
+                nextAction=BilingualMessages.get(language, 'running_next'),
                 detailLines=detail_lines,
-                debugHint="调试详情中可查看当前步骤状态和原始返回。",
+                debugHint=BilingualMessages.get(language, 'running_debug'),
             )
 
         if execution.status in {ExecutionStatus.FAILED, ExecutionStatus.PARTIAL_FAILED, ExecutionStatus.TIMEOUT}:
             return UserExecutionSummary(
-                headline="任务未完整完成",
-                summary=self._friendly_execution_error(execution.error_message) or "执行过程中出现异常，系统暂时没有完成这次请求。",
+                headline=BilingualMessages.get(language, 'failed_headline'),
+                summary=self._friendly_execution_error(execution.error_message, language) or BilingualMessages.get(language, 'failed_summary'),
                 statusLabel="failed",
-                nextAction="可重试本次请求；如需排查原因，请展开调试详情。",
+                nextAction=BilingualMessages.get(language, 'failed_next'),
                 detailLines=detail_lines,
-                debugHint="调试详情中保留了失败步骤、错误信息和原始响应。",
+                debugHint=BilingualMessages.get(language, 'failed_debug'),
             )
 
         return UserExecutionSummary(
-            headline="任务状态已更新",
-            summary="系统已更新这次请求的执行状态。",
+            headline=BilingualMessages.get(language, 'updated_headline'),
+            summary=BilingualMessages.get(language, 'updated_summary'),
             statusLabel=str(execution.status),
             nextAction=None,
             detailLines=detail_lines,
-            debugHint="调试详情中可查看完整步骤轨迹。",
+            debugHint=BilingualMessages.get(language, 'updated_debug'),
         )
 
     async def execute_plan(
@@ -245,6 +338,7 @@ class ExecutionEngine:
             created_by=user_id,
             original_goal=getattr(request, "goal", None),
         )
+        logger.info(f"[Bilingual] Created execution {execution.id} with original_goal: {execution.original_goal[:50] if execution.original_goal else 'EMPTY'}...")
 
         # 写入审计日志
         await self.repository.write_audit_log(
@@ -602,6 +696,7 @@ class ExecutionEngine:
 
                     # Capture human-readable content from MCP tool result
                     result_content = result.content
+                    logger.info(f"MCP {mcp_name}.{tool_name} executed: result.content={result.content[:100] if result.content and len(result.content) > 100 else result.content}, result.data={type(result.data).__name__ if result.data else None}")
 
                     logger.info(f"MCP command executed successfully: {mcp_name}.{tool_name}")
                 else:
@@ -632,6 +727,9 @@ class ExecutionEngine:
                 step.response_data = response_data
                 if result_content:
                     step.result_content = result_content
+                    logger.info(f"Step {step.step_number} result_content: {result_content[:200] if len(result_content) > 200 else result_content}")
+                else:
+                    logger.warning(f"Step {step.step_number} has no result_content, response_data keys: {list(response_data.keys()) if isinstance(response_data, dict) else type(response_data)}")
                 step.status = StepStatus.SUCCESS
                 step.completed_at = datetime.utcnow()
 
@@ -919,6 +1017,7 @@ class ExecutionEngine:
                 member_resolution_patterns = (
                     f"$.steps[{step_idx}].response.member_id",
                     f"$.steps[{step_idx}].response.matched_member.id",
+                    f"$.steps[{step_idx}].response.id",  # LLM sometimes generates .id instead of .member_id
                 )
                 if normalized_jsonpath in member_resolution_patterns:
                     return step.response_data.get("member_id")
@@ -933,6 +1032,31 @@ class ExecutionEngine:
                     and normalized_jsonpath.endswith(".id")
                 ):
                     return step.response_data.get("member_id")
+
+            # Compatibility shortcut for role_id resolution:
+            # MCP.membership.lookup_role returns {role_id, matched_role, ...} not a list.
+            # Some plans still use list-style JSONPath like $.steps[0].response.data[?(@.name == 'X')].id
+            if isinstance(step.response_data, dict) and "role_id" in step.response_data:
+                normalized_jsonpath = jsonpath
+                role_resolution_patterns = (
+                    f"$.steps[{step_idx}].response.role_id",
+                    f"$.steps[{step_idx}].response.matched_role.id",
+                    f"$.steps[{step_idx}].response.id",
+                )
+                if normalized_jsonpath in role_resolution_patterns:
+                    return step.response_data.get("role_id")
+                # Handle list-style JSONPath against lookup_role results
+                if (
+                    normalized_jsonpath.startswith(f"$.steps[{step_idx}].response.data[?(")
+                    and normalized_jsonpath.endswith(")].id")
+                ) or (
+                    normalized_jsonpath.startswith(f"$.steps[{step_idx}].response.data[?(")
+                    and normalized_jsonpath.endswith("].id")
+                ) or (
+                    normalized_jsonpath.startswith(f"$.steps[{step_idx}].response.data")
+                    and normalized_jsonpath.endswith(".id")
+                ):
+                    return step.response_data.get("role_id")
 
             # 解析路径
             path_str = jsonpath[end_idx + 1:].strip(".")
