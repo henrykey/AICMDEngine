@@ -8,7 +8,7 @@
 
 - `docker-compose.mcp.yml`
   - AIPlanner 应用侧 Compose 骨架
-  - 只包含 `mcp-router`、`plan2`、`pdf2md-enhanced`、`pageindex`
+  - 包含 `mcp-router`、`plan2`、`office-word`、`pdf2md-enhanced`、`pageindex`
 - `env.aliyun.example`
   - 阿里云部署环境变量模板
   - 同时服务于 Compose、systemd 和配置模板渲染
@@ -30,6 +30,10 @@
 - `deploy.sh`
   - 统一部署入口
   - 提供 `prepare-cache` / `prepare` / `upload` / `deploy` / `all` 动作
+- `deploy-remote-build.sh`
+  - 独立的“上传源码 -> 远端构建 -> 部署 -> 清理源码”入口
+  - 适合弱网/WireGuard 场景，避免上传大镜像归档
+  - 支持 `--mirror cn`（国内镜像，清华优先）与 `rsync` 重试上传
 
 ## 目标拓扑
 
@@ -41,7 +45,7 @@ AIPlanner 内部访问：
 
 - `plan2 -> mcp-router:8000`
 - `mcp-router -> aliapp(172.18.157.7) 上的 mcp-proxy:9002`（仅在启用 proxy 时）
-- `mcp-router -> docker MCPs:9010/9011`
+- `mcp-router -> docker MCPs:9002/9010/9011`
 - `mcp-router -> membership-api:8080`
 - `mcp-router -> MongoDB@172.18.157.8:27017`
 
@@ -56,7 +60,7 @@ AIPlanner 内部访问：
 - `mcp-router` 不直接暴露公网
 - `mcp-proxy` 为可选能力，启用时以 host + `systemd` 方式运行
 - 默认不部署 `mcp-proxy`
-- `pdf2md-enhanced` / `pageindex` 通过 Docker Compose 部署
+- `office-word` / `pdf2md-enhanced` / `pageindex` 通过 Docker Compose 部署
 - AIPlanner 容器复用已存在的 `membership_default` Docker network，不新建独立 bridge
 - 端口是设计常量，不允许改动：
   - `8000` `5122` `9002` `9010` `9011`
@@ -84,7 +88,7 @@ AIPlanner 内部访问：
 - `deploy`
   - 远端执行：
     - `docker load`（若存在镜像归档）
-    - `docker compose up -d`
+    - `docker compose up -d`（可按 `--service` 只拉起指定服务）
     - 仅在显式传 `--with-proxy` 时：
       - proxy venv 初始化
       - proxy / office-word 依赖安装
@@ -97,14 +101,163 @@ AIPlanner 内部访问：
 - `--app-host`
 - `--remote-dir`
 - `--with-proxy`
+- `--mirror cn`
+- `--service`
 
 其中：
 
 - `--app-host` 为必传
 - `--remote-dir` 默认固定为 `/opt/AICMDEngine`
+- `--mirror cn` 会为 Docker base image、`pip`、`npm`、`apt`、`apk` 启用国内镜像，默认优先使用清华源
+- `--service` 支持 `all`、`mcp`、`mcp-router`、`plan2`、`office-word`、`pdf2md-enhanced`、`pageindex`
+- `mcp` 会展开为 `office-word` + `pdf2md-enhanced` + `pageindex`
+- `office-word` 与 `--with-proxy` 不能同时使用，因为两者都占用宿主机 `9002`
 - `plan2` 的运行时入口地址自动按 `http://<APP_HOST>:<PLAN2_HOST_PORT>` 生成
 
+## 常用命令速查（远端源码构建）
+
+```bash
+# 一键全量部署（推荐）
+bash AIPlanner/deploy/deploy-remote-build.sh \
+  --env-file AIPlanner/.env.ali \
+  --app-host aliapp \
+  --app-user root \
+  --scope all \
+  --mirror cn \
+  --upload-method rsync \
+  --rsync-bwlimit 2048 \
+  --upload-retries 5 \
+  --upload-retry-sleep 5 \
+  -f \
+  all
+
+# 只部署 plan2-ui
+bash AIPlanner/deploy/deploy-remote-build.sh \
+  --env-file AIPlanner/.env.ali \
+  --app-host aliapp \
+  --scope plan2 \
+  --mirror cn \
+  all
+
+# 只部署 mcp-router
+bash AIPlanner/deploy/deploy-remote-build.sh \
+  --env-file AIPlanner/.env.ali \
+  --app-host aliapp \
+  --scope router \
+  --mirror cn \
+  all
+
+# 只部署 mcp servers（office-word + pdf2md-enhanced + pageindex）
+bash AIPlanner/deploy/deploy-remote-build.sh \
+  --env-file AIPlanner/.env.ali \
+  --app-host aliapp \
+  --scope mcp \
+  --mirror cn \
+  all
+
+# 查看运行状态
+bash AIPlanner/deploy/deploy-remote-build.sh \
+  --env-file AIPlanner/.env.ali \
+  --app-host aliapp \
+  status
+
+# 查看日志
+bash AIPlanner/deploy/deploy-remote-build.sh \
+  --env-file AIPlanner/.env.ali \
+  --app-host aliapp \
+  logs
+```
+
 ## 使用指南
+
+### 快速路径（远端源码构建，推荐）
+
+```bash
+bash AIPlanner/deploy/deploy-remote-build.sh \
+  --env-file AIPlanner/.env.ali \
+  --app-host aliapp \
+  --app-user root \
+  --scope all \
+  --mirror cn \
+  --upload-method rsync \
+  --rsync-bwlimit 2048 \
+  --upload-retries 5 \
+  --upload-retry-sleep 5 \
+  -f \
+  all
+```
+
+可选 `--scope`：
+
+- `router`：仅构建/部署 `mcp-router`
+- `plan2`：仅构建/部署 `plan2-ui`
+- `mcp`：仅构建/部署 `office-word` + `pdf2md-enhanced` + `pageindex`
+- `all`：构建/部署全部组件
+
+`deploy-remote-build.sh` 动作说明：
+
+- `build-src`：只生成本地源码包（不上传）
+- `upload-src`：上传源码包、`.env`、`docker-compose.mcp.yml`、`plan2/config.json`
+- `remote-build`：使用远端已上传源码包执行构建和部署
+- `remote-clean`：删除远端源码包
+- `all`：`build-src + upload-src + remote-build`
+
+按组件定向部署示例：
+
+```bash
+# 仅部署 mcp-router
+bash AIPlanner/deploy/deploy-remote-build.sh \
+  --env-file AIPlanner/.env.ali \
+  --app-host aliapp \
+  --scope router \
+  --mirror cn \
+  all
+
+# 仅部署 plan2-ui
+bash AIPlanner/deploy/deploy-remote-build.sh \
+  --env-file AIPlanner/.env.ali \
+  --app-host aliapp \
+  --scope plan2 \
+  --mirror cn \
+  --upload-method rsync \
+  all
+
+# 仅部署 mcp servers（office-word + pdf2md-enhanced + pageindex）
+bash AIPlanner/deploy/deploy-remote-build.sh \
+  --env-file AIPlanner/.env.ali \
+  --app-host aliapp \
+  --scope mcp \
+  --mirror cn \
+  all
+```
+
+分步执行示例：
+
+```bash
+# 1) 本地打包
+bash AIPlanner/deploy/deploy-remote-build.sh \
+  --env-file AIPlanner/.env.ali \
+  --app-host aliapp \
+  --scope all \
+  -f \
+  build-src
+
+# 2) 上传产物
+bash AIPlanner/deploy/deploy-remote-build.sh \
+  --env-file AIPlanner/.env.ali \
+  --app-host aliapp \
+  --upload-method rsync \
+  --rsync-bwlimit 2048 \
+  upload-src
+
+# 3) 远端构建并部署
+bash AIPlanner/deploy/deploy-remote-build.sh \
+  --env-file AIPlanner/.env.ali \
+  --app-host aliapp \
+  --scope all \
+  --mirror cn \
+  remote-build
+```
 
 ### 前置条件
 
@@ -171,13 +324,15 @@ bash AIPlanner/deploy/preflight-resources.sh --env AIPlanner/.env.ali --skip-por
 
 脚本在 `prepare` / `all --build-images` 时会自动准备 `linux/amd64` Python 预存储包。
 默认不包含 proxy 相关 wheelhouse；只有显式传 `--with-proxy` 时才会准备 proxy 依赖。
+如显式传 `--mirror cn`，构建和依赖下载会优先使用国内镜像，默认优先走清华源。
 
 如需单独预热缓存，也可以显式执行：
 
 ```bash
 bash AIPlanner/deploy/deploy.sh \
   prepare-cache \
-  --env-file AIPlanner/.env.ali
+  --env-file AIPlanner/.env.ali \
+  --mirror cn
 ```
 
 缓存目录：
@@ -193,7 +348,8 @@ bash AIPlanner/deploy/deploy.sh \
 bash AIPlanner/deploy/deploy.sh \
   --env-file AIPlanner/.env.ali \
   --app-host 172.18.157.7 \
-  prepare
+  prepare \
+  --mirror cn
 ```
 
 生成 bundle 并同时构建镜像归档：
@@ -202,7 +358,7 @@ bash AIPlanner/deploy/deploy.sh \
 bash AIPlanner/deploy/deploy.sh \
   --env-file AIPlanner/.env.ali \
   --app-host 172.18.157.7 \
-  prepare --build-images
+  prepare --build-images --mirror cn
 ```
 
 如需同时打包 `mcp-proxy`：
@@ -211,13 +367,23 @@ bash AIPlanner/deploy/deploy.sh \
 bash AIPlanner/deploy/deploy.sh \
   --env-file AIPlanner/.env.ali \
   --app-host 172.18.157.7 \
-  prepare --build-images --with-proxy
+  prepare --build-images --with-proxy --mirror cn
+```
+
+只构建并打包指定服务，例如 `office-word` + `pageindex`：
+
+```bash
+bash AIPlanner/deploy/deploy.sh \
+  --env-file AIPlanner/.env.ali \
+  --app-host 172.18.157.7 \
+  prepare --build-images --mirror cn --service office-word,pageindex
 ```
 
 说明：
 
 - `prepare`：若缓存缺失，会自动下载 amd64 wheels
 - `prepare --build-images`：默认复用已有缓存，不会强制重下
+- `prepare/deploy/all` 可通过 `--service` 限制本次构建、打包和拉起的服务范围
 - 如需强制重新下载缓存，显式加：
   - `--refresh-cache`
 - 若本机下载官方源过慢，可直接设置标准代理变量：
@@ -252,7 +418,7 @@ bash AIPlanner/deploy/deploy.sh \
 bash AIPlanner/deploy/deploy.sh \
   --env-file AIPlanner/.env.ali \
   --app-host 172.18.157.7 \
-  deploy
+  deploy --service office-word,pageindex
 ```
 
 如需同时安装并启动 `mcp-proxy`：
@@ -270,7 +436,7 @@ bash AIPlanner/deploy/deploy.sh \
 bash AIPlanner/deploy/deploy.sh \
   --env-file AIPlanner/.env.ali \
   --app-host 172.18.157.7 \
-  all --build-images
+  all --build-images --mirror cn
 ```
 
 如需完整执行并附带 `mcp-proxy`：

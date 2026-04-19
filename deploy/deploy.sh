@@ -17,12 +17,15 @@ PDF2MD_ENHANCED_HOST_PORT_DEFAULT="9010"
 PAGEINDEX_HOST_PORT_DEFAULT="9011"
 MCP_TRANSPORT_DEFAULT="stdio"
 FASTMCP_LOG_LEVEL_DEFAULT="INFO"
-REMOTE_PIP_INDEX_URL_DEFAULT="https://mirrors.aliyun.com/pypi/simple/"
+REMOTE_PIP_INDEX_URL_DEFAULT="https://pypi.tuna.tsinghua.edu.cn/simple"
 LOCAL_PIP_INDEX_URL_DEFAULT=""
 CACHE_PYTHON_311_IMAGE_DEFAULT="python:3.11-slim"
 CACHE_PYTHON_312_IMAGE_DEFAULT="python:3.12-slim"
 PLAN2_NODE_BASE_IMAGE_DEFAULT="node:20-alpine"
 PLAN2_NGINX_BASE_IMAGE_DEFAULT="nginx:alpine"
+APT_MIRROR_DEFAULT=""
+ALPINE_MIRROR_DEFAULT=""
+NPM_REGISTRY_DEFAULT=""
 
 ACTION="${1:-}"
 if [[ -z "${ACTION}" || "${ACTION}" == --* ]]; then
@@ -34,14 +37,27 @@ WITH_PROXY=false
 SKIP_PREFLIGHT=false
 APP_HOST=""
 REMOTE_DIR="${REMOTE_DIR_DEFAULT}"
+MIRROR=""
+SERVICES_RAW="all"
 
 readonly IMAGE_ARCHIVE_NAME="aiplanner-images.tar.gz"
 readonly IMAGE_NAMES=(
   aiplanner-mcp-router:latest
   aiplanner-plan2:latest
+  aiplanner-office-word:latest
   aiplanner-pdf2md-enhanced:latest
   aiplanner-pageindex:latest
 )
+readonly DEFAULT_DEPLOY_SERVICES=(
+  mcp-router
+  plan2
+  office-word
+  pdf2md-enhanced
+  pageindex
+)
+
+SELECTED_SERVICES=()
+SELECTED_IMAGES=()
 
 log() {
   printf '[deploy] %s\n' "$*"
@@ -60,10 +76,10 @@ usage() {
   cat <<'EOF'
 Usage:
   deploy/deploy.sh prepare-cache [--env-file PATH]
-  deploy/deploy.sh prepare --env-file PATH --app-host HOST [--with-proxy] [--build-images] [--refresh-cache] [--skip-preflight]
+  deploy/deploy.sh prepare --env-file PATH --app-host HOST [--with-proxy] [--build-images] [--refresh-cache] [--skip-preflight] [--mirror cn] [--service NAME[,NAME...]]
   deploy/deploy.sh upload --env-file PATH --app-host HOST [--remote-dir DIR]
-  deploy/deploy.sh deploy --env-file PATH --app-host HOST [--remote-dir DIR] [--with-proxy]
-  deploy/deploy.sh all --env-file PATH --app-host HOST [--remote-dir DIR] [--with-proxy] [--build-images] [--refresh-cache] [--skip-preflight]
+  deploy/deploy.sh deploy --env-file PATH --app-host HOST [--remote-dir DIR] [--with-proxy] [--service NAME[,NAME...]]
+  deploy/deploy.sh all --env-file PATH --app-host HOST [--remote-dir DIR] [--with-proxy] [--build-images] [--refresh-cache] [--skip-preflight] [--mirror cn] [--service NAME[,NAME...]]
 
 Environment:
   ENV_FILE=/path/to/.env   Backward-compatible override for deploy env file.
@@ -74,6 +90,8 @@ Notes:
   - `prepare` generates a remote-ready bundle under deploy/out.
   - `upload` syncs deploy/out to ${APP_HOST}:${REMOTE_DIR}.
   - `deploy` executes the remote install/start sequence on ${APP_HOST}.
+  - `--mirror cn` enables China-friendly pip/npm/apt/apk mirrors and mirrored base images.
+  - `--service` supports `all`, `mcp`, `mcp-router`, `plan2`, `office-word`, `pdf2md-enhanced`, `pageindex`.
 EOF
 }
 
@@ -98,6 +116,21 @@ parse_args() {
         [[ $# -gt 0 ]] || fail "--remote-dir requires a value"
         REMOTE_DIR="$1"
         ;;
+      --mirror)
+        shift
+        [[ $# -gt 0 ]] || fail "--mirror requires a value"
+        MIRROR="$1"
+        ;;
+      --service|--services|--scope)
+        shift
+        [[ $# -gt 0 ]] || fail "--service requires a value"
+        [[ -n "$1" ]] || fail "--service requires a value"
+        if [[ "${SERVICES_RAW}" == "all" ]]; then
+          SERVICES_RAW="$1"
+        else
+          SERVICES_RAW="${SERVICES_RAW},$1"
+        fi
+        ;;
       --build-images)
         BUILD_IMAGES=true
         ;;
@@ -120,6 +153,88 @@ parse_args() {
     esac
     shift
   done
+}
+
+append_unique() {
+  local item="$1"
+  local existing
+  for existing in "${SELECTED_SERVICES[@]}"; do
+    [[ "${existing}" == "${item}" ]] && return 0
+  done
+  SELECTED_SERVICES+=("${item}")
+}
+
+resolve_services() {
+  local raw normalized token
+  SELECTED_SERVICES=()
+  raw="${SERVICES_RAW:-all}"
+  raw="${raw// /}"
+  IFS=',' read -r -a normalized <<< "${raw}"
+  for token in "${normalized[@]}"; do
+    [[ -n "${token}" ]] || continue
+    case "${token}" in
+      all)
+        local service
+        for service in "${DEFAULT_DEPLOY_SERVICES[@]}"; do
+          append_unique "${service}"
+        done
+        ;;
+      mcp)
+        append_unique "office-word"
+        append_unique "pdf2md-enhanced"
+        append_unique "pageindex"
+        ;;
+      router|mcp-router)
+        append_unique "mcp-router"
+        ;;
+      plan2)
+        append_unique "plan2"
+        ;;
+      office|office-word)
+        append_unique "office-word"
+        ;;
+      pdf2md|pdf2md-enhanced)
+        append_unique "pdf2md-enhanced"
+        ;;
+      pageindex)
+        append_unique "pageindex"
+        ;;
+      *)
+        fail "Unsupported service: ${token} (expected: all|mcp|mcp-router|plan2|office-word|pdf2md-enhanced|pageindex)"
+        ;;
+    esac
+  done
+
+  [[ "${#SELECTED_SERVICES[@]}" -gt 0 ]] || fail "No deploy services selected"
+  selected_images_for_services
+}
+
+service_enabled() {
+  local target="$1"
+  local service
+  for service in "${SELECTED_SERVICES[@]}"; do
+    [[ "${service}" == "${target}" ]] && return 0
+  done
+  return 1
+}
+
+selected_images_for_services() {
+  SELECTED_IMAGES=()
+  if service_enabled "mcp-router"; then
+    SELECTED_IMAGES+=("aiplanner-mcp-router:latest")
+  fi
+  if service_enabled "plan2"; then
+    SELECTED_IMAGES+=("aiplanner-plan2:latest")
+  fi
+  if service_enabled "office-word"; then
+    SELECTED_IMAGES+=("aiplanner-office-word:latest")
+  fi
+  if service_enabled "pdf2md-enhanced"; then
+    SELECTED_IMAGES+=("aiplanner-pdf2md-enhanced:latest")
+  fi
+  if service_enabled "pageindex"; then
+    SELECTED_IMAGES+=("aiplanner-pageindex:latest")
+  fi
 }
 
 source_env_file() {
@@ -153,11 +268,45 @@ apply_env_defaults() {
   CACHE_PYTHON_312_IMAGE="${CACHE_PYTHON_312_IMAGE:-${CACHE_PYTHON_312_IMAGE_DEFAULT}}"
   PLAN2_NODE_BASE_IMAGE="${PLAN2_NODE_BASE_IMAGE:-${PLAN2_NODE_BASE_IMAGE_DEFAULT}}"
   PLAN2_NGINX_BASE_IMAGE="${PLAN2_NGINX_BASE_IMAGE:-${PLAN2_NGINX_BASE_IMAGE_DEFAULT}}"
+  APT_MIRROR="${APT_MIRROR:-${APT_MIRROR_DEFAULT}}"
+  ALPINE_MIRROR="${ALPINE_MIRROR:-${ALPINE_MIRROR_DEFAULT}}"
+  NPM_REGISTRY="${NPM_REGISTRY:-${NPM_REGISTRY_DEFAULT}}"
+}
+
+apply_mirror_defaults() {
+  local mirror_prefix=""
+  case "${MIRROR}" in
+    "" )
+      ;;
+    cn)
+      mirror_prefix="docker.1ms.run"
+      [[ -n "${LOCAL_PIP_INDEX_URL}" ]] || LOCAL_PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"
+      [[ -n "${REMOTE_PIP_INDEX_URL}" ]] || REMOTE_PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"
+      [[ -n "${NPM_REGISTRY}" ]] || NPM_REGISTRY="https://mirrors.tuna.tsinghua.edu.cn/npm/"
+      [[ -n "${ALPINE_MIRROR}" ]] || ALPINE_MIRROR="mirrors.tuna.tsinghua.edu.cn/alpine"
+      [[ -n "${APT_MIRROR}" ]] || APT_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/debian"
+      ;;
+    *)
+      mirror_prefix="${MIRROR%/}"
+      ;;
+  esac
+
+  if [[ -n "${mirror_prefix}" ]]; then
+    [[ "${CACHE_PYTHON_311_IMAGE}" != "${CACHE_PYTHON_311_IMAGE_DEFAULT}" ]] || CACHE_PYTHON_311_IMAGE="${mirror_prefix}/python:3.11-slim"
+    [[ "${CACHE_PYTHON_312_IMAGE}" != "${CACHE_PYTHON_312_IMAGE_DEFAULT}" ]] || CACHE_PYTHON_312_IMAGE="${mirror_prefix}/python:3.12-slim"
+    [[ "${PLAN2_NODE_BASE_IMAGE}" != "${PLAN2_NODE_BASE_IMAGE_DEFAULT}" ]] || PLAN2_NODE_BASE_IMAGE="${mirror_prefix}/node:20-alpine"
+    [[ "${PLAN2_NGINX_BASE_IMAGE}" != "${PLAN2_NGINX_BASE_IMAGE_DEFAULT}" ]] || PLAN2_NGINX_BASE_IMAGE="${mirror_prefix}/nginx:alpine"
+  fi
 }
 
 load_env_file() {
   source_env_file
   apply_env_defaults
+  apply_mirror_defaults
+  resolve_services
+  if [[ "${WITH_PROXY}" == "true" ]] && service_enabled "office-word"; then
+    fail "--with-proxy cannot be used together with service office-word because both require port 9002"
+  fi
   [[ -n "${APP_HOST}" ]] || fail "--app-host is required"
   PLAN2_PUBLIC_BASE_URL="http://${APP_HOST}:${PLAN2_HOST_PORT}"
   export REMOTE_DIR
@@ -167,6 +316,7 @@ load_env_file() {
   export REMOTE_PIP_INDEX_URL LOCAL_PIP_INDEX_URL
   export CACHE_PYTHON_311_IMAGE CACHE_PYTHON_312_IMAGE
   export PLAN2_NODE_BASE_IMAGE PLAN2_NGINX_BASE_IMAGE
+  export APT_MIRROR ALPINE_MIRROR NPM_REGISTRY
   export WITH_PROXY
 }
 
@@ -367,29 +517,42 @@ prepare_cache() {
 
   source_env_file
   apply_env_defaults
+  apply_mirror_defaults
+  resolve_services
   ensure_cache_layout
   ensure_cache_base_images
 
   log "Preparing linux/amd64 wheelhouse cache"
-  download_wheelhouse "${CACHE_PYTHON_311_IMAGE}" "${ROOT_DIR}" "requirements.txt" "${WHEEL_CACHE_DIR}/mcp-router"
-  download_wheelhouse "${CACHE_PYTHON_312_IMAGE}" "${ROOT_DIR}/mcp/servers/PageIndex" "requirements.txt" "${WHEEL_CACHE_DIR}/pageindex"
-  download_wheelhouse "${CACHE_PYTHON_312_IMAGE}" "${ROOT_DIR}/mcp/servers/PDF2MDEnhanced" "requirements.txt" "${WHEEL_CACHE_DIR}/pdf2md-enhanced"
+  if service_enabled "mcp-router"; then
+    download_wheelhouse "${CACHE_PYTHON_311_IMAGE}" "${ROOT_DIR}" "requirements.txt" "${WHEEL_CACHE_DIR}/mcp-router"
+    sync_wheelhouse "${WHEEL_CACHE_DIR}/mcp-router" "${ROOT_DIR}/.wheelhouse/mcp-router"
+  fi
+  if service_enabled "pageindex"; then
+    download_wheelhouse "${CACHE_PYTHON_312_IMAGE}" "${ROOT_DIR}/mcp/servers/PageIndex" "requirements.txt" "${WHEEL_CACHE_DIR}/pageindex"
+    sync_wheelhouse "${WHEEL_CACHE_DIR}/pageindex" "${ROOT_DIR}/mcp/servers/PageIndex/.wheelhouse"
+  fi
+  if service_enabled "pdf2md-enhanced"; then
+    download_wheelhouse "${CACHE_PYTHON_312_IMAGE}" "${ROOT_DIR}/mcp/servers/PDF2MDEnhanced" "requirements.txt" "${WHEEL_CACHE_DIR}/pdf2md-enhanced"
+    sync_wheelhouse "${WHEEL_CACHE_DIR}/pdf2md-enhanced" "${ROOT_DIR}/mcp/servers/PDF2MDEnhanced/.wheelhouse"
+  fi
   if [[ "${WITH_PROXY}" == "true" ]]; then
     download_wheelhouse "${CACHE_PYTHON_312_IMAGE}" "${ROOT_DIR}/mcp/proxy" "requirements.txt" "${WHEEL_CACHE_DIR}/proxy-core" "fastmcp"
     download_wheelhouse "${CACHE_PYTHON_312_IMAGE}" "${ROOT_DIR}/mcp/servers/office-word" "requirements.txt" "${WHEEL_CACHE_DIR}/office-word"
   fi
 
-  sync_wheelhouse "${WHEEL_CACHE_DIR}/mcp-router" "${ROOT_DIR}/.wheelhouse/mcp-router"
-  sync_wheelhouse "${WHEEL_CACHE_DIR}/pageindex" "${ROOT_DIR}/mcp/servers/PageIndex/.wheelhouse"
-  sync_wheelhouse "${WHEEL_CACHE_DIR}/pdf2md-enhanced" "${ROOT_DIR}/mcp/servers/PDF2MDEnhanced/.wheelhouse"
-
   log "Prepared wheelhouse cache under ${WHEEL_CACHE_DIR}"
 }
 
 cache_is_ready() {
-  wheelhouse_has_files "${WHEEL_CACHE_DIR}/mcp-router" &&
-  wheelhouse_has_files "${WHEEL_CACHE_DIR}/pageindex" &&
-  wheelhouse_has_files "${WHEEL_CACHE_DIR}/pdf2md-enhanced" || return 1
+  if service_enabled "mcp-router" && ! wheelhouse_has_files "${WHEEL_CACHE_DIR}/mcp-router"; then
+    return 1
+  fi
+  if service_enabled "pageindex" && ! wheelhouse_has_files "${WHEEL_CACHE_DIR}/pageindex"; then
+    return 1
+  fi
+  if service_enabled "pdf2md-enhanced" && ! wheelhouse_has_files "${WHEEL_CACHE_DIR}/pdf2md-enhanced"; then
+    return 1
+  fi
 
   if [[ "${WITH_PROXY}" == "true" ]]; then
     wheelhouse_has_files "${WHEEL_CACHE_DIR}/proxy-core" &&
@@ -498,6 +661,8 @@ Generated at: $(date '+%Y-%m-%d %H:%M:%S %z')
 Workspace: ${ROOT_DIR}
 Remote host: ${APP_HOST:-aliapp}
 Remote dir: ${REMOTE_DIR:-/opt/AICMDEngine}
+Mirror: ${MIRROR:-default}
+Services: ${SELECTED_SERVICES[*]}
 
 Fixed design ports:
 - mcp-router: 8000
@@ -537,38 +702,81 @@ Expected archive name:
 - ${IMAGE_ARCHIVE_NAME}
 
 Images:
-- aiplanner-mcp-router:latest
-- aiplanner-plan2:latest
-- aiplanner-pdf2md-enhanced:latest
-- aiplanner-pageindex:latest
 EOF
+
+  local image
+  for image in "${SELECTED_IMAGES[@]}"; do
+    printf -- '- %s\n' "${image}" >> "${OUT_DIR}/images/README.txt"
+  done
 }
 
 build_images() {
   command_exists docker || fail "docker is required for --build-images"
 
   ensure_cache_layout
-  sync_wheelhouse "${WHEEL_CACHE_DIR}/mcp-router" "${ROOT_DIR}/.wheelhouse/mcp-router"
-  sync_wheelhouse "${WHEEL_CACHE_DIR}/pageindex" "${ROOT_DIR}/mcp/servers/PageIndex/.wheelhouse"
-  sync_wheelhouse "${WHEEL_CACHE_DIR}/pdf2md-enhanced" "${ROOT_DIR}/mcp/servers/PDF2MDEnhanced/.wheelhouse"
+  selected_images_for_services
+  if service_enabled "mcp-router"; then
+    sync_wheelhouse "${WHEEL_CACHE_DIR}/mcp-router" "${ROOT_DIR}/.wheelhouse/mcp-router"
+  fi
+  if service_enabled "pageindex"; then
+    sync_wheelhouse "${WHEEL_CACHE_DIR}/pageindex" "${ROOT_DIR}/mcp/servers/PageIndex/.wheelhouse"
+  fi
+  if service_enabled "pdf2md-enhanced"; then
+    sync_wheelhouse "${WHEEL_CACHE_DIR}/pdf2md-enhanced" "${ROOT_DIR}/mcp/servers/PDF2MDEnhanced/.wheelhouse"
+  fi
 
-  log "Building Docker images for linux/amd64"
-  docker build --platform linux/amd64 \
-    --build-arg USE_WHEELHOUSE=true \
-    -f "${ROOT_DIR}/Dockerfile.mcp-router" \
-    -t aiplanner-mcp-router:latest \
-    "${ROOT_DIR}"
-  docker build --platform linux/amd64 \
-    --build-arg NODE_BASE_IMAGE="${PLAN2_NODE_BASE_IMAGE}" \
-    --build-arg NGINX_BASE_IMAGE="${PLAN2_NGINX_BASE_IMAGE}" \
-    -f "${ROOT_DIR}/plan2/Dockerfile" \
-    -t aiplanner-plan2:latest \
-    "${ROOT_DIR}/plan2"
-  docker build --platform linux/amd64 -f "${ROOT_DIR}/mcp/servers/PDF2MDEnhanced/Dockerfile" -t aiplanner-pdf2md-enhanced:latest "${ROOT_DIR}/mcp/servers/PDF2MDEnhanced"
-  docker build --platform linux/amd64 -f "${ROOT_DIR}/mcp/servers/PageIndex/Dockerfile" -t aiplanner-pageindex:latest "${ROOT_DIR}/mcp/servers/PageIndex"
+  log "Building Docker images for linux/amd64 (services: ${SELECTED_SERVICES[*]})"
+  if service_enabled "mcp-router"; then
+    docker build --platform linux/amd64 \
+      --build-arg USE_WHEELHOUSE=true \
+      --build-arg PYTHON_BASE_IMAGE="${CACHE_PYTHON_311_IMAGE}" \
+      --build-arg PIP_INDEX_URL="${LOCAL_PIP_INDEX_URL}" \
+      --build-arg APT_MIRROR="${APT_MIRROR}" \
+      -f "${ROOT_DIR}/Dockerfile.mcp-router" \
+      -t aiplanner-mcp-router:latest \
+      "${ROOT_DIR}"
+  fi
+  if service_enabled "plan2"; then
+    docker build --platform linux/amd64 \
+      --build-arg NODE_BASE_IMAGE="${PLAN2_NODE_BASE_IMAGE}" \
+      --build-arg NGINX_BASE_IMAGE="${PLAN2_NGINX_BASE_IMAGE}" \
+      --build-arg NPM_REGISTRY="${NPM_REGISTRY}" \
+      --build-arg ALPINE_MIRROR="${ALPINE_MIRROR}" \
+      -f "${ROOT_DIR}/plan2/Dockerfile" \
+      -t aiplanner-plan2:latest \
+      "${ROOT_DIR}/plan2"
+  fi
+  if service_enabled "office-word"; then
+    docker build --platform linux/amd64 \
+      --build-arg PYTHON_BASE_IMAGE="${CACHE_PYTHON_311_IMAGE}" \
+      --build-arg PIP_INDEX_URL="${LOCAL_PIP_INDEX_URL}" \
+      -f "${ROOT_DIR}/mcp/servers/office-word/Dockerfile" \
+      -t aiplanner-office-word:latest \
+      "${ROOT_DIR}/mcp/servers/office-word"
+  fi
+  if service_enabled "pdf2md-enhanced"; then
+    docker build --platform linux/amd64 \
+      --build-arg PYTHON_BASE_IMAGE="${CACHE_PYTHON_312_IMAGE}" \
+      --build-arg PIP_INDEX_URL="${LOCAL_PIP_INDEX_URL}" \
+      --build-arg APT_MIRROR="${APT_MIRROR}" \
+      -f "${ROOT_DIR}/mcp/servers/PDF2MDEnhanced/Dockerfile" \
+      -t aiplanner-pdf2md-enhanced:latest \
+      "${ROOT_DIR}/mcp/servers/PDF2MDEnhanced"
+  fi
+  if service_enabled "pageindex"; then
+    docker build --platform linux/amd64 \
+      --build-arg PYTHON_BASE_IMAGE="${CACHE_PYTHON_312_IMAGE}" \
+      --build-arg PIP_INDEX_URL="${LOCAL_PIP_INDEX_URL}" \
+      --build-arg APT_MIRROR="${APT_MIRROR}" \
+      -f "${ROOT_DIR}/mcp/servers/PageIndex/Dockerfile" \
+      -t aiplanner-pageindex:latest \
+      "${ROOT_DIR}/mcp/servers/PageIndex"
+  fi
 
-  log "Exporting image archive ${IMAGE_ARCHIVE_NAME}"
-  docker save "${IMAGE_NAMES[@]}" | gzip > "${OUT_DIR}/images/${IMAGE_ARCHIVE_NAME}"
+  if [[ "${#SELECTED_IMAGES[@]}" -gt 0 ]]; then
+    log "Exporting image archive ${IMAGE_ARCHIVE_NAME}"
+    docker save "${SELECTED_IMAGES[@]}" | gzip > "${OUT_DIR}/images/${IMAGE_ARCHIVE_NAME}"
+  fi
 }
 
 run_prepare() {
@@ -612,9 +820,11 @@ run_upload() {
 run_remote_deploy() {
   load_env_file
   command_exists ssh || fail "ssh is required for deploy"
+  local services_string
+  services_string="${SELECTED_SERVICES[*]}"
 
   log "Executing remote deploy on ${APP_HOST}"
-  ssh "${APP_HOST}" "REMOTE_DIR='${REMOTE_DIR}' APP_HOST='${APP_HOST}' REMOTE_PIP_INDEX_URL='${REMOTE_PIP_INDEX_URL}' WITH_PROXY='${WITH_PROXY}' bash -s" <<'EOF'
+  ssh "${APP_HOST}" "REMOTE_DIR='${REMOTE_DIR}' APP_HOST='${APP_HOST}' REMOTE_PIP_INDEX_URL='${REMOTE_PIP_INDEX_URL}' WITH_PROXY='${WITH_PROXY}' SERVICES='${services_string}' bash -s" <<'EOF'
 set -euo pipefail
 
 log() {
@@ -631,8 +841,9 @@ command_exists() {
 }
 
 REMOTE_DIR="${REMOTE_DIR:?REMOTE_DIR is required}"
-REMOTE_PIP_INDEX_URL="${REMOTE_PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}"
+REMOTE_PIP_INDEX_URL="${REMOTE_PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 WITH_PROXY="${WITH_PROXY:-false}"
+SERVICES="${SERVICES:-mcp-router plan2 office-word pdf2md-enhanced pageindex}"
 cd "${REMOTE_DIR}"
 
 [[ -f ".env" ]] || fail ".env not found in ${REMOTE_DIR}"
@@ -714,8 +925,9 @@ else
 fi
 
 if $SUDO docker compose version >/dev/null 2>&1; then
-  log "Starting application containers"
-  $SUDO docker compose --env-file .env -f docker-compose.mcp.yml up -d
+  log "Starting application containers: ${SERVICES}"
+  # shellcheck disable=SC2086
+  $SUDO docker compose --env-file .env -f docker-compose.mcp.yml up -d ${SERVICES}
 else
   fail "docker compose is not available on remote host"
 fi
