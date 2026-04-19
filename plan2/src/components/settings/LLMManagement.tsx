@@ -46,12 +46,28 @@ const LLMManagement = () => {
   const [showTestPanel, setShowTestPanel] = useState(false);
   const [testingProvider, setTestingProvider] = useState<string | null>(null);
 
+  const getRouterBaseUrl = () => {
+    const config = getConfig();
+    const raw = config.nlTpsApiUrl || '';
+    return raw
+      .replace(/\/api\/v1\/?$/, '')
+      .replace(/\/v1\/?$/, '');
+  };
+
+  const getRouterWsUrl = () => {
+    const routerBaseUrl = getRouterBaseUrl();
+    if (!routerBaseUrl) {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      return `${protocol}//${window.location.host}/api/llm/ws/notifications`;
+    }
+    return `${routerBaseUrl.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:')}/api/llm/ws/notifications`;
+  };
+
   // 获取提供商列表
   const fetchProviders = async () => {
     try {
       setLoading(true);
-      const config = getConfig();
-      const apiUrl = `${config.nlTpsApiUrl.replace('/v1', '')}/api/llm/providers`;
+      const apiUrl = `${getRouterBaseUrl()}/api/llm/providers`;
       const response = await fetch(apiUrl);
       if (!response.ok) {
         throw new Error(`Failed to fetch providers: ${response.status} ${response.statusText}`);
@@ -69,8 +85,7 @@ const LLMManagement = () => {
   // 获取选中的提供商
   const fetchSelectedProvider = async () => {
     try {
-      const config = getConfig();
-      const apiUrl = `${config.nlTpsApiUrl.replace('/v1', '')}/api/llm/current`;
+      const apiUrl = `${getRouterBaseUrl()}/api/llm/current`;
       const response = await fetch(apiUrl);
       if (response.ok) {
         const data = await response.json();
@@ -94,8 +109,7 @@ const LLMManagement = () => {
 
   // WebSocket连接以接收实时能力检测更新
   useEffect(() => {
-    const config = getConfig();
-    const wsUrl = `${config.nlTpsApiUrl.replace('/v1', '').replace('http', 'ws')}/api/llm/ws/notifications`;
+    const wsUrl = getRouterWsUrl();
 
     const ws = new WebSocket(wsUrl);
 
@@ -142,8 +156,7 @@ const LLMManagement = () => {
   // 处理创建/更新提供商
   const handleSaveProvider = async (provider: LLMProvider) => {
     try {
-      const config = getConfig();
-      const baseUrl = config.nlTpsApiUrl.replace('/v1', '');
+      const baseUrl = getRouterBaseUrl();
       const endpoint = provider._id ? `${provider.name}` : '';
       const url = `${baseUrl}/api/llm/providers${endpoint ? '/' + endpoint : ''}`;
       const method = provider._id ? 'PUT' : 'POST';
@@ -171,8 +184,7 @@ const LLMManagement = () => {
     if (!window.confirm(`Are you sure you want to delete ${name}?`)) return;
 
     try {
-      const config = getConfig();
-      const baseUrl = config.nlTpsApiUrl.replace('/v1', '');
+      const baseUrl = getRouterBaseUrl();
       const url = `${baseUrl}/api/llm/providers/${name}`;
       const response = await fetch(url, {
         method: 'DELETE',
@@ -192,8 +204,7 @@ const LLMManagement = () => {
   // 处理选择/取消选择提供商
   const handleSelectProvider = async (name: string) => {
     try {
-      const config = getConfig();
-      const baseUrl = config.nlTpsApiUrl.replace('/v1', '');
+      const baseUrl = getRouterBaseUrl();
       const url = `${baseUrl}/api/llm/providers/${name}/select`;
       const response = await fetch(url, {
         method: 'GET',
@@ -220,8 +231,7 @@ const LLMManagement = () => {
   // 处理重试能力检测
   const handleRetryDetection = async (name: string) => {
     try {
-      const config = getConfig();
-      const baseUrl = config.nlTpsApiUrl.replace('/v1', '');
+      const baseUrl = getRouterBaseUrl();
       const url = `${baseUrl}/api/llm/providers/${name}/retry-detection`;
       const response = await fetch(url, {
         method: 'POST',

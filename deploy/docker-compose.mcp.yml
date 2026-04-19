@@ -23,23 +23,18 @@ services:
       EXTERNAL_MCPS: |
         office-word:
           transport: http
-          url: http://172.18.157.7:9002
+          url: http://office-word:9002
           timeout: 120
         pdf2md-enhanced:
           transport: http
-          url: http://172.18.157.7:9010
+          url: http://pdf2md-enhanced:9010
           timeout: 1300
           llm_provider: multmode
         pageindex:
           transport: http
-          url: http://172.18.157.7:9011
+          url: http://pageindex:9011
           timeout: 1300
           llm_provider: multmode
-    depends_on:
-      pdf2md-enhanced:
-        condition: service_healthy
-      pageindex:
-        condition: service_healthy
     ports:
       - "8000:8000"
     networks:
@@ -63,6 +58,8 @@ services:
         condition: service_healthy
     ports:
       - "5122:5122"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./plan2/config.json:/usr/share/nginx/html/config.json:ro
     networks:
@@ -95,6 +92,30 @@ services:
       - membership_default
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1', 9010), 2); s.close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  office-word:
+    build:
+      context: ../mcp/servers/office-word
+      dockerfile: Dockerfile
+    image: aiplanner-office-word:latest
+    container_name: aiplanner-office-word
+    restart: unless-stopped
+    environment:
+      PYTHONUNBUFFERED: "1"
+      MCP_TRANSPORT: sse
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "9002"
+      FASTMCP_LOG_LEVEL: INFO
+    ports:
+      - "9002:9002"
+    networks:
+      - membership_default
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9002/sse"]
       interval: 30s
       timeout: 10s
       retries: 3

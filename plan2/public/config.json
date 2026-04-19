@@ -1,6 +1,6 @@
 {
-  "nlTpsApiUrl": "http://localhost:8000/v1",
-  "membershipApiUrl": "http://localhost:8080",
+  "nlTpsApiUrl": "/v1",
+  "membershipApiUrl": "",
   "membershipLoginPath": "/v2/auth/unified/login",
   "membershipSwitchTenantPath": "/v2/auth/unified/switch-tenant",
   "membershipUserPath": "/v2/users/me"
