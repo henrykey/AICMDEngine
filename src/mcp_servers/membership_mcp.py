@@ -4723,19 +4723,30 @@ class MembershipMCPServer(BaseMCPServer):
         return headers
 
     async def _resolve_audit_auth_token(self, tenant_id: int, user_token: Optional[str]) -> Optional[str]:
-        """Resolve a long-lived system token for audit submission, falling back to the user token."""
+        """Resolve a long-lived system token for audit submission.
+
+        Priority:
+        1. Cached token (pushed by Membership API, 24h validity)
+        2. Exchange user token for system token (fallback for other callers)
+        3. Return None if all fail
+        """
+        # 优先级1：Membership API 推送的缓存 token（24小时有效）
         cached = self._audit_system_tokens.get(tenant_id)
         if cached and not self.http_client._is_token_expired(cached):
+            logger.debug(f"Using cached system service token for tenant {tenant_id} (pushed by Membership API)")
             return cached
 
+        # 优先级2（Fallback）：用用户 token 换取系统服务 token
         source_token = user_token or self.auth_token
         if not source_token:
+            logger.warning(f"No valid auth token available for tenant {tenant_id}, audit will be skipped")
             return None
 
         if self.http_client._is_token_expired(source_token):
-            logger.warning("Audit source token already expired before system token exchange; skipping audit submit")
+            logger.warning(f"Audit source token already expired for tenant {tenant_id}; skipping audit submit")
             return None
 
+        logger.debug(f"Exchanging user token for system service token (tenant {tenant_id}, fallback mode)")
         try:
             exchange_url = urljoin(self.base_url, f"/v2/auth/system-token?tenantId={tenant_id}")
             response = await self.http_client.client.post(
@@ -4752,6 +4763,7 @@ class MembershipMCPServer(BaseMCPServer):
                 system_token = data.get("access_token")
                 if system_token:
                     self._audit_system_tokens[tenant_id] = system_token
+                    logger.info(f"Exchanged and cached system service token for tenant {tenant_id}")
                     return system_token
                 logger.warning("System token exchange succeeded but access_token was missing")
             else:
@@ -4777,6 +4789,8 @@ class MembershipMCPServer(BaseMCPServer):
         auth_token: Optional[str] = None
     ) -> ToolResult:
         """Submit a single audit event."""
+        import httpx  # For HTTPStatusError handling
+
         try:
             # Build event payload according to new API spec
             payload = {
@@ -4804,19 +4818,65 @@ class MembershipMCPServer(BaseMCPServer):
                     content=f"Audit event skipped (no valid auth token): {action}",
                     data={"skipped": True, "reason": "NO_VALID_AUDIT_TOKEN"}
                 )
-            response = await self.http_client.execute(
-                command="POST /v2/audit/events",
-                params=params,
-                auth_token=audit_auth_token,
-                tenant_id=tenant_id
-            )
 
-            return ToolResult.success(
-                content=f"Audit event accepted: {action}",
-                data=response
-            )
+            try:
+                response = await self.http_client.execute(
+                    command="POST /v2/audit/events",
+                    params=params,
+                    auth_token=audit_auth_token,
+                    tenant_id=tenant_id
+                )
+
+                return ToolResult.success(
+                    content=f"Audit event accepted: {action}",
+                    data=response
+                )
+            except httpx.HTTPStatusError as http_err:
+                # Issue #2 fix: Clear bad cached token on 401/403 and retry with fallback
+                if http_err.response.status_code in (401, 403):
+                    logger.warning(
+                        "Audit submission got %d for tenant %d, clearing cached system token and retrying fallback",
+                        http_err.response.status_code, tenant_id
+                    )
+                    # Clear potentially invalid cached token
+                    if tenant_id in self._audit_system_tokens:
+                        del self._audit_system_tokens[tenant_id]
+                        logger.info("Cleared cached system service token for tenant %d due to 401/403", tenant_id)
+
+                    # Retry with fallback (force re-resolution which will use user token exchange)
+                    retry_token = await self._resolve_audit_auth_token(tenant_id, auth_token)
+                    if retry_token and retry_token != audit_auth_token:
+                        logger.info("Retry audit with fallback token for tenant %d", tenant_id)
+                        try:
+                            retry_response = await self.http_client.execute(
+                                command="POST /v2/audit/events",
+                                params=params,
+                                auth_token=retry_token,
+                                tenant_id=tenant_id
+                            )
+                            return ToolResult.success(
+                                content=f"Audit event accepted (via fallback): {action}",
+                                data=retry_response
+                            )
+                        except httpx.HTTPStatusError as retry_err:
+                            logger.warning("Fallback audit submission also failed: %d", retry_err.response.status_code)
+                            # Don't retry again, return skipped status
+                            return ToolResult.success(
+                                content=f"Audit event skipped (auth failed after fallback): {action}",
+                                data={"skipped": True, "reason": "AUTH_FAILED_AFTER_CACHE_CLEAR"}
+                            )
+                    else:
+                        logger.warning("No fallback token available after cache clear for tenant %d", tenant_id)
+                        return ToolResult.success(
+                            content=f"Audit event skipped (no fallback after 401/403): {action}",
+                            data={"skipped": True, "reason": "NO_FALLBACK_AFTER_401_403"}
+                        )
+                else:
+                    # Non-401/403 error, propagate normally
+                    raise
+
         except Exception as e:
-            logger.error(f"Error submitting audit event: {e}")
+            logger.error("Error submitting audit event: %s", e)
             return ToolResult.error(
                 content=f"Failed to submit audit event: {str(e)}",
                 error_code="AUDIT_SUBMIT_FAILED"
@@ -4828,6 +4888,8 @@ class MembershipMCPServer(BaseMCPServer):
         auth_token: Optional[str] = None
     ) -> ToolResult:
         """Submit multiple audit events."""
+        import httpx  # For HTTPStatusError handling
+
         try:
             # Build batch payload
             payload = {
@@ -4841,6 +4903,8 @@ class MembershipMCPServer(BaseMCPServer):
             # Use tenant_id from first event
             first_event_tenant = events[0].get("tenant_id") if events else self.tenant_id
 
+            # Check if using cached token (for 401/403 handling)
+            used_cached_token = False
             audit_auth_token = await self._resolve_audit_auth_token(first_event_tenant, auth_token)
             if not audit_auth_token:
                 logger.warning("Skipping audit events batch submit because no valid audit auth token is available")
@@ -4848,20 +4912,75 @@ class MembershipMCPServer(BaseMCPServer):
                     content="Audit events batch skipped (no valid auth token)",
                     data={"skipped": True, "reason": "NO_VALID_AUDIT_TOKEN", "count": len(events)}
                 )
-            response = await self.http_client.execute(
-                command="POST /v2/audit/events/batch",
-                params=params,
-                auth_token=audit_auth_token,
-                tenant_id=first_event_tenant
-            )
 
-            count = len(events)
-            return ToolResult.success(
-                content=f"Submitted {count} audit events",
-                data=response
-            )
+            # Track if using cached token
+            cached_token = self._audit_system_tokens.get(first_event_tenant)
+            if cached_token and audit_auth_token == cached_token:
+                used_cached_token = True
+
+            try:
+                response = await self.http_client.execute(
+                    command="POST /v2/audit/events/batch",
+                    params=params,
+                    auth_token=audit_auth_token,
+                    tenant_id=first_event_tenant
+                )
+
+                count = len(events)
+                return ToolResult.success(
+                    content=f"Submitted {count} audit events",
+                    data=response
+                )
+            except httpx.HTTPStatusError as http_err:
+                # Issue #2 fix: Clear bad cached token on 401/403 and retry with fallback
+                if http_err.response.status_code in (401, 403):
+                    logger.warning(
+                        "Audit batch submission got %d for tenant %d, clearing cached system token",
+                        http_err.response.status_code, first_event_tenant
+                    )
+                    if used_cached_token:
+                        # Clear potentially invalid cached token
+                        if first_event_tenant in self._audit_system_tokens:
+                            del self._audit_system_tokens[first_event_tenant]
+                            logger.info("Cleared cached system service token for tenant %d due to 401/403", first_event_tenant)
+
+                        # Retry with fallback
+                        retry_token = await self._resolve_audit_auth_token(first_event_tenant, auth_token)
+                        if retry_token and retry_token != audit_auth_token:
+                            logger.info("Retry audit batch with fallback token for tenant %d", first_event_tenant)
+                            try:
+                                retry_response = await self.http_client.execute(
+                                    command="POST /v2/audit/events/batch",
+                                    params=params,
+                                    auth_token=retry_token,
+                                    tenant_id=first_event_tenant
+                                )
+                                count = len(events)
+                                return ToolResult.success(
+                                    content=f"Submitted {count} audit events (via fallback)",
+                                    data=retry_response
+                                )
+                            except httpx.HTTPStatusError as retry_err:
+                                logger.warning("Fallback audit batch submission also failed: %d", retry_err.response.status_code)
+                                return ToolResult.success(
+                                    content="Audit events batch skipped (auth failed after fallback)",
+                                    data={"skipped": True, "reason": "AUTH_FAILED_AFTER_CACHE_CLEAR", "count": len(events)}
+                                )
+                        else:
+                            logger.warning("No fallback token available for tenant %d after cache clear", first_event_tenant)
+                            return ToolResult.success(
+                                content="Audit events batch skipped (no fallback after 401/403)",
+                                data={"skipped": True, "reason": "NO_FALLBACK_AFTER_401_403", "count": len(events)}
+                            )
+                    else:
+                        # Not using cached token, just report the failure
+                        raise
+                else:
+                    # Non-401/403 error, propagate normally
+                    raise
+
         except Exception as e:
-            logger.error(f"Error submitting audit events batch: {e}")
+            logger.error("Error submitting audit events batch: %s", e)
             return ToolResult.error(
                 content=f"Failed to submit audit events: {str(e)}",
                 error_code="AUDIT_BATCH_SUBMIT_FAILED"

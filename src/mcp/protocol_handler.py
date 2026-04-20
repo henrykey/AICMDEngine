@@ -287,6 +287,32 @@ class MCPProtocolHandler:
 
         logger.info(f"Executing tool: {mcp_name}.{tool_name}")
 
+        # ===== Membership API 推送的系统服务 token 处理 =====
+        # 如果 Membership API 推送了 system_service_token，缓存到 MembershipMCPServer
+        # 这样后续 audit 回调可以使用缓存的 token（24小时有效）
+        system_service_token = arguments.get("system_service_token")
+        pushed_tenant_id = arguments.get("_tenant_id") or arguments.get("tenant_id")
+
+        if system_service_token and pushed_tenant_id:
+            membership_mcp = registry.get_mcp("membership")
+            if membership_mcp and hasattr(membership_mcp, "_audit_system_tokens"):
+                # Issue #3 fix: Validate tenant claims consistency before caching
+                if self._validate_system_token_claims(system_service_token, pushed_tenant_id):
+                    membership_mcp._audit_system_tokens[pushed_tenant_id] = system_service_token
+                    logger.info(
+                        f"Cached system service token for tenant {pushed_tenant_id} "
+                        f"(pushed by Membership API, 24h validity, claims validated)"
+                    )
+                else:
+                    logger.warning(
+                        f"Skipped caching system token for tenant {pushed_tenant_id}: "
+                        f"claims validation failed (tenant mismatch or invalid subject)"
+                    )
+
+        # 从 arguments 中移除 system_service_token（它是传递给 MCP Router 的元数据，不是工具参数）
+        if "system_service_token" in arguments:
+            arguments = {k: v for k, v in arguments.items() if k != "system_service_token"}
+
         # Inject per-MCP LLM provider configuration for external OCR/VLM MCPs.
         arguments = await self._inject_external_vlm_config(
             mcp_name=mcp_name,
@@ -412,6 +438,75 @@ class MCPProtocolHandler:
         if len(value) <= 8:
             return "***"
         return f"{value[:4]}***{value[-4:]}"
+
+    @staticmethod
+    def _validate_system_token_claims(token: str, expected_tenant_id: Any) -> bool:
+        """
+        Issue #3 fix: Validate tenant claims consistency before caching.
+
+        This is a lightweight sanity check, NOT a security boundary.
+        Real security validation is done by Membership API when verifying the token.
+
+        Checks:
+        1. Decode JWT payload (without signature verification)
+        2. If payload has tenantId/tenant_id, verify it matches expected_tenant_id
+        3. If payload has 'sub' field, verify it follows system-service pattern
+
+        Args:
+            token: JWT token string
+            expected_tenant_id: Expected tenant ID from arguments
+
+        Returns:
+            True if claims are consistent (allow caching)
+            False if claims mismatch, token format invalid, or decode fails (skip caching)
+        """
+        import base64
+        import json
+
+        try:
+            # JWT format: header.payload.signature
+            parts = token.split('.')
+            if len(parts) != 3:
+                logger.warning("Invalid JWT format, refusing to cache")
+                return False  # Refuse caching for invalid format
+
+            # Decode payload (second part)
+            payload = parts[1]
+            # Add padding if needed
+            padding = 4 - len(payload) % 4
+            if padding != 4:
+                payload += '=' * padding
+
+            decoded = base64.urlsafe_b64decode(payload)
+            claims = json.loads(decoded)
+
+            # Check tenant ID consistency
+            token_tenant_id = claims.get("tenantId") or claims.get("tenant_id")
+            if token_tenant_id is not None:
+                # Convert to same type for comparison
+                if str(token_tenant_id) != str(expected_tenant_id):
+                    logger.warning(
+                        f"Token tenant mismatch: token has {token_tenant_id}, "
+                        f"expected {expected_tenant_id}, refusing to cache"
+                    )
+                    return False
+
+            # Check subject pattern for system service account
+            # Expected: system-service-t{tenantId} or similar pattern (must start with system-service-)
+            sub = claims.get("sub")
+            if sub:
+                if not sub.startswith("system-service-"):
+                    logger.warning(
+                        f"Token subject '{sub}' doesn't match system service pattern, "
+                        f"refusing to cache"
+                    )
+                    return False
+
+            return True
+
+        except Exception as e:
+            logger.warning(f"Failed to decode token claims: {e}, refusing to cache")
+            return False  # Refuse caching if validation fails
 
     async def _handle_resources_list(
         self,
