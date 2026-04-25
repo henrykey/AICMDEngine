@@ -14,6 +14,7 @@ services:
       PYTHONUNBUFFERED: "1"
       MCP_HOST: 0.0.0.0
       MCP_PORT: "8000"
+      WS_MAX_SIZE: "20971520"
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LLM_TIMEOUT: ${LLM_TIMEOUT:-60000}
       LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-3}
@@ -28,7 +29,7 @@ services:
         pdf2md-enhanced:
           transport: http
           url: http://pdf2md-enhanced:9010
-          timeout: 1300
+          timeout: 600
           llm_provider: multmode
         pageindex:
           transport: http
@@ -53,6 +54,8 @@ services:
     image: aiplanner-plan2:latest
     container_name: aiplanner-plan2
     restart: unless-stopped
+    environment:
+      MEMBERSHIP_UPSTREAM: ${MEMBERSHIP_UPSTREAM:-http://membership-api:8080}
     depends_on:
       mcp-router:
         condition: service_healthy
@@ -81,8 +84,8 @@ services:
     environment:
       PYTHONUNBUFFERED: "1"
       PDF2MD_ENH_OUTPUT_DIR: /app/data/output
-      PDF2MD_ENH_PAGE_TIMEOUT_SEC: ${PDF2MD_ENH_PAGE_TIMEOUT_SEC:-1260}
-      PDF2MD_ENH_VLM_CALL_TIMEOUT_CAP_SEC: ${PDF2MD_ENH_VLM_CALL_TIMEOUT_CAP_SEC:-1200}
+      PDF2MD_ENH_PAGE_TIMEOUT_SEC: ${PDF2MD_ENH_PAGE_TIMEOUT_SEC:-600}
+      PDF2MD_ENH_VLM_CALL_TIMEOUT_CAP_SEC: ${PDF2MD_ENH_VLM_CALL_TIMEOUT_CAP_SEC:-600}
     ports:
       - "9010:9010"
     volumes:

@@ -16,6 +16,7 @@ from subprocess import PIPE, STDOUT
 from datetime import datetime
 
 from .base_server import BaseMCPServer, Tool, ToolResult
+from ..core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +139,7 @@ class ExternalMCPServer(BaseMCPServer):
                 stdout=PIPE,
                 stderr=PIPE,
                 env=env,
-                limit=1024 * 1024  # 1MB buffer
+                limit=settings.external_mcp_stdio_buffer_size
             )
 
             # 启动消息读取任务
@@ -173,7 +174,7 @@ class ExternalMCPServer(BaseMCPServer):
                 ping_interval=20,
                 ping_timeout=120,  # 增加到120秒，适应PaddleOCR等慢速MCP
                 close_timeout=10,
-                max_size=10 * 1024 * 1024  # 10MB
+                max_size=settings.external_mcp_ws_max_size
             )
 
             logger.info(f"WebSocket connection established to '{self.name}'")
@@ -225,8 +226,8 @@ class ExternalMCPServer(BaseMCPServer):
             timeout=aiohttp.ClientTimeout(total=self.timeout, connect=30, sock_read=self.timeout),
             # Avoid "Chunk too big" on large streamable-http/SSE JSON-RPC responses
             # (e.g. finalize_task returning merged markdown/rag for many pages).
-            read_bufsize=8 * 1024 * 1024,
-            max_line_size=8 * 1024 * 1024,
+            read_bufsize=settings.external_mcp_http_read_buffer_size,
+            max_line_size=settings.external_mcp_http_max_line_size,
             max_field_size=64 * 1024,
         )
 

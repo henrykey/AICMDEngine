@@ -53,6 +53,19 @@ class Settings(BaseSettings):
             )
         return self
 
+    @model_validator(mode="after")
+    def apply_message_size_defaults(self) -> "Settings":
+        """Use the router WebSocket size as the default source for external MCP buffers."""
+        if self.external_mcp_stdio_buffer_size is None:
+            self.external_mcp_stdio_buffer_size = self.ws_max_size
+        if self.external_mcp_ws_max_size is None:
+            self.external_mcp_ws_max_size = self.ws_max_size
+        if self.external_mcp_http_read_buffer_size is None:
+            self.external_mcp_http_read_buffer_size = self.ws_max_size
+        if self.external_mcp_http_max_line_size is None:
+            self.external_mcp_http_max_line_size = self.ws_max_size
+        return self
+
     # Tenant Configuration
     fixed_tenant_id: Optional[int] = Field(default=None, env="FIXED_TENANT_ID")
 
@@ -128,7 +141,12 @@ class Settings(BaseSettings):
     # WebSocket Configuration
     ws_ping_interval: int = Field(default=20, env="WS_PING_INTERVAL")
     ws_ping_timeout: int = Field(default=20, env="WS_PING_TIMEOUT")
+    ws_max_size: int = Field(default=20 * 1024 * 1024, env="WS_MAX_SIZE")
     ws_max_connections: int = Field(default=1000, env="WS_MAX_CONNECTIONS")
+    external_mcp_stdio_buffer_size: Optional[int] = Field(default=None, env="EXTERNAL_MCP_STDIO_BUFFER_SIZE")
+    external_mcp_ws_max_size: Optional[int] = Field(default=None, env="EXTERNAL_MCP_WS_MAX_SIZE")
+    external_mcp_http_read_buffer_size: Optional[int] = Field(default=None, env="EXTERNAL_MCP_HTTP_READ_BUFFER_SIZE")
+    external_mcp_http_max_line_size: Optional[int] = Field(default=None, env="EXTERNAL_MCP_HTTP_MAX_LINE_SIZE")
 
     # MCP Configuration
     mcp_required_scope: str = Field(default="mcp", env="MCP_REQUIRED_SCOPE")

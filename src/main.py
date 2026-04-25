@@ -301,4 +301,10 @@ app.include_router(design.router)  # Design routes at /api/design/* (no prefix)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("src.main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(
+        "src.main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        ws_max_size=settings.ws_max_size,
+    )
