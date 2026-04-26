@@ -38,5 +38,5 @@ server {
 #
 # map $http_upgrade $connection_upgrade {
 #     default upgrade;
-#     '' close;
+#     '' keep-alive;    # keep-alive for regular HTTP, upgrade for WebSocket
 # }

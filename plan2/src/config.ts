@@ -6,10 +6,14 @@ export interface AppConfig {
     membershipUserPath?: string;
 }
 
-// Default config matches the JSON structure but serves as fallback
+// Default config matches the JSON structure but serves as fallback.
+// membershipApiUrl is intentionally empty so all /v2/* requests use
+// relative paths and are handled by the nginx reverse proxy. This
+// ensures the app works correctly even if config.json fails to load
+// (e.g. when accessed via a reverse-proxy bridge).
 let config: AppConfig = {
-    nlTpsApiUrl: 'http://localhost:8000/v1',
-    membershipApiUrl: 'http://localhost:8080',
+    nlTpsApiUrl: '/v1',
+    membershipApiUrl: '',
     membershipLoginPath: '/v2/auth/unified/login',
     membershipSwitchTenantPath: '/v2/auth/unified/switch-tenant'
 };

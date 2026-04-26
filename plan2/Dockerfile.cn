@@ -20,7 +20,15 @@ RUN apk add --no-cache curl
 
 COPY --from=builder /app/dist /usr/share/nginx/html
 
-RUN cat > /etc/nginx/conf.d/default.conf << 'EOF'
+ENV MEMBERSHIP_UPSTREAM=http://host.docker.internal:8080
+
+RUN mkdir -p /etc/nginx/templates \
+    && cat > /etc/nginx/templates/default.conf.template << 'EOF'
+upstream mcp_router {
+    server mcp-router:8000;
+    keepalive 16;
+}
+
 server {
     listen 5122;
     server_name localhost;
@@ -32,7 +40,27 @@ server {
     }
 
     location /api/ {
-        proxy_pass http://mcp-router:8000/;
+        proxy_pass http://mcp_router;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /v1/ {
+        proxy_pass http://mcp_router;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /v2/ {
+        proxy_pass ${MEMBERSHIP_UPSTREAM};
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;

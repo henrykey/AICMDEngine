@@ -1,4 +1,5 @@
-FROM python:3.12-slim
+ARG PYTHON_BASE_IMAGE=python:3.12-slim
+FROM ${PYTHON_BASE_IMAGE}
 
 # 设置环境变量
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -8,7 +9,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+ARG PIP_INDEX_URL=
+ARG APT_MIRROR=
+
+RUN if [ -n "${APT_MIRROR}" ]; then \
+      if [ -f /etc/apt/sources.list ]; then \
+        sed -i "s|http://deb.debian.org/debian|${APT_MIRROR}|g; s|http://security.debian.org/debian-security|${APT_MIRROR}-security|g" /etc/apt/sources.list; \
+      fi; \
+      if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+        sed -i "s|http://deb.debian.org/debian|${APT_MIRROR}|g; s|http://security.debian.org/debian-security|${APT_MIRROR}-security|g" /etc/apt/sources.list.d/debian.sources; \
+      fi; \
+    fi \
+    && apt-get update && apt-get install -y --no-install-recommends \
         libgomp1 \
         curl \
         ca-certificates \
@@ -21,6 +33,8 @@ COPY .wheelhouse/ /opt/wheelhouse/
 # 2. 安装 Python 依赖
 RUN if find /opt/wheelhouse -type f ! -name '.gitkeep' | grep -q .; then \
       pip install --no-index --find-links=/opt/wheelhouse -r requirements.txt; \
+    elif [ -n "${PIP_INDEX_URL}" ]; then \
+      pip install -i "${PIP_INDEX_URL}" --no-cache-dir -r requirements.txt; \
     else \
       pip install --no-cache-dir -r requirements.txt; \
     fi
