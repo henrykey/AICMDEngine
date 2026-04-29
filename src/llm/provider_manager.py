@@ -61,6 +61,10 @@ class LLMProviderManager:
         # Store db_client for later use in CRUD operations
         self.db_client = db_client
 
+        self.clients = {}
+        self.cost_tracker = {}
+        self.current_provider = None
+
         # Step 1: Try to load from MongoDB
         mongodb_providers = {}
         if db_client and self.config_loader.use_mongodb:
@@ -70,34 +74,32 @@ class LLMProviderManager:
             else:
                 logger.info("MongoDB is empty")
 
-        # Step 2: Try to initialize clients from MongoDB providers
-        successfully_initialized_from_mongodb = self._initialize_clients(mongodb_providers, "MongoDB")
-
-        # Step 3: If MongoDB is empty or all providers are invalid, use YAML
-        if successfully_initialized_from_mongodb == 0:
-            logger.info("No valid providers in MongoDB, loading from YAML configuration")
+        # Step 2: Prefer MongoDB whenever it has provider documents. Keep provider
+        # configs visible even when a client cannot be initialized, so the UI can
+        # show and fix bad API key references instead of rendering an empty list.
+        if mongodb_providers:
+            successfully_initialized_from_mongodb = self._initialize_clients(mongodb_providers, "MongoDB")
+            self.providers = mongodb_providers
+            if successfully_initialized_from_mongodb:
+                logger.info(f"Using {successfully_initialized_from_mongodb} initialized providers from MongoDB")
+            else:
+                logger.warning("Loaded providers from MongoDB, but no clients could be initialized")
+        else:
+            logger.info("No providers in MongoDB, loading from YAML configuration")
             yaml_providers = self.config_loader.load_from_yaml()
             self._initialize_clients(yaml_providers, "YAML")
             self.providers = yaml_providers
-        else:
-            self.providers = mongodb_providers
-            logger.info(f"Using {successfully_initialized_from_mongodb} valid providers from MongoDB")
 
-        # Step 4: Remove providers that don't have initialized clients
-        # This ensures only providers with valid API keys are available
-        self.providers = {
-            name: config for name, config in self.providers.items()
-            if name in self.clients
-        }
         logger.info(f"Final provider list: {list(self.providers.keys())}")
 
-        # Step 5: Set default provider (first enabled one with a client)
+        # Step 3: Set default provider (first enabled one with an initialized client)
         enabled = self.config_loader.get_enabled_providers(self.providers)
-        if enabled:
-            self.current_provider = enabled[0].name
+        initialized_enabled = [provider for provider in enabled if provider.name in self.clients]
+        if initialized_enabled:
+            self.current_provider = initialized_enabled[0].name
             logger.info(f"Set default provider: {self.current_provider}")
         else:
-            logger.warning("No enabled providers found!")
+            logger.warning("No enabled providers with initialized clients found!")
 
     def _initialize_clients(self, providers: Dict[str, LLMConfig], source: str) -> int:
         """
