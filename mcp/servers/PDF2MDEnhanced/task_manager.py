@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 from pathlib import Path
@@ -9,6 +8,7 @@ from typing import Any, Dict, List, Optional
 import fitz
 
 from .models import PageRecord, TaskRecord, now_iso
+from .source_resolver import PDFSourceResolver
 
 
 class TaskManager:
@@ -16,23 +16,29 @@ class TaskManager:
         self._tasks: Dict[str, TaskRecord] = {}
         self._root = Path(output_dir).expanduser().resolve()
         self._root.mkdir(parents=True, exist_ok=True)
+        self._source_resolver = PDFSourceResolver(self._root)
 
     def start_task(
         self,
         task_name: str,
         file_path: Optional[str] = None,
         file_data: Optional[str] = None,
+        file_url: Optional[str] = None,
+        s3_bucket: Optional[str] = None,
+        s3_key: Optional[str] = None,
+        storage_config: Optional[Dict[str, Any]] = None,
         pages: Optional[List[int]] = None,
     ) -> TaskRecord:
-        if not file_path and not file_data:
-            raise ValueError("file_path or file_data is required")
-        if file_path and file_data:
-            raise ValueError("file_path and file_data cannot both be provided")
-
-        if file_data:
-            source_path = self._save_base64_pdf(file_data, task_name)
-        else:
-            source_path = str(Path(file_path).expanduser().resolve())
+        source = self._source_resolver.resolve(
+            task_name=task_name,
+            file_path=file_path,
+            file_data=file_data,
+            file_url=file_url,
+            s3_bucket=s3_bucket,
+            s3_key=s3_key,
+            storage_config=storage_config,
+        )
+        source_path = source.source_path
 
         doc = fitz.open(source_path)
         total_pages = len(doc)
@@ -52,6 +58,10 @@ class TaskManager:
             source_path=source_path,
             total_pages=total_pages,
             planned_pages=planned_pages,
+            source_type=source.source_type,
+            source_ref=source.source_ref,
+            source_size_bytes=source.size_bytes,
+            source_sha1=source.sha1,
         )
         for p in planned_pages:
             task.pages[p] = PageRecord(page_no=p)
@@ -167,6 +177,9 @@ class TaskManager:
             "task_id": task_id,
             "task_name": task.task_name,
             "state": task.status,
+            "source_type": task.source_type,
+            "source_ref": task.source_ref,
+            "source_size_bytes": task.source_size_bytes,
             "total_pages": task.total_pages,
             "planned_pages": task.planned_pages,
             "completed_pages": task.completed_pages(),
@@ -222,6 +235,10 @@ class TaskManager:
             "task_id": task.task_id,
             "task_name": task.task_name,
             "source_path": task.source_path,
+            "source_type": task.source_type,
+            "source_ref": task.source_ref,
+            "source_size_bytes": task.source_size_bytes,
+            "source_sha1": task.source_sha1,
             "total_pages": task.total_pages,
             "planned_pages": task.planned_pages,
             "status": task.status,
@@ -245,12 +262,3 @@ class TaskManager:
                 (d / f"page_{page_no}.json").write_text(
                     json.dumps(page.result, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
-
-    def _save_base64_pdf(self, file_data: str, task_name: str) -> str:
-        raw = base64.b64decode(file_data)
-        digest = hashlib.sha1(raw).hexdigest()[:12]
-        d = self._root / "uploads"
-        d.mkdir(parents=True, exist_ok=True)
-        path = d / f"{task_name}_{digest}.pdf"
-        path.write_bytes(raw)
-        return str(path)

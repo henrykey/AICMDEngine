@@ -39,8 +39,9 @@ RUN if find /opt/wheelhouse -type f ! -name '.gitkeep' | grep -q .; then \
       pip install --no-cache-dir -r requirements.txt; \
     fi
 
-# 3. 复制剩余代码
-COPY . /app/PDF2MDEnhanced
+# 3. 只复制运行所需源码，避免把构建缓存、wheelhouse、任务产物打进镜像
+RUN mkdir -p /app/PDF2MDEnhanced
+COPY __init__.py __main__.py models.py page_processor.py server.py source_resolver.py task_manager.py vlm_client.py /app/PDF2MDEnhanced/
 
 # 4. 创建数据目录
 RUN mkdir -p /app/data/input /app/data/output /app/data/tasks

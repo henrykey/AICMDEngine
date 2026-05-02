@@ -74,7 +74,7 @@ AIPlanner 内部访问：
 `deploy.sh` 当前支持：
 
 - `prepare`
-  - 自动检查并准备 `linux/amd64` wheelhouse 缓存
+  - 自动检查并按 `BUILD_PLATFORM` 准备 wheelhouse 缓存
   - 生成远端可上传 bundle 到 `deploy/out/`
   - 渲染 `plan2/config.json`
   - 生成远端使用的 image-only Compose 文件
@@ -322,7 +322,7 @@ bash AIPlanner/deploy/preflight-resources.sh --env AIPlanner/.env.ali --skip-por
 
 ### 3. 生成部署产物
 
-脚本在 `prepare` / `all --build-images` 时会自动准备 `linux/amd64` Python 预存储包。
+脚本在 `prepare` / `all --build-images` 时会自动按 `BUILD_PLATFORM` 准备 Python 预存储包。
 默认不包含 proxy 相关 wheelhouse；只有显式传 `--with-proxy` 时才会准备 proxy 依赖。
 如显式传 `--mirror cn`，构建和依赖下载会优先使用国内镜像，默认优先走清华源。
 

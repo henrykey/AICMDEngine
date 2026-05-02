@@ -26,7 +26,7 @@ manager = TaskManager(output_dir=OUTPUT_DIR)
 
 @mcp.tool("health_check")
 async def health_check() -> str:
-    return json.dumps({"ok": True, "service": "pdf2md-enhanced", "version": "0.1.0"}, ensure_ascii=False)
+    return json.dumps({"ok": True, "service": "pdf2md-enhanced", "version": "0.2.0"}, ensure_ascii=False)
 
 
 @mcp.tool("start_task")
@@ -34,6 +34,10 @@ async def start_task(
     task_name: str,
     file_path: Optional[str] = None,
     file_data: Optional[str] = None,
+    file_url: Optional[str] = None,
+    s3_bucket: Optional[str] = None,
+    s3_key: Optional[str] = None,
+    storage_config: Optional[Dict[str, Any]] = None,
     pages: Optional[List[int]] = None,
     routing_config: Optional[Dict[str, Any]] = None,
     vlm_defaults: Optional[Dict[str, Any]] = None,
@@ -41,12 +45,28 @@ async def start_task(
     _ = routing_config
     loop = asyncio.get_event_loop()
     try:
-        task = await loop.run_in_executor(None, manager.start_task, task_name, file_path, file_data, pages)
+        task = await loop.run_in_executor(
+            None,
+            lambda: manager.start_task(
+                task_name=task_name,
+                file_path=file_path,
+                file_data=file_data,
+                file_url=file_url,
+                s3_bucket=s3_bucket,
+                s3_key=s3_key,
+                storage_config=storage_config,
+                pages=pages,
+            ),
+        )
         res = {
             "task_id": task.task_id,
             "task_name": task.task_name,
             "total_pages": task.total_pages,
             "planned_pages": task.planned_pages,
+            "source_type": task.source_type,
+            "source_ref": task.source_ref,
+            "source_size_bytes": task.source_size_bytes,
+            "source_sha1": task.source_sha1,
             "created_at": task.created_at,
         }
     except Exception as exc:

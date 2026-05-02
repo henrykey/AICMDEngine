@@ -31,6 +31,7 @@ ACTION="${1:-}"
 if [[ -z "${ACTION}" || "${ACTION}" == --* ]]; then
   ACTION="all"
 fi
+BUILD_PLATFORM_ARG=""
 BUILD_IMAGES=false
 REFRESH_CACHE=false
 WITH_PROXY=false
@@ -76,17 +77,18 @@ usage() {
   cat <<'EOF'
 Usage:
   deploy/deploy.sh prepare-cache [--env-file PATH]
-  deploy/deploy.sh prepare --env-file PATH --app-host HOST [--with-proxy] [--build-images] [--refresh-cache] [--skip-preflight] [--mirror cn] [--service NAME[,NAME...]]
+  deploy/deploy.sh prepare --env-file PATH --app-host HOST [--platform PLATFORM] [--with-proxy] [--build-images] [--refresh-cache] [--skip-preflight] [--mirror cn] [--service NAME[,NAME...]]
   deploy/deploy.sh upload --env-file PATH --app-host HOST [--remote-dir DIR]
   deploy/deploy.sh deploy --env-file PATH --app-host HOST [--remote-dir DIR] [--with-proxy] [--service NAME[,NAME...]]
-  deploy/deploy.sh all --env-file PATH --app-host HOST [--remote-dir DIR] [--with-proxy] [--build-images] [--refresh-cache] [--skip-preflight] [--mirror cn] [--service NAME[,NAME...]]
+  deploy/deploy.sh all --env-file PATH --app-host HOST [--remote-dir DIR] [--platform PLATFORM] [--with-proxy] [--build-images] [--refresh-cache] [--skip-preflight] [--mirror cn] [--service NAME[,NAME...]]
 
 Environment:
   ENV_FILE=/path/to/.env   Backward-compatible override for deploy env file.
+  BUILD_PLATFORM=linux/amd64|linux/arm64   Required remote build platform; CLI --platform wins.
 
 Notes:
   - Reserved ports are fixed by design and must not be changed.
-  - `prepare-cache` downloads linux/amd64 Python wheels into deploy/cache/wheels.
+  - `prepare-cache` downloads Python wheels for BUILD_PLATFORM into deploy/cache/wheels.
   - `prepare` generates a remote-ready bundle under deploy/out.
   - `upload` syncs deploy/out to ${APP_HOST}:${REMOTE_DIR}.
   - `deploy` executes the remote install/start sequence on ${APP_HOST}.
@@ -120,6 +122,11 @@ parse_args() {
         shift
         [[ $# -gt 0 ]] || fail "--mirror requires a value"
         MIRROR="$1"
+        ;;
+      --platform)
+        shift
+        [[ $# -gt 0 ]] || fail "--platform requires a value"
+        BUILD_PLATFORM_ARG="$1"
         ;;
       --service|--services|--scope)
         shift
@@ -271,6 +278,21 @@ apply_env_defaults() {
   APT_MIRROR="${APT_MIRROR:-${APT_MIRROR_DEFAULT}}"
   ALPINE_MIRROR="${ALPINE_MIRROR:-${ALPINE_MIRROR_DEFAULT}}"
   NPM_REGISTRY="${NPM_REGISTRY:-${NPM_REGISTRY_DEFAULT}}"
+  if [[ -n "${BUILD_PLATFORM_ARG}" ]]; then
+    BUILD_PLATFORM="${BUILD_PLATFORM_ARG}"
+  else
+    BUILD_PLATFORM="${BUILD_PLATFORM:-}"
+  fi
+  case "${BUILD_PLATFORM}" in
+    linux/amd64|linux/arm64)
+      ;;
+    "")
+      fail "BUILD_PLATFORM is required for remote deploy scripts (set BUILD_PLATFORM in env file or pass --platform linux/amd64|linux/arm64)"
+      ;;
+    *)
+      fail "Unsupported BUILD_PLATFORM: ${BUILD_PLATFORM} (expected linux/amd64 or linux/arm64)"
+      ;;
+  esac
 }
 
 apply_mirror_defaults() {
@@ -317,6 +339,7 @@ load_env_file() {
   export CACHE_PYTHON_311_IMAGE CACHE_PYTHON_312_IMAGE
   export PLAN2_NODE_BASE_IMAGE PLAN2_NGINX_BASE_IMAGE
   export APT_MIRROR ALPINE_MIRROR NPM_REGISTRY
+  export BUILD_PLATFORM
   export WITH_PROXY
 }
 
@@ -409,6 +432,25 @@ dest.write_text(rendered)
 PY
 }
 
+render_env_with_build_platform() {
+  local src="$1"
+  local dest="$2"
+  awk -v platform="${BUILD_PLATFORM}" '
+    BEGIN { written = 0 }
+    /^BUILD_PLATFORM=/ {
+      print "BUILD_PLATFORM=" platform
+      written = 1
+      next
+    }
+    { print }
+    END {
+      if (!written) {
+        print "BUILD_PLATFORM=" platform
+      }
+    }
+  ' "${src}" > "${dest}"
+}
+
 copy_tree_filtered() {
   local src="$1"
   local dest="$2"
@@ -457,7 +499,7 @@ download_wheelhouse() {
     docker_host_args=(--add-host host.docker.internal:host-gateway)
   fi
 
-  docker run --rm --platform linux/amd64 \
+  docker run --rm --platform "${BUILD_PLATFORM}" \
     "${docker_host_args[@]}" \
     "${docker_proxy_env[@]}" \
     -v "${source_dir}:/workspace:ro" \
@@ -490,7 +532,7 @@ sync_wheelhouse() {
 }
 
 ensure_cache_base_images() {
-  command_exists docker || fail "docker is required for amd64 wheel cache preparation"
+  command_exists docker || fail "docker is required for wheel cache preparation"
 
   local image attempt
   while IFS= read -r image; do
@@ -500,7 +542,7 @@ ensure_cache_base_images() {
 
     log "Pulling cache base image ${image}"
     for attempt in 1 2 3; do
-      if docker pull --platform linux/amd64 "${image}"; then
+      if docker pull --platform "${BUILD_PLATFORM}" "${image}"; then
         break
       fi
       if [[ "${attempt}" -eq 3 ]]; then
@@ -522,7 +564,7 @@ prepare_cache() {
   ensure_cache_layout
   ensure_cache_base_images
 
-  log "Preparing linux/amd64 wheelhouse cache"
+  log "Preparing ${BUILD_PLATFORM} wheelhouse cache"
   if service_enabled "mcp-router"; then
     download_wheelhouse "${CACHE_PYTHON_311_IMAGE}" "${ROOT_DIR}" "requirements.txt" "${WHEEL_CACHE_DIR}/mcp-router"
     sync_wheelhouse "${WHEEL_CACHE_DIR}/mcp-router" "${ROOT_DIR}/.wheelhouse/mcp-router"
@@ -565,17 +607,17 @@ cache_is_ready() {
 ensure_cache_ready() {
   ensure_cache_layout
   if [[ "${REFRESH_CACHE}" == "true" ]]; then
-    log "Refreshing linux/amd64 wheelhouse cache by request"
+    log "Refreshing ${BUILD_PLATFORM} wheelhouse cache by request"
     prepare_cache
     return
   fi
 
   if cache_is_ready; then
-    log "Using existing linux/amd64 wheelhouse cache"
+    log "Using existing ${BUILD_PLATFORM} wheelhouse cache"
     return
   fi
 
-  log "linux/amd64 wheelhouse cache is missing; preparing automatically"
+  log "${BUILD_PLATFORM} wheelhouse cache is missing; preparing automatically"
   prepare_cache
 }
 
@@ -633,9 +675,9 @@ PY
 
 copy_static_artifacts() {
   if [[ -f "${ENV_FILE}" ]]; then
-    cp "${ENV_FILE}" "${OUT_DIR}/.env"
+    render_env_with_build_platform "${ENV_FILE}" "${OUT_DIR}/.env"
   else
-    cp "${EXAMPLE_ENV_FILE}" "${OUT_DIR}/.env"
+    render_env_with_build_platform "${EXAMPLE_ENV_FILE}" "${OUT_DIR}/.env"
   fi
 
   write_remote_compose
@@ -663,6 +705,7 @@ Remote host: ${APP_HOST:-aliapp}
 Remote dir: ${REMOTE_DIR:-/opt/AICMDEngine}
 Mirror: ${MIRROR:-default}
 Services: ${SELECTED_SERVICES[*]}
+Build platform: ${BUILD_PLATFORM}
 
 Fixed design ports:
 - mcp-router: 8000
@@ -725,9 +768,9 @@ build_images() {
     sync_wheelhouse "${WHEEL_CACHE_DIR}/pdf2md-enhanced" "${ROOT_DIR}/mcp/servers/PDF2MDEnhanced/.wheelhouse"
   fi
 
-  log "Building Docker images for linux/amd64 (services: ${SELECTED_SERVICES[*]})"
+  log "Building Docker images for ${BUILD_PLATFORM} (services: ${SELECTED_SERVICES[*]})"
   if service_enabled "mcp-router"; then
-    docker build --platform linux/amd64 \
+    docker build --platform "${BUILD_PLATFORM}" \
       --build-arg USE_WHEELHOUSE=true \
       --build-arg PYTHON_BASE_IMAGE="${CACHE_PYTHON_311_IMAGE}" \
       --build-arg PIP_INDEX_URL="${LOCAL_PIP_INDEX_URL}" \
@@ -737,7 +780,7 @@ build_images() {
       "${ROOT_DIR}"
   fi
   if service_enabled "plan2"; then
-    docker build --platform linux/amd64 \
+    docker build --platform "${BUILD_PLATFORM}" \
       --build-arg NODE_BASE_IMAGE="${PLAN2_NODE_BASE_IMAGE}" \
       --build-arg NGINX_BASE_IMAGE="${PLAN2_NGINX_BASE_IMAGE}" \
       --build-arg NPM_REGISTRY="${NPM_REGISTRY}" \
@@ -747,7 +790,7 @@ build_images() {
       "${ROOT_DIR}/plan2"
   fi
   if service_enabled "office-word"; then
-    docker build --platform linux/amd64 \
+    docker build --platform "${BUILD_PLATFORM}" \
       --build-arg PYTHON_BASE_IMAGE="${CACHE_PYTHON_311_IMAGE}" \
       --build-arg PIP_INDEX_URL="${LOCAL_PIP_INDEX_URL}" \
       -f "${ROOT_DIR}/mcp/servers/office-word/Dockerfile" \
@@ -755,7 +798,7 @@ build_images() {
       "${ROOT_DIR}/mcp/servers/office-word"
   fi
   if service_enabled "pdf2md-enhanced"; then
-    docker build --platform linux/amd64 \
+    docker build --platform "${BUILD_PLATFORM}" \
       --build-arg PYTHON_BASE_IMAGE="${CACHE_PYTHON_312_IMAGE}" \
       --build-arg PIP_INDEX_URL="${LOCAL_PIP_INDEX_URL}" \
       --build-arg APT_MIRROR="${APT_MIRROR}" \
@@ -764,7 +807,7 @@ build_images() {
       "${ROOT_DIR}/mcp/servers/PDF2MDEnhanced"
   fi
   if service_enabled "pageindex"; then
-    docker build --platform linux/amd64 \
+    docker build --platform "${BUILD_PLATFORM}" \
       --build-arg PYTHON_BASE_IMAGE="${CACHE_PYTHON_312_IMAGE}" \
       --build-arg PIP_INDEX_URL="${LOCAL_PIP_INDEX_URL}" \
       --build-arg APT_MIRROR="${APT_MIRROR}" \

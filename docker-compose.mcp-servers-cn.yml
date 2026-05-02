@@ -6,30 +6,35 @@
 #
 services:
   mcp-router:
-    platform: linux/arm64
     build:
       dockerfile: Dockerfile.mcp-router.cn
+      args:
+        PYTHON_BASE_IMAGE: ${CN_PYTHON_311_IMAGE:-docker.1ms.run/python:3.11-slim}
 
   local-retrieval:
-    platform: linux/arm64
     build:
       dockerfile: Dockerfile.cn
 
   office-word-mcp:
-    platform: linux/arm64
     build:
       dockerfile: Dockerfile.cn
+      args:
+        PYTHON_BASE_IMAGE: ${CN_PYTHON_311_IMAGE:-docker.1ms.run/python:3.11-slim}
 
   pdf2md-enhanced-mcp:
-    platform: linux/arm64
     build:
       dockerfile: Dockerfile.cn
+      args:
+        PYTHON_BASE_IMAGE: ${CN_PYTHON_312_IMAGE:-docker.1ms.run/python:3.12-slim}
   pageindex-mcp:
-    platform: linux/arm64
     build:
       dockerfile: Dockerfile.cn
+      args:
+        PYTHON_BASE_IMAGE: ${CN_PYTHON_312_IMAGE:-docker.1ms.run/python:3.12-slim}
 
   plan2-ui:
-    platform: linux/arm64
     build:
       dockerfile: Dockerfile.cn
+      args:
+        NODE_BASE_IMAGE: ${CN_NODE_20_IMAGE:-docker.1ms.run/node:20-alpine}
+        NGINX_BASE_IMAGE: ${CN_NGINX_IMAGE:-docker.1ms.run/nginx:alpine}

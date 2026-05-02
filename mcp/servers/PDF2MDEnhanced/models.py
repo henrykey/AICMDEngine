@@ -29,6 +29,10 @@ class TaskRecord:
     source_path: str
     total_pages: int
     planned_pages: List[int]
+    source_type: str = "unknown"
+    source_ref: Optional[str] = None
+    source_size_bytes: Optional[int] = None
+    source_sha1: Optional[str] = None
     status: str = "UPLOADED"
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)

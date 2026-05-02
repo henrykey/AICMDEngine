@@ -1,5 +1,6 @@
 # MCP Router Dockerfile (CN mirror variant)
-FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/python:3.11-slim
+ARG PYTHON_BASE_IMAGE=docker.1ms.run/python:3.11-slim
+FROM ${PYTHON_BASE_IMAGE}
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_DEFAULT_TIMEOUT=300 \

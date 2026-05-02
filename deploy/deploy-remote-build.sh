@@ -17,7 +17,8 @@ APP_PORT="22"
 REMOTE_DIR="/opt/AICMDEngine"
 REMOTE_SRC_BASE="/opt/AICMDEngine-src"
 SOURCE_PACKAGE="/tmp/aiplanner-source.tar.gz"
-BUILD_PLATFORM="linux/amd64"
+BUILD_PLATFORM="${BUILD_PLATFORM:-}"
+BUILD_PLATFORM_ARG=""
 DEPLOY_SCOPE="all"
 DOCKER_MIRROR=""
 UPLOAD_METHOD="auto"
@@ -75,7 +76,7 @@ Options:
   --remote-src-base DIR
   --source-package PATH
   --scope router|plan2|mcp|all
-  --platform PLATFORM
+  --platform linux/amd64|linux/arm64
   --mirror cn|PREFIX
   --upload-method auto|scp|rsync  (default: auto)
   --rsync-bwlimit KBPS            Optional rsync bandwidth limit
@@ -183,7 +184,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --platform)
-      BUILD_PLATFORM="$2"
+      BUILD_PLATFORM_ARG="$2"
       shift 2
       ;;
     --mirror)
@@ -242,6 +243,20 @@ PAGEINDEX_HOST_PORT="$PAGEINDEX_HOST_PORT_DEFAULT"
 
 # shellcheck disable=SC1090
 source "$ENV_FILE"
+
+if [[ -n "$BUILD_PLATFORM_ARG" ]]; then
+  BUILD_PLATFORM="$BUILD_PLATFORM_ARG"
+fi
+case "$BUILD_PLATFORM" in
+  linux/amd64|linux/arm64)
+    ;;
+  "")
+    fail "BUILD_PLATFORM is required for remote deploy scripts (set BUILD_PLATFORM in env file or pass --platform linux/amd64|linux/arm64)"
+    ;;
+  *)
+    fail "Unsupported BUILD_PLATFORM: $BUILD_PLATFORM (expected linux/amd64 or linux/arm64)"
+    ;;
+esac
 
 PLAN2_HOST_PORT="${PLAN2_HOST_PORT:-$PLAN2_HOST_PORT_DEFAULT}"
 ROUTER_HOST_PORT="${ROUTER_HOST_PORT:-$ROUTER_HOST_PORT_DEFAULT}"
@@ -390,6 +405,24 @@ out_file.write_text(rendered, encoding='utf-8')
 PY
 }
 
+render_env_with_build_platform() {
+  local dest="$1"
+  awk -v platform="$BUILD_PLATFORM" '
+    BEGIN { written = 0 }
+    /^BUILD_PLATFORM=/ {
+      print "BUILD_PLATFORM=" platform
+      written = 1
+      next
+    }
+    { print }
+    END {
+      if (!written) {
+        print "BUILD_PLATFORM=" platform
+      }
+    }
+  ' "$ENV_FILE" > "$dest"
+}
+
 prepare_source_package() {
   require_cmd tar
 
@@ -529,7 +562,7 @@ upload_source_and_files() {
 
   log "Uploading env and compose"
   rendered_env="$(mktemp)"
-  cp "$ENV_FILE" "$rendered_env"
+  render_env_with_build_platform "$rendered_env"
   upload_file_to_app "$rendered_env" "$APP_USER@$APP_HOST:$REMOTE_DIR/.env"
   rm -f "$rendered_env"
 

@@ -7,6 +7,7 @@ services:
         USE_WHEELHOUSE: "true"
     image: aiplanner-mcp-router:latest
     container_name: aiplanner-mcp-router
+    platform: ${BUILD_PLATFORM}
     restart: unless-stopped
     env_file:
       - ./.env
@@ -53,6 +54,7 @@ services:
       dockerfile: Dockerfile
     image: aiplanner-plan2:latest
     container_name: aiplanner-plan2
+    platform: ${BUILD_PLATFORM}
     restart: unless-stopped
     environment:
       MEMBERSHIP_UPSTREAM: ${MEMBERSHIP_UPSTREAM:-http://membership-api:8080}
@@ -80,6 +82,7 @@ services:
       dockerfile: Dockerfile
     image: aiplanner-pdf2md-enhanced:latest
     container_name: aiplanner-pdf2md-enhanced
+    platform: ${BUILD_PLATFORM}
     restart: unless-stopped
     environment:
       PYTHONUNBUFFERED: "1"
@@ -106,6 +109,7 @@ services:
       dockerfile: Dockerfile
     image: aiplanner-office-word:latest
     container_name: aiplanner-office-word
+    platform: ${BUILD_PLATFORM}
     restart: unless-stopped
     environment:
       PYTHONUNBUFFERED: "1"
@@ -130,6 +134,7 @@ services:
       dockerfile: Dockerfile
     image: aiplanner-pageindex:latest
     container_name: aiplanner-pageindex
+    platform: ${BUILD_PLATFORM}
     restart: unless-stopped
     environment:
       PYTHONUNBUFFERED: "1"
