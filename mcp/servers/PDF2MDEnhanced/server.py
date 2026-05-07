@@ -40,9 +40,11 @@ async def start_task(
     storage_config: Optional[Dict[str, Any]] = None,
     pages: Optional[List[int]] = None,
     routing_config: Optional[Dict[str, Any]] = None,
+    ocr_config: Optional[Dict[str, Any]] = None,
     vlm_defaults: Optional[Dict[str, Any]] = None,
 ) -> str:
     _ = routing_config
+    _ = ocr_config
     loop = asyncio.get_event_loop()
     try:
         task = await loop.run_in_executor(
@@ -79,19 +81,23 @@ async def process_task_page(
     task_id: str,
     page_no: int,
     vlm_config: Optional[Dict[str, Any]] = None,
+    ocr_config: Optional[Dict[str, Any]] = None,
     policy: str = "auto",
     prev_context: Optional[Dict[str, Any]] = None,
     routing_config: Optional[Dict[str, Any]] = None,
 ) -> str:
     loop = asyncio.get_event_loop()
-    effective_vlm_config = _normalize_vlm_config(vlm_config)
+    effective_routing_config = dict(routing_config or {})
+    if ocr_config:
+        effective_routing_config["ocr_config"] = ocr_config
+    ocr_vlm_config = ((ocr_config or {}).get("vlm_ocr") or {}) if isinstance(ocr_config, dict) else {}
+    effective_vlm_config = _normalize_vlm_config(vlm_config or (ocr_vlm_config if ocr_vlm_config.get("enabled", True) else None))
     vlm_used = _vlm_runtime_info(effective_vlm_config)
     page_timeout_sec = _resolve_page_timeout(effective_vlm_config)
     try:
         await loop.run_in_executor(None, manager.update_page_running, task_id, page_no)
 
         task = manager.get_task(task_id)
-        effective_routing_config = dict(routing_config or {})
         # Internal context for page processor policy decisions.
         effective_routing_config["__task_total_pages"] = len(task.planned_pages)
         result = await asyncio.wait_for(

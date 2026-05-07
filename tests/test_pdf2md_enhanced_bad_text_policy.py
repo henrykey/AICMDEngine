@@ -22,8 +22,18 @@ def _load_module(module_name: str, file_path: Path):
 package = types.ModuleType(PACKAGE_NAME)
 package.__path__ = [str(ROOT / "mcp/servers/PDF2MDEnhanced")]
 sys.modules[PACKAGE_NAME] = package
+ocr_package = types.ModuleType(f"{PACKAGE_NAME}.ocr_clients")
+ocr_package.__path__ = [str(ROOT / "mcp/servers/PDF2MDEnhanced/ocr_clients")]
+sys.modules[f"{PACKAGE_NAME}.ocr_clients"] = ocr_package
 
 _load_module(f"{PACKAGE_NAME}.vlm_client", ROOT / "mcp/servers/PDF2MDEnhanced/vlm_client.py")
+_load_module(f"{PACKAGE_NAME}.ocr_clients.ocr_models", ROOT / "mcp/servers/PDF2MDEnhanced/ocr_clients/ocr_models.py")
+_load_module(f"{PACKAGE_NAME}.ocr_clients.ocr_normalizers", ROOT / "mcp/servers/PDF2MDEnhanced/ocr_clients/ocr_normalizers.py")
+_load_module(
+    f"{PACKAGE_NAME}.ocr_clients.openai_compatible_ocr_client",
+    ROOT / "mcp/servers/PDF2MDEnhanced/ocr_clients/openai_compatible_ocr_client.py",
+)
+_load_module(f"{PACKAGE_NAME}.ocr_clients", ROOT / "mcp/servers/PDF2MDEnhanced/ocr_clients/__init__.py")
 _load_module(f"{PACKAGE_NAME}.models", ROOT / "mcp/servers/PDF2MDEnhanced/models.py")
 page_processor = _load_module(f"{PACKAGE_NAME}.page_processor", ROOT / "mcp/servers/PDF2MDEnhanced/page_processor.py")
 task_manager_module = _load_module(f"{PACKAGE_NAME}.task_manager", ROOT / "mcp/servers/PDF2MDEnhanced/task_manager.py")
@@ -31,6 +41,8 @@ task_manager_module = _load_module(f"{PACKAGE_NAME}.task_manager", ROOT / "mcp/s
 PageRecord = sys.modules[f"{PACKAGE_NAME}.models"].PageRecord
 TaskRecord = sys.modules[f"{PACKAGE_NAME}.models"].TaskRecord
 TaskManager = task_manager_module.TaskManager
+OcrElement = sys.modules[f"{PACKAGE_NAME}.ocr_clients.ocr_models"].OcrElement
+OcrResult = sys.modules[f"{PACKAGE_NAME}.ocr_clients.ocr_models"].OcrResult
 
 
 BAD_TEXT_POLICY = {
@@ -150,6 +162,27 @@ class FakeVLMClient:
         return markdown_text
 
 
+class FakeGLMOcrClient:
+    result = None
+    error = None
+
+    def __init__(self, cfg, source="glm_ocr"):
+        self.enabled = bool((cfg or {}).get("enabled"))
+        self.source = source
+
+    def extract_page(self, image_path):
+        _ = image_path
+        if self.error:
+            raise RuntimeError(self.error)
+        if self.result is not None:
+            return self.result
+        return OcrResult(
+            markdown="GLM OCR markdown",
+            page_text="GLM OCR text",
+            formulas=[OcrElement(kind="formula", source="glm_ocr", latex="a=b+c")],
+        )
+
+
 def _text_block_payload(text):
     return {
         "blocks": [
@@ -174,6 +207,9 @@ def _patch_page_runtime(monkeypatch, page):
     monkeypatch.setattr(page_processor.fitz, "open", lambda source_path: FakeDoc([page]))
     monkeypatch.setattr(page_processor, "_render_page_image", lambda *args, **kwargs: Path("/tmp/fake_page.png"))
     monkeypatch.setattr(page_processor, "DynamicVLMClient", FakeVLMClient)
+    monkeypatch.setattr(page_processor, "OpenAICompatibleOcrClient", FakeGLMOcrClient)
+    FakeGLMOcrClient.result = None
+    FakeGLMOcrClient.error = None
 
 
 def test_good_text_page_stays_on_text_layer(monkeypatch):
@@ -195,7 +231,8 @@ def test_good_text_page_stays_on_text_layer(monkeypatch):
         prev_context=None,
     )
 
-    assert result["route_selected"] == "text_layer"
+    assert result["route_selected"] == "text_only"
+    assert result["legacy_route_selected"] == "text_layer"
     assert result["bad_text_detected"] is False
     assert result["bad_text_reasons"] == []
     assert "正常中文文本" in result["render"]["markdown"]
@@ -223,7 +260,8 @@ def test_bad_font_page_switches_to_vlm(monkeypatch):
         prev_context=None,
     )
 
-    assert result["route_selected"] == "vlm"
+    assert result["route_selected"] == "full_vlm_ocr"
+    assert result["legacy_route_selected"] == "vlm"
     assert result["bad_text_detected"] is True
     assert "missing_unicode_mapping" in result["bad_text_reasons"]
     assert "long_ascii_symbol_runs" in result["bad_text_reasons"]
@@ -254,10 +292,127 @@ def test_scanned_page_routes_to_vlm(monkeypatch):
         prev_context=None,
     )
 
-    assert result["route_selected"] == "vlm"
+    assert result["route_selected"] == "full_vlm_ocr"
     assert result["bad_text_detected"] is True
     assert "empty_or_near-empty_text_with_visual_content" in result["bad_text_reasons"]
     assert result["render"]["markdown"] == "Scanned OCR markdown"
+
+
+def test_formula_page_uses_hybrid_glm_when_enabled(monkeypatch):
+    text = (
+        "本页说明承压部件厚度按下式计算，并给出变量说明。"
+        "计算结果应结合设计压力和许用应力校核。"
+        "t = pD / (2σφ - p)。式中 p 为设计压力，D 为内径，σ 为许用应力。"
+    )
+    page = FakePage(
+        text=text,
+        blocks=[(0, 0, 100, 20, text, 0, 0)],
+        dict_payload=_text_block_payload(text),
+        rawdict_payload=_text_block_payload(text),
+    )
+    _patch_page_runtime(monkeypatch, page)
+    FakeGLMOcrClient.result = OcrResult(
+        markdown="",
+        page_text="",
+        formulas=[OcrElement(kind="formula", source="glm_ocr", latex="t=\\frac{pD}{2\\sigma\\phi-p}")],
+    )
+
+    result = page_processor.process_page(
+        source_path="/tmp/formula.pdf",
+        page_no=1,
+        policy="auto",
+        vlm_config=None,
+        routing_config={
+            "ocr_config": {"glm_ocr": {"enabled": True, "model": "glm-ocr", "api_key": "x", "base_url": "http://x"}},
+            "render_cleanup_with_llm": False,
+        },
+        prev_context=None,
+    )
+
+    assert result["route_selected"] == "hybrid_glm_ocr"
+    assert result["decision"]["glm_calls"] == 1
+    assert result["elements"]["formulas"][0]["source"] == "glm_ocr"
+    assert result["semantic_status"]["complete"] is True
+
+
+def test_scanned_page_uses_full_glm_then_falls_back_to_vlm(monkeypatch):
+    page = FakePage(
+        text="",
+        blocks=[],
+        dict_payload={"blocks": [{"type": 1}]},
+        rawdict_payload={"blocks": []},
+        images=[(1,)],
+        image_rects={1: [fitz.Rect(0, 0, 90, 90)]},
+    )
+    _patch_page_runtime(monkeypatch, page)
+    FakeGLMOcrClient.error = "glm unavailable"
+    FakeVLMClient.render = "Fallback VLM markdown"
+    FakeVLMClient.page_text = "Fallback VLM text"
+
+    result = page_processor.process_page(
+        source_path="/tmp/scanned.pdf",
+        page_no=1,
+        policy="auto",
+        vlm_config={"provider": "fake"},
+        routing_config={
+            "bad_text_policy": BAD_TEXT_POLICY,
+            "ocr_config": {"glm_ocr": {"enabled": True, "model": "glm-ocr", "api_key": "x", "base_url": "http://x"}},
+            "render_cleanup_with_llm": False,
+        },
+        prev_context=None,
+    )
+
+    assert result["route_selected"] == "full_vlm_ocr"
+    assert result["decision"]["glm_calls"] == 1
+    assert result["decision"]["vlm_calls"] == 1
+    assert result["decision"]["fallback_reason"] == "glm unavailable"
+    assert result["render"]["markdown"] == "Fallback VLM markdown"
+
+
+def test_vlm_disabled_marks_missing_figure_semantics_incomplete(monkeypatch):
+    text = "本页包含工程结构示意图，正文说明用于保持文本层可靠。" * 6
+    page = FakePage(
+        text=text,
+        blocks=[(0, 0, 100, 20, text, 0, 0)],
+        dict_payload=_text_block_payload(text),
+        rawdict_payload=_text_block_payload(text),
+        images=[(1,)],
+        image_rects={1: [fitz.Rect(0, 0, 60, 60)]},
+    )
+    _patch_page_runtime(monkeypatch, page)
+
+    result = page_processor.process_page(
+        source_path="/tmp/figure.pdf",
+        page_no=1,
+        policy="auto",
+        vlm_config=None,
+        routing_config={"vlm_ocr_enabled": False, "render_cleanup_with_llm": False},
+        prev_context=None,
+    )
+
+    assert result["route_selected"] == "hybrid_vlm_ocr"
+    assert result["semantic_status"]["complete"] is False
+    assert result["semantic_status"]["missing"] == ["figure_description"]
+    assert result["semantic_status"]["reason"] == "vlm_ocr_disabled"
+
+
+def test_blank_page_completes_placeholder_without_vlm(monkeypatch):
+    page = FakePage(text="", blocks=[], dict_payload={"blocks": []}, rawdict_payload={"blocks": []})
+    _patch_page_runtime(monkeypatch, page)
+
+    result = page_processor.process_page(
+        source_path="/tmp/blank.pdf",
+        page_no=1,
+        policy="auto",
+        vlm_config=None,
+        routing_config={"render_cleanup_with_llm": False},
+        prev_context=None,
+    )
+
+    assert result["route_selected"] == "blank"
+    assert result["render"]["markdown"] == ""
+    assert result["semantic_status"]["complete"] is True
+    assert result["page_type"] == "blank"
 
 
 def test_finalize_markdown_excludes_bad_text_sample(tmp_path):

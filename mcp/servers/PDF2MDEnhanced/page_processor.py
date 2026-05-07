@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import fitz
 
+from .ocr_clients import OpenAICompatibleOcrClient, OcrResult
 from .vlm_client import DynamicVLMClient
 
 logger = logging.getLogger(__name__)
@@ -42,16 +43,21 @@ def process_page(
         if fallback_action == "force_vlm_for_page":
             mode = "FULL_VLM"
             reasons = _unique_keep_order(list(reasons) + ["bad_text_detected"] + list(bad_text_eval["reasons"]))
+    route_decision = _decide_capability_route(policy, mode, reasons, metrics, bad_text_eval, rc)
+    route_selected = route_decision["route_selected"]
+    mode = route_decision["mode"]
+    reasons = route_decision["reasons"]
+    metrics.update(route_decision["signals"])
     logger.info(
-        "process_page decision: page_no=%s mode=%s reasons=%s bad_text=%s text_chars=%s image_ratio=%s formula_score=%s table_score=%s",
+        "process_page decision: sourcePageNo=%s routeSelected=%s mode=%s reasons=%s textLayerReliable=%s visualContentDetected=%s engineSelected=%s fallbackReason=%s",
         page_no,
+        route_selected,
         mode,
         reasons,
-        bad_text_eval["detected"],
-        metrics.get("text_chars"),
-        metrics.get("image_area_ratio"),
-        metrics.get("formula_score"),
-        metrics.get("table_score"),
+        metrics.get("text_layer_reliable"),
+        metrics.get("visual_content_detected"),
+        route_decision.get("engine_selected"),
+        route_decision.get("fallback_reason"),
     )
 
     with tempfile.TemporaryDirectory(prefix="pdf2md_enh_page_") as work_dir:
@@ -63,7 +69,8 @@ def process_page(
             rotate_deg=rc["render_rotate_deg"],
         )
 
-        vlm = DynamicVLMClient(vlm_config)
+        effective_vlm_config = vlm_config or rc.get("vlm_ocr")
+        vlm = DynamicVLMClient(effective_vlm_config)
         logger.info(
             "process_page vlm_client: enabled=%s provider=%s model=%s base_url=%s timeout=%s max_retries=%s",
             vlm.enabled,
@@ -74,6 +81,8 @@ def process_page(
             vlm.max_retries,
         )
         vlm_calls = 0
+        glm_calls = 0
+        glm_ocr = OpenAICompatibleOcrClient(rc.get("glm_ocr") or {}, source="glm_ocr")
 
         layout_probe = None
         if rc.get("debug_layout_probe"):
@@ -82,7 +91,63 @@ def process_page(
             except Exception as exc:
                 layout_probe = {"error": str(exc)}
 
-        if mode == "DIRECT":
+        if route_selected == "blank":
+            markdown = ""
+            structured = {"formulas": [], "tables": [], "figures": []}
+            rag_page_text = ""
+        elif mode == "DIRECT":
+            markdown = _build_direct_markdown(page)
+            structured = {"formulas": [], "tables": [], "figures": []}
+            rag_page_text = ""
+        elif route_selected == "hybrid_glm_ocr":
+            markdown = _build_direct_markdown(page)
+            rag_page_text = ""
+            try:
+                glm_calls += 1
+                glm_result = glm_ocr.extract_page(str(image_path))
+                structured = _structured_from_ocr_result(glm_result, include_figures=False)
+                markdown = _merge_region_vlm_markdown(markdown, structured)
+                if _structured_insufficient_for_route(structured, route_selected, metrics):
+                    raise RuntimeError("glm_ocr_insufficient_structured_output")
+            except Exception as err:
+                if rc.get("vlm_ocr_enabled") and vlm.enabled:
+                    route_selected = "hybrid_vlm_ocr"
+                    route_decision["fallback_reason"] = str(err)
+                    structured = _normalize_structured(vlm.extract_region_structured(str(image_path)))
+                    vlm_calls += 1
+                    markdown = _merge_region_vlm_markdown(markdown, structured)
+                else:
+                    route_decision["fallback_reason"] = str(err)
+                    structured = {"formulas": [], "tables": [], "figures": []}
+        elif route_selected == "full_glm_ocr":
+            try:
+                glm_calls += 1
+                glm_result = glm_ocr.extract_page(str(image_path))
+                markdown = _clean_markdown(glm_result.markdown)
+                rag_page_text = glm_result.page_text
+                structured = _structured_from_ocr_result(glm_result, include_figures=False)
+                if not markdown.strip() or _structured_insufficient_for_route(structured, route_selected, metrics):
+                    raise RuntimeError("glm_ocr_empty_or_insufficient_output")
+            except Exception as err:
+                if rc.get("full_vlm_fallback_enabled") and rc.get("vlm_ocr_enabled") and vlm.enabled:
+                    route_selected = "full_vlm_ocr"
+                    route_decision["fallback_reason"] = str(err)
+                    rag_page_text = ""
+                    dual = vlm.full_page_dual_output(str(image_path))
+                    markdown = _clean_markdown(dual.get("render") or "")
+                    rag_obj = dual.get("rag") or {}
+                    rag_page_text = str(rag_obj.get("page_text") or "").strip()
+                    structured = _normalize_structured(rag_obj.get("elements"))
+                    vlm_calls += 1
+                    if not markdown.strip():
+                        if rc.get("full_vlm_retry_markdown", False):
+                            markdown = _clean_markdown(vlm.full_page_markdown(str(image_path)))
+                            vlm_calls += 1
+                        if not markdown.strip():
+                            raise RuntimeError("full_vlm_empty_render")
+                else:
+                    raise
+        elif route_selected == "hybrid_vlm_ocr" and (not rc.get("vlm_ocr_enabled") or not vlm.enabled):
             markdown = _build_direct_markdown(page)
             structured = {"formulas": [], "tables": [], "figures": []}
             rag_page_text = ""
@@ -152,20 +217,25 @@ def process_page(
     structured["tables"] = _select_rag_tables(markdown, structured.get("tables") or [])
     rag_content = _build_rag_content(markdown, structured, rag_page_text=rag_page_text)
     table_source = _detect_table_source(markdown, structured)
+    semantic_status = _semantic_status(route_selected, metrics, structured, rc, route_decision.get("fallback_reason"))
+    output_elements = _build_output_elements(markdown, structured, route_selected)
 
     rag_obj = {
         "content": rag_content,
-        "elements": structured,
+        "page_text": _strip_layout_noise_lines(rag_page_text.strip() or markdown.strip()),
+        "elements": output_elements,
     }
     if _should_emit_chunks(rc):
         rag_obj["chunks"] = _build_chunks(rag_content, chunk_size=rc["chunk_size"])
 
-    route_selected = "text_layer" if mode == "DIRECT" else "vlm"
+    legacy_route_selected = "text_layer" if mode == "DIRECT" else "vlm"
 
     result = {
         "task_page_id": hashlib.sha1(f"{source_path}:{page_no}".encode("utf-8")).hexdigest()[:16],
         "page_no": page_no,
         "route_selected": route_selected,
+        "legacy_route_selected": legacy_route_selected,
+        "semantic_status": semantic_status,
         "bad_text_detected": bad_text_eval["detected"],
         "bad_text_reasons": bad_text_eval["reasons"],
         "text_quality_summary": bad_text_eval["summary"],
@@ -174,30 +244,35 @@ def process_page(
             "reasons": reasons,
             "metrics": metrics,
             "vlm_calls": vlm_calls,
+            "glm_calls": glm_calls,
             "source_page_no": display_page_no,
             "table_source": table_source,
             "table_placeholder_count": len(table_placeholders),
             "layout_probe": layout_probe,
             "route_selected": route_selected,
+            "legacy_route_selected": legacy_route_selected,
+            "engine_selected": route_decision.get("engine_selected"),
+            "fallback_reason": route_decision.get("fallback_reason"),
+            "semantic_status": semantic_status,
             "bad_text_detected": bad_text_eval["detected"],
             "bad_text_reasons": bad_text_eval["reasons"],
             "text_quality_summary": bad_text_eval["summary"],
         },
         "render": {"markdown": markdown},
         "rag": rag_obj,
-        "elements": {
-            "tables": structured.get("tables", []),
-            "formulas": structured.get("formulas", []),
-            "figures": structured.get("figures", []),
-        },
+        "elements": output_elements,
         "next_context": next_context,
-        "page_type": "normal",
+        "page_type": "blank" if route_selected == "blank" else "normal",
     }
     return result
 
 
 def _routing_defaults(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     c = cfg or {}
+    ocr_config = c.get("ocr_config") if isinstance(c.get("ocr_config"), dict) else {}
+    glm_ocr = ocr_config.get("glm_ocr") if isinstance(ocr_config.get("glm_ocr"), dict) else {}
+    vlm_ocr = ocr_config.get("vlm_ocr") if isinstance(ocr_config.get("vlm_ocr"), dict) else {}
+    routing = c.get("routing") if isinstance(c.get("routing"), dict) else {}
     return {
         "text_chars_min": int(c.get("text_chars_min", 80)),
         "image_area_ratio_full_vlm": float(c.get("image_area_ratio_full_vlm", 0.55)),
@@ -217,6 +292,20 @@ def _routing_defaults(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         # Markdown retry avoids hard-failing pages when render can still be recovered.
         "full_vlm_retry_markdown": bool(c.get("full_vlm_retry_markdown", True)),
         "render_cleanup_with_llm": bool(c.get("render_cleanup_with_llm", True)),
+        "hybrid_ocr_enabled": bool(routing.get("hybrid_ocr_enabled", c.get("hybrid_ocr_enabled", True))),
+        "glm_ocr_enabled": bool(routing.get("glm_ocr_enabled", c.get("glm_ocr_enabled", bool(glm_ocr.get("enabled", False))))),
+        "vlm_ocr_enabled": bool(routing.get("vlm_ocr_enabled", c.get("vlm_ocr_enabled", True))),
+        "full_vlm_fallback_enabled": bool(
+            routing.get("full_vlm_fallback_enabled", c.get("full_vlm_fallback_enabled", True))
+        ),
+        "figure_semantic_description_required": bool(
+            routing.get(
+                "figure_semantic_description_required",
+                c.get("figure_semantic_description_required", True),
+            )
+        ),
+        "glm_ocr": {**glm_ocr, "enabled": bool(glm_ocr.get("enabled", False) and routing.get("glm_ocr_enabled", c.get("glm_ocr_enabled", True)))},
+        "vlm_ocr": vlm_ocr,
         "large_table_placeholder_enabled": bool(c.get("large_table_placeholder_enabled", True)),
         "large_table_min_cols": int(c.get("large_table_min_cols", 12)),
         "large_table_min_rows": int(c.get("large_table_min_rows", 16)),
@@ -330,6 +419,7 @@ def _collect_metrics(page: fitz.Page) -> Dict[str, Any]:
 
     return {
         "text_chars": text_chars,
+        "text_sample": text[:500],
         "text_blocks": text_blocks,
         "image_area_ratio": round(image_area_ratio, 4),
         "drawing_density": round(drawing_density, 4),
@@ -372,6 +462,117 @@ def _decide_mode(policy: str, m: Dict[str, Any], c: Dict[str, Any]) -> Tuple[str
         return "REGION_VLM", reasons
 
     return "DIRECT", ["text_layer_reliable"]
+
+
+def _decide_capability_route(
+    policy: str,
+    legacy_mode: str,
+    reasons: list[str],
+    metrics: Dict[str, Any],
+    bad_text_eval: Dict[str, Any],
+    rc: Dict[str, Any],
+) -> Dict[str, Any]:
+    glm_available = bool(rc.get("hybrid_ocr_enabled") and rc.get("glm_ocr_enabled") and (rc.get("glm_ocr") or {}).get("enabled"))
+    vlm_available = bool(rc.get("vlm_ocr_enabled"))
+    blank_page = _looks_blank(metrics)
+    text_layer_bad = bool(
+        bad_text_eval.get("detected")
+        or legacy_mode == "FULL_VLM"
+        or (
+            int(metrics.get("text_chars", 0) or 0) < int(rc.get("text_chars_min", 80))
+            and bool(metrics.get("visual_content_detected", False))
+        )
+    )
+    text_layer_reliable = bool(
+        not text_layer_bad
+        and (
+            legacy_mode in {"DIRECT", "REGION_VLM"}
+            or int(metrics.get("text_chars", 0) or 0) >= int(rc.get("text_chars_min", 80))
+        )
+    )
+    page_text = str(metrics.get("text_sample") or "")
+    needs_formula_latex = bool(
+        float(metrics.get("formula_score", 0.0) or 0.0) >= float(rc.get("formula_score_region_vlm", 0.12))
+        or re.search(r"按.*式|式中|公式|计算式", page_text)
+    )
+    needs_table_structure = bool(
+        float(metrics.get("table_score", 0.0) or 0.0) >= float(rc.get("table_score_region_vlm", 0.20))
+        or int(metrics.get("native_table_count", 0) or 0) > 0
+    )
+    has_meaningful_figures = bool(
+        metrics.get("visual_content_detected")
+        and not needs_table_structure
+        and (
+            float(metrics.get("image_area_ratio", 0.0) or 0.0) >= 0.12
+            or float(metrics.get("drawing_density", 0.0) or 0.0) >= 0.45
+        )
+    )
+
+    route = "text_only"
+    mode = legacy_mode
+    route_reasons = list(reasons or [])
+    if policy == "force_direct":
+        route = "text_only"
+        mode = "DIRECT"
+    elif policy == "force_vlm":
+        route = "full_vlm_ocr"
+        mode = "FULL_VLM"
+    elif blank_page:
+        route = "blank"
+        mode = "DIRECT"
+        route_reasons = _unique_keep_order(route_reasons + ["blank_page"])
+    elif text_layer_bad:
+        route = "full_glm_ocr" if glm_available else "full_vlm_ocr"
+        mode = "FULL_VLM"
+    elif text_layer_reliable:
+        if has_meaningful_figures:
+            route = "hybrid_vlm_ocr"
+            mode = "REGION_VLM"
+        elif needs_formula_latex or needs_table_structure:
+            route = "hybrid_glm_ocr" if glm_available else "hybrid_vlm_ocr"
+            mode = "REGION_VLM"
+        else:
+            route = "text_only"
+            mode = "DIRECT"
+    else:
+        route = "full_vlm_ocr"
+        mode = "FULL_VLM"
+
+    engine = {
+        "text_only": "text_layer",
+        "hybrid_glm_ocr": "text_layer+glm_ocr",
+        "hybrid_vlm_ocr": "text_layer+vlm_ocr",
+        "full_glm_ocr": "glm_ocr",
+        "full_vlm_ocr": "vlm_ocr",
+        "blank": "none",
+    }.get(route, "unknown")
+
+    return {
+        "route_selected": route,
+        "mode": mode,
+        "reasons": _unique_keep_order(route_reasons),
+        "engine_selected": engine,
+        "fallback_reason": "",
+        "signals": {
+            "has_meaningful_figures": has_meaningful_figures,
+            "needs_formula_latex": needs_formula_latex,
+            "needs_table_structure": needs_table_structure,
+            "text_layer_reliable": text_layer_reliable,
+            "text_layer_bad": text_layer_bad,
+            "glm_ocr_available": glm_available,
+            "vlm_ocr_available": vlm_available,
+            "blank_page": blank_page,
+        },
+    }
+
+
+def _looks_blank(metrics: Dict[str, Any]) -> bool:
+    return bool(
+        int(metrics.get("text_chars", 0) or 0) == 0
+        and float(metrics.get("image_area_ratio", 0.0) or 0.0) < 0.01
+        and float(metrics.get("drawing_density", 0.0) or 0.0) < 0.05
+        and int(metrics.get("non_text_blocks", 0) or 0) == 0
+    )
 
 
 def _detect_bad_text(page: fitz.Page, metrics: Dict[str, Any], policy: Dict[str, Any]) -> Dict[str, Any]:
@@ -933,6 +1134,179 @@ def _build_rag_content(markdown: str, structured: Dict[str, Any], rag_page_text:
     return "\n\n".join([p for p in parts if p])
 
 
+def _build_output_elements(markdown: str, structured: Dict[str, Any], route_selected: str) -> Dict[str, Any]:
+    lines = (markdown or "").splitlines()
+    table_source = "glm_ocr" if "glm" in route_selected else ("vlm_ocr" if "vlm" in route_selected else "pymupdf")
+    formula_source = "glm_ocr" if "glm" in route_selected else "vlm_ocr"
+    tables = []
+    for table in structured.get("tables") or []:
+        table_text = str(table or "").strip()
+        if not table_text:
+            continue
+        title = _title_for_table(table_text, lines)
+        tables.append(
+            {
+                "source": table_source if not table_text.startswith("[TABLE_PLACEHOLDER]") else "pymupdf",
+                "title": title,
+                "markdown": table_text,
+                "semantic_summary": _table_summary(title, table_text),
+                "context": _context_for_anchor(title, lines),
+            }
+        )
+
+    formulas = []
+    for formula in structured.get("formulas") or []:
+        latex = str(formula or "").strip()
+        if not latex:
+            continue
+        context = _context_for_formula(latex, lines)
+        formulas.append(
+            {
+                "source": formula_source,
+                "latex": latex,
+                "semantic_summary": _formula_summary(context),
+                "variables": _extract_formula_variables_context(lines),
+                "context": context,
+            }
+        )
+
+    figures = []
+    for figure in structured.get("figures") or []:
+        desc = str(figure or "").strip()
+        if not desc:
+            continue
+        figures.append(
+            {
+                "source": "vlm_ocr",
+                "type": _guess_figure_type(desc),
+                "caption": _figure_caption(desc),
+                "description": desc,
+                "labels": _extract_figure_labels(desc),
+                "semantic_summary": desc,
+                "context": _nearby_figure_context(desc, lines),
+            }
+        )
+    return {"tables": tables, "formulas": formulas, "figures": figures}
+
+
+def _semantic_status(
+    route_selected: str,
+    metrics: Dict[str, Any],
+    structured: Dict[str, Any],
+    rc: Dict[str, Any],
+    fallback_reason: Optional[str],
+) -> Dict[str, Any]:
+    missing = []
+    reason = ""
+    if (
+        rc.get("figure_semantic_description_required")
+        and metrics.get("has_meaningful_figures")
+        and not structured.get("figures")
+    ):
+        missing.append("figure_description")
+        if not rc.get("vlm_ocr_enabled") or not metrics.get("vlm_ocr_available"):
+            reason = "vlm_ocr_disabled"
+        else:
+            reason = fallback_reason or "figure_description_unavailable"
+    if route_selected == "blank":
+        return {"complete": True, "missing": [], "reason": ""}
+    return {"complete": not missing, "missing": missing, "reason": reason}
+
+
+def _title_for_table(table_text: str, lines: list[str]) -> str:
+    if table_text.startswith("[TABLE_PLACEHOLDER]"):
+        m = re.match(r"^\[TABLE_PLACEHOLDER\]\s*([^：:]+)", table_text)
+        if m:
+            return m.group(1).strip()
+    for line in lines:
+        t = line.strip()
+        if re.match(r"^(表|Table)\s*", t, flags=re.IGNORECASE):
+            return t[:80]
+    return ""
+
+
+def _table_summary(title: str, table_text: str) -> str:
+    cols, rows = _table_shape(table_text)
+    headers = _header_tokens(table_text)
+    if title:
+        return title
+    if headers:
+        return f"表格：包含 {rows} 行、{cols} 列，字段包括 {'、'.join(headers[:6])}。"
+    return f"表格：包含 {rows} 行、{cols} 列。"
+
+
+def _context_for_anchor(anchor: str, lines: list[str]) -> str:
+    if not anchor:
+        return ""
+    for idx, line in enumerate(lines):
+        if anchor in line:
+            return _nearby_context(lines, idx)
+    return ""
+
+
+def _context_for_formula(latex: str, lines: list[str]) -> str:
+    _ = latex
+    for idx, line in enumerate(lines):
+        if "式中" in line:
+            return _nearby_context(lines, idx) or line.strip()
+    for idx, line in enumerate(lines):
+        if re.search(r"按.*式|计算|公式", line):
+            return _nearby_context(lines, idx) or line.strip()
+    return ""
+
+
+def _formula_summary(context: str) -> str:
+    ctx = (context or "").strip()
+    if ctx:
+        return ctx[:160]
+    return "公式：变量说明见原文。"
+
+
+def _extract_formula_variables_context(lines: list[str]) -> str:
+    for idx, line in enumerate(lines):
+        if "式中" not in line:
+            continue
+        block = [line.strip()]
+        for nxt in lines[idx + 1 : idx + 5]:
+            t = nxt.strip()
+            if not t:
+                break
+            block.append(t)
+        return "\n".join(block)
+    return ""
+
+
+def _guess_figure_type(text: str) -> str:
+    low = (text or "").lower()
+    if "schematic" in low or "示意" in text:
+        return "schematic"
+    if "chart" in low or "curve" in low or "图表" in text:
+        return "chart"
+    if "diagram" in low or "cross-section" in low or "剖面" in text:
+        return "diagram"
+    if text:
+        return "figure"
+    return "unknown"
+
+
+def _figure_caption(text: str) -> str:
+    m = re.search(r"(图\s*\d+(?:[.-]\d+)?[^，。;\n]*)", text)
+    return m.group(1).strip() if m else ""
+
+
+def _extract_figure_labels(text: str) -> list[str]:
+    labels = re.findall(r"\b[A-Z][A-Za-z0-9_./-]{0,12}\b", text or "")
+    labels.extend(re.findall(r"[A-Za-z]\s*[≥≤=]\s*[\d.]+[A-Za-z]*", text or ""))
+    return _unique_keep_order([x.strip() for x in labels])[:12]
+
+
+def _nearby_figure_context(desc: str, lines: list[str]) -> str:
+    caption = _figure_caption(desc)
+    if caption:
+        return _context_for_anchor(caption, lines)
+    return ""
+
+
 def _strip_layout_noise_lines(text: str) -> str:
     if not text:
         return text
@@ -1080,6 +1454,28 @@ def _normalize_structured(value: Any) -> Dict[str, Any]:
         "tables": tables,
         "figures": figures,
     }
+
+
+def _structured_from_ocr_result(result: OcrResult, include_figures: bool) -> Dict[str, Any]:
+    tables = [item.markdown or item.text for item in result.tables if (item.markdown or item.text)]
+    formulas = [item.latex or item.text for item in result.formulas if (item.latex or item.text)]
+    figures = []
+    if include_figures:
+        figures = [
+            item.description or item.caption or item.text
+            for item in result.figures
+            if (item.description or item.caption or item.text)
+        ]
+    return _normalize_structured({"tables": tables, "formulas": formulas, "figures": figures})
+
+
+def _structured_insufficient_for_route(structured: Dict[str, Any], route_selected: str, metrics: Dict[str, Any]) -> bool:
+    if route_selected in {"hybrid_glm_ocr", "full_glm_ocr"}:
+        if metrics.get("needs_formula_latex") and not structured.get("formulas"):
+            return True
+        if metrics.get("needs_table_structure") and not structured.get("tables"):
+            return True
+    return False
 
 
 def _filter_formula_candidates(formulas: list[str], tables: list[str]) -> list[str]:
