@@ -10,6 +10,10 @@ Task-oriented MCP service for page-by-page PDF processing.
 
 - `start_task`
 - `process_task_page`
+- `extract_page_tables`
+- `extract_page_formulas`
+- `extract_page_figures`
+- `extract_page_structured`
 - `get_task_status`
 - `retry_failed_pages`
 - `finalize_task`
@@ -84,6 +88,80 @@ Each page result includes:
 - `decision.engine_selected` and `decision.fallback_reason`: routing and fallback diagnostics.
 - `elements.tables`, `elements.formulas`, `elements.figures`: structured RAG elements with explicit `source` such as `pymupdf`, `glm_ocr`, or `vlm_ocr`.
 - `rag.page_text`, `rag.content`, and `rag.elements`: retrieval-friendly page payload.
+
+## Single-page repair tools
+
+These tools are direct补漏 tools for one page or one page image. They do not create tasks, do not update task status, and do not write page results to `data/tasks`.
+
+All four tools accept the same input shape:
+
+```python
+file_path: Optional[str] = None
+file_data: Optional[str] = None
+file_url: Optional[str] = None
+page_no: int = 1
+input_type: str = "auto"      # auto | pdf | image
+output_format: str = "json"   # json | markdown
+describe: bool = True
+ocr_config: Optional[dict] = None
+vlm_config: Optional[dict] = None
+routing_config: Optional[dict] = None
+```
+
+Use exactly one of `file_path`, `file_data`, or `file_url`. For PDF input, `page_no` selects the page. For image input, the image is treated as a single page.
+
+### `extract_page_tables`
+
+Extracts tables only. It ignores formulas and figures even when they are visible on the same page.
+
+Strategy:
+
+- PDF input tries PyMuPDF native tables first.
+- If native tables are unavailable, GLM-OCR is used when enabled.
+- VLM-OCR is fallback when GLM-OCR is unavailable or returns no tables.
+
+JSON result shape:
+
+```json
+{
+  "tool": "extract_page_tables",
+  "source": {"input_type": "pdf", "page_no": 1, "source_sha1": "..."},
+  "items": [
+    {
+      "source": "pymupdf | glm_ocr | vlm_ocr",
+      "title": "",
+      "markdown": "",
+      "description": "",
+      "context": ""
+    }
+  ],
+  "model_calls": {"glm_ocr": 0, "vlm_ocr": 0},
+  "warnings": []
+}
+```
+
+### `extract_page_formulas`
+
+Extracts formulas only. It ignores tables and figures.
+
+Strategy:
+
+- GLM-OCR is preferred for LaTeX normalization.
+- VLM-OCR is fallback when GLM-OCR is unavailable or returns no formulas.
+- PDF text layer is used only as context for description and variable extraction.
+
+### `extract_page_figures`
+
+Extracts figures only and returns figure descriptions. It ignores tables and formulas.
+
+Strategy:
+
+- VLM-OCR is required for final figure semantic descriptions.
+- If VLM-OCR is unavailable, the tool returns no figure items and includes a warning instead of fabricating a description.
+
+### `extract_page_structured`
+
+Runs a single-page comprehensive repair pass and returns separate `tables`, `formulas`, and `figures` arrays. Use this only when the page needs a full structured补漏 pass; otherwise prefer the single-purpose tools above.
 
 ## Notes
 

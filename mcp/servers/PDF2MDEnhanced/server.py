@@ -9,6 +9,12 @@ from typing import Any, Dict, List, Optional
 from fastmcp import FastMCP
 
 from .page_processor import process_page
+from .single_page_tools import (
+    extract_page_figures_direct,
+    extract_page_formulas_direct,
+    extract_page_structured_direct,
+    extract_page_tables_direct,
+)
 from .task_manager import TaskManager
 
 
@@ -140,6 +146,130 @@ async def process_task_page(
         logger.exception("process_task_page failed: task_id=%s page_no=%s", task_id, page_no)
         res = {"task_id": task_id, "page_no": page_no, "error": str(exc), "vlm": vlm_used}
     return json.dumps(res, ensure_ascii=False)
+
+
+@mcp.tool("extract_page_tables")
+async def extract_page_tables(
+    file_path: Optional[str] = None,
+    file_data: Optional[str] = None,
+    file_url: Optional[str] = None,
+    page_no: int = 1,
+    input_type: str = "auto",
+    output_format: str = "json",
+    describe: bool = True,
+    ocr_config: Optional[Dict[str, Any]] = None,
+    vlm_config: Optional[Dict[str, Any]] = None,
+    routing_config: Optional[Dict[str, Any]] = None,
+) -> str:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: extract_page_tables_direct(
+            file_path=file_path,
+            file_data=file_data,
+            file_url=file_url,
+            page_no=page_no,
+            input_type=input_type,
+            output_format=output_format,
+            describe=describe,
+            ocr_config=ocr_config,
+            vlm_config=_normalize_vlm_config(vlm_config),
+            routing_config=routing_config,
+        ),
+    )
+
+
+@mcp.tool("extract_page_formulas")
+async def extract_page_formulas(
+    file_path: Optional[str] = None,
+    file_data: Optional[str] = None,
+    file_url: Optional[str] = None,
+    page_no: int = 1,
+    input_type: str = "auto",
+    output_format: str = "json",
+    describe: bool = True,
+    ocr_config: Optional[Dict[str, Any]] = None,
+    vlm_config: Optional[Dict[str, Any]] = None,
+    routing_config: Optional[Dict[str, Any]] = None,
+) -> str:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: extract_page_formulas_direct(
+            file_path=file_path,
+            file_data=file_data,
+            file_url=file_url,
+            page_no=page_no,
+            input_type=input_type,
+            output_format=output_format,
+            describe=describe,
+            ocr_config=ocr_config,
+            vlm_config=_normalize_vlm_config(vlm_config),
+            routing_config=routing_config,
+        ),
+    )
+
+
+@mcp.tool("extract_page_figures")
+async def extract_page_figures(
+    file_path: Optional[str] = None,
+    file_data: Optional[str] = None,
+    file_url: Optional[str] = None,
+    page_no: int = 1,
+    input_type: str = "auto",
+    output_format: str = "json",
+    describe: bool = True,
+    ocr_config: Optional[Dict[str, Any]] = None,
+    vlm_config: Optional[Dict[str, Any]] = None,
+    routing_config: Optional[Dict[str, Any]] = None,
+) -> str:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: extract_page_figures_direct(
+            file_path=file_path,
+            file_data=file_data,
+            file_url=file_url,
+            page_no=page_no,
+            input_type=input_type,
+            output_format=output_format,
+            describe=describe,
+            ocr_config=ocr_config,
+            vlm_config=_normalize_vlm_config(vlm_config),
+            routing_config=routing_config,
+        ),
+    )
+
+
+@mcp.tool("extract_page_structured")
+async def extract_page_structured(
+    file_path: Optional[str] = None,
+    file_data: Optional[str] = None,
+    file_url: Optional[str] = None,
+    page_no: int = 1,
+    input_type: str = "auto",
+    output_format: str = "json",
+    describe: bool = True,
+    ocr_config: Optional[Dict[str, Any]] = None,
+    vlm_config: Optional[Dict[str, Any]] = None,
+    routing_config: Optional[Dict[str, Any]] = None,
+) -> str:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: extract_page_structured_direct(
+            file_path=file_path,
+            file_data=file_data,
+            file_url=file_url,
+            page_no=page_no,
+            input_type=input_type,
+            output_format=output_format,
+            describe=describe,
+            ocr_config=ocr_config,
+            vlm_config=_normalize_vlm_config(vlm_config),
+            routing_config=routing_config,
+        ),
+    )
 
 
 def _vlm_runtime_info(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
