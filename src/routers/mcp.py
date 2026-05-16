@@ -14,25 +14,54 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-async def _load_mcp_llm_map(request: Request) -> Dict[str, str]:
+async def _load_mcp_provider_settings(request: Request) -> Dict[str, Dict[str, str]]:
     db = getattr(request.app, "mongodb", None)
     if db is None:
         return {}
     try:
-        docs = await db.mcp_server_settings.find({}, {"server_name": 1, "llm_provider": 1}).to_list(length=1000)
-        return {
-            str(d.get("server_name")): str(d.get("llm_provider"))
-            for d in docs
-            if d.get("server_name") and d.get("llm_provider")
-        }
+        docs = await db.mcp_server_settings.find(
+            {},
+            {"server_name": 1, "llm_provider": 1, "glm_ocr_provider": 1},
+        ).to_list(length=1000)
+        settings: Dict[str, Dict[str, str]] = {}
+        for doc in docs:
+            server_name = doc.get("server_name")
+            if not server_name:
+                continue
+            item: Dict[str, str] = {}
+            if doc.get("llm_provider"):
+                item["llm_provider"] = str(doc.get("llm_provider"))
+            if doc.get("glm_ocr_provider"):
+                item["glm_ocr_provider"] = str(doc.get("glm_ocr_provider"))
+            settings[str(server_name)] = item
+        return settings
     except Exception as exc:
         logger.warning(f"Failed to load mcp_server_settings: {exc}")
         return {}
 
 
+async def _load_mcp_llm_map(request: Request) -> Dict[str, str]:
+    settings = await _load_mcp_provider_settings(request)
+    return {
+        server_name: item["llm_provider"]
+        for server_name, item in settings.items()
+        if item.get("llm_provider")
+    }
+
+
 def _fallback_llm_provider_from_external_config(mcp: Any) -> Optional[str]:
     cfg = getattr(mcp, "external_config", {}) or {}
     provider = cfg.get("llm_provider") or cfg.get("vlm")
+    if provider:
+        return str(provider)
+    return None
+
+
+def _fallback_glm_ocr_provider_from_external_config(mcp: Any) -> Optional[str]:
+    cfg = getattr(mcp, "external_config", {}) or {}
+    provider = cfg.get("glm_ocr_provider") or cfg.get("ocr_provider")
+    if not provider and isinstance(cfg.get("glm_ocr"), dict):
+        provider = cfg["glm_ocr"].get("provider")
     if provider:
         return str(provider)
     return None
@@ -58,6 +87,14 @@ def _build_vlm_config_from_provider(request: Request, provider_name: str) -> Opt
         "max_tokens": provider.max_tokens,
     }
 
+
+def _build_glm_ocr_config_from_provider(request: Request, provider_name: str) -> Optional[Dict[str, Any]]:
+    cfg = _build_vlm_config_from_provider(request, provider_name)
+    if not cfg:
+        return None
+    cfg["enabled"] = True
+    return {"glm_ocr": cfg}
+
 @router.get("/servers")
 async def list_mcp_servers(request: Request) -> Dict[str, Any]:
     """
@@ -67,7 +104,7 @@ async def list_mcp_servers(request: Request) -> Dict[str, Any]:
     if not registry:
         raise HTTPException(status_code=503, detail="MCP Registry not initialized")
 
-    llm_map = await _load_mcp_llm_map(request)
+    provider_settings = await _load_mcp_provider_settings(request)
     servers_info = []
     for mcp in registry.get_all_mcps():
         try:
@@ -103,7 +140,10 @@ async def list_mcp_servers(request: Request) -> Dict[str, Any]:
                     "version": getattr(mcp, 'version', '1.0.0'),
                     "author": getattr(mcp, 'author', 'Unknown'),
                     "dependencies": getattr(mcp, 'dependencies', []),
-                    "llm_provider": llm_map.get(mcp.name) or _fallback_llm_provider_from_external_config(mcp),
+                    "llm_provider": (provider_settings.get(mcp.name) or {}).get("llm_provider")
+                    or _fallback_llm_provider_from_external_config(mcp),
+                    "glm_ocr_provider": (provider_settings.get(mcp.name) or {}).get("glm_ocr_provider")
+                    or _fallback_glm_ocr_provider_from_external_config(mcp),
                 }
             }
             servers_info.append(server_info)
@@ -215,7 +255,15 @@ async def execute_mcp_tool(
         "pdf2md-enhanced": {
             "default_key": "vlm_config",
             "skip_if_present": ["vlm_config", "vlm_defaults"],
-            "tool_keys": {"start_task": "vlm_defaults", "process_task_page": "vlm_config"},
+            "tool_keys": {
+                "start_task": "vlm_defaults",
+                "process_task_page": "vlm_config",
+                "extract_page_layout_enhanced": "vlm_config",
+                "extract_page_tables": "vlm_config",
+                "extract_page_formulas": "vlm_config",
+                "extract_page_figures": "vlm_config",
+                "extract_page_structured": "vlm_config",
+            },
         },
         "pageindex": {
             "default_key": "vlm_config",
@@ -224,7 +272,11 @@ async def execute_mcp_tool(
         },
     }
     inject_cfg = server_vlm_targets.get(server_name)
-    if inject_cfg and not any(k in kwargs for k in inject_cfg["skip_if_present"]):
+    if (
+        inject_cfg
+        and tool_name in inject_cfg["tool_keys"]
+        and not any(k in kwargs for k in inject_cfg["skip_if_present"])
+    ):
         llm_map = await _load_mcp_llm_map(request)
         bound_provider = llm_map.get(server_name)
         if not bound_provider:
@@ -235,6 +287,26 @@ async def execute_mcp_tool(
             if vlm_config:
                 inject_key = inject_cfg["tool_keys"].get(tool_name, inject_cfg["default_key"])
                 kwargs[inject_key] = vlm_config
+
+    pdf2md_ocr_tools = {
+        "process_task_page",
+        "analyze_page_layout",
+        "extract_page_layout_enhanced",
+        "extract_page_tables",
+        "extract_page_formulas",
+        "extract_page_figures",
+        "extract_page_structured",
+    }
+    if server_name == "pdf2md-enhanced" and tool_name in pdf2md_ocr_tools and "ocr_config" not in kwargs:
+        provider_settings = await _load_mcp_provider_settings(request)
+        bound_ocr_provider = (provider_settings.get(server_name) or {}).get("glm_ocr_provider")
+        if not bound_ocr_provider:
+            mcp = registry.get_mcp(server_name)
+            bound_ocr_provider = _fallback_glm_ocr_provider_from_external_config(mcp) if mcp else None
+        if bound_ocr_provider:
+            ocr_config = _build_glm_ocr_config_from_provider(request, bound_ocr_provider)
+            if ocr_config:
+                kwargs["ocr_config"] = ocr_config
 
     try:
         result = await registry.execute_command(
@@ -321,9 +393,74 @@ async def set_server_llm_provider(server_name: str, request: Request) -> Dict[st
             upsert=True,
         )
     else:
-        await db.mcp_server_settings.delete_one({"server_name": server_name})
+        await db.mcp_server_settings.update_one(
+            {"server_name": server_name},
+            {"$unset": {"llm_provider": ""}, "$set": {"server_name": server_name, "updated_at": now}},
+            upsert=True,
+        )
 
     return {"success": True, "server_name": server_name, "llm_provider": provider_name}
+
+
+@router.get("/servers/{server_name}/glm-ocr-provider")
+async def get_server_glm_ocr_provider(server_name: str, request: Request) -> Dict[str, Any]:
+    registry = getattr(request.app, 'mcp_registry', None)
+    if not registry:
+        raise HTTPException(status_code=503, detail="MCP Registry not initialized")
+
+    mcp = registry.get_mcp(server_name)
+    if not mcp:
+        raise HTTPException(status_code=404, detail=f"MCP server '{server_name}' not found")
+
+    provider_settings = await _load_mcp_provider_settings(request)
+    provider = (provider_settings.get(server_name) or {}).get("glm_ocr_provider")
+    source = "mongodb"
+    if not provider:
+        provider = _fallback_glm_ocr_provider_from_external_config(mcp)
+        source = "external_mcps" if provider else "none"
+
+    return {"server_name": server_name, "glm_ocr_provider": provider, "source": source}
+
+
+@router.put("/servers/{server_name}/glm-ocr-provider")
+async def set_server_glm_ocr_provider(server_name: str, request: Request) -> Dict[str, Any]:
+    registry = getattr(request.app, 'mcp_registry', None)
+    if not registry:
+        raise HTTPException(status_code=503, detail="MCP Registry not initialized")
+
+    mcp = registry.get_mcp(server_name)
+    if not mcp:
+        raise HTTPException(status_code=404, detail=f"MCP server '{server_name}' not found")
+
+    payload = await request.json()
+    provider_name = (payload or {}).get("glm_ocr_provider")
+    if provider_name is not None:
+        provider_name = str(provider_name).strip() or None
+
+    manager = getattr(request.app, "provider_manager", None)
+    if provider_name:
+        if manager is None or manager.get_provider(provider_name) is None:
+            raise HTTPException(status_code=400, detail=f"GLM-OCR provider '{provider_name}' not found")
+
+    db = getattr(request.app, "mongodb", None)
+    if db is None:
+        raise HTTPException(status_code=503, detail="MongoDB not initialized")
+
+    now = datetime.now().isoformat()
+    if provider_name:
+        await db.mcp_server_settings.update_one(
+            {"server_name": server_name},
+            {"$set": {"server_name": server_name, "glm_ocr_provider": provider_name, "updated_at": now}},
+            upsert=True,
+        )
+    else:
+        await db.mcp_server_settings.update_one(
+            {"server_name": server_name},
+            {"$unset": {"glm_ocr_provider": ""}, "$set": {"server_name": server_name, "updated_at": now}},
+            upsert=True,
+        )
+
+    return {"success": True, "server_name": server_name, "glm_ocr_provider": provider_name}
 
 @router.get("/tools")
 async def list_all_tools(request: Request) -> List[Dict[str, Any]]:

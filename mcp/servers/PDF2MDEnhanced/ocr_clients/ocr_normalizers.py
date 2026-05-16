@@ -37,6 +37,13 @@ def normalize_ocr_payload(payload: Any, source: str) -> OcrResult:
     elements = data.get("elements") if isinstance(data.get("elements"), dict) else {}
     rag_elements = rag.get("elements") if isinstance(rag.get("elements"), dict) else {}
     merged_elements = {**rag_elements, **elements}
+    localized_table = _localized_table_payload_to_markdown(data)
+    if localized_table and not (merged_elements.get("tables") or data.get("tables")):
+        merged_elements["tables"] = [{
+            "title": _pick_str(data, "表名", "table_title", "title"),
+            "markdown": localized_table,
+            "description": _pick_str(data, "列分组标题", "column_group_title", "description"),
+        }]
 
     return OcrResult(
         markdown=(render or markdown or text or "").strip(),
@@ -107,6 +114,30 @@ def _pick_str(data: Dict[str, Any], *names: str) -> str:
         if name == "data" and isinstance(value, list):
             return _table_data_to_markdown(value)
     return ""
+
+
+def _localized_table_payload_to_markdown(data: Dict[str, Any]) -> str:
+    columns = data.get("列标题") or data.get("columns")
+    rows = data.get("数据") or data.get("rows")
+    row_header = data.get("行标题") or data.get("row_header") or "row"
+    if not isinstance(columns, list) or not isinstance(rows, list):
+        return ""
+    headers = [str(col or "").strip() for col in columns if str(col or "").strip()]
+    if not headers:
+        return ""
+    markdown_rows: List[List[str]] = [[str(row_header).strip(), *headers]]
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row_key = _pick_str(row, "行标题值", "row_key", "pressure")
+        values = []
+        for header in headers:
+            value = row.get(header)
+            values.append("" if value is None else str(value).strip())
+        markdown_rows.append([row_key, *values])
+    if len(markdown_rows) <= 1:
+        return ""
+    return _table_data_to_markdown(markdown_rows)
 
 
 def _table_data_to_markdown(rows: List[Any]) -> str:

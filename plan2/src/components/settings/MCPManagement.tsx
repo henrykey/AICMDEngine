@@ -17,6 +17,7 @@ interface MCPServer {
     author?: string;
     dependencies?: string[];
     llm_provider?: string | null;
+    glm_ocr_provider?: string | null;
   };
 }
 
@@ -32,7 +33,9 @@ const MCPManagement = () => {
   const [selectedServer, setSelectedServer] = useState<MCPServer | null>(null);
   const [showDetails, setShowDetails] = useState(false);
   const [selectedServerLLM, setSelectedServerLLM] = useState<string>('');
+  const [selectedServerGlmOcr, setSelectedServerGlmOcr] = useState<string>('');
   const [savingLLM, setSavingLLM] = useState(false);
+  const [savingGlmOcr, setSavingGlmOcr] = useState(false);
 
   // 获取 MCP 服务器列表
   const fetchServers = async () => {
@@ -84,6 +87,21 @@ const MCPManagement = () => {
     }
   };
 
+  const fetchServerGlmOcrProvider = async (name: string) => {
+    try {
+      const config = getConfig();
+      const apiUrl = `${config.nlTpsApiUrl}/mcp/servers/${name}/glm-ocr-provider`;
+      const response = await fetch(apiUrl);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch MCP GLM-OCR provider: ${response.status} ${response.statusText}`);
+      }
+      const data = await response.json();
+      setSelectedServerGlmOcr(data.glm_ocr_provider || '');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unknown error');
+    }
+  };
+
   const saveServerLLMProvider = async (name: string, llmProvider: string) => {
     try {
       setSavingLLM(true);
@@ -105,6 +123,27 @@ const MCPManagement = () => {
     }
   };
 
+  const saveServerGlmOcrProvider = async (name: string, glmOcrProvider: string) => {
+    try {
+      setSavingGlmOcr(true);
+      const config = getConfig();
+      const apiUrl = `${config.nlTpsApiUrl}/mcp/servers/${name}/glm-ocr-provider`;
+      const response = await fetch(apiUrl, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ glm_ocr_provider: glmOcrProvider || null }),
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to save MCP GLM-OCR provider: ${response.status} ${response.statusText}`);
+      }
+      await fetchServers();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unknown error');
+    } finally {
+      setSavingGlmOcr(false);
+    }
+  };
+
   useEffect(() => {
     fetchServers();
     fetchLLMProviders();
@@ -116,6 +155,11 @@ const MCPManagement = () => {
   useEffect(() => {
     if (selectedServer?.name) {
       fetchServerLLMProvider(selectedServer.name);
+      if (selectedServer.name === 'pdf2md-enhanced') {
+        fetchServerGlmOcrProvider(selectedServer.name);
+      } else {
+        setSelectedServerGlmOcr('');
+      }
     }
   }, [selectedServer?.name]);
 
@@ -335,9 +379,13 @@ const MCPManagement = () => {
               server={selectedServer}
               llmProviders={llmProviders}
               selectedLLM={selectedServerLLM}
+              selectedGlmOcr={selectedServerGlmOcr}
               savingLLM={savingLLM}
+              savingGlmOcr={savingGlmOcr}
               onChangeLLM={setSelectedServerLLM}
+              onChangeGlmOcr={setSelectedServerGlmOcr}
               onSaveLLM={saveServerLLMProvider}
+              onSaveGlmOcr={saveServerGlmOcrProvider}
               onDelete={deleteServer}
               onClose={() => setShowDetails(false)}
               getStatusColor={getStatusColor}
@@ -366,9 +414,13 @@ interface ServerDetailsProps {
   server: MCPServer;
   llmProviders: LLMProvider[];
   selectedLLM: string;
+  selectedGlmOcr: string;
   savingLLM: boolean;
+  savingGlmOcr: boolean;
   onChangeLLM: (value: string) => void;
+  onChangeGlmOcr: (value: string) => void;
   onSaveLLM: (name: string, llmProvider: string) => Promise<void>;
+  onSaveGlmOcr: (name: string, glmOcrProvider: string) => Promise<void>;
   onDelete: (name: string) => void;
   onClose: () => void;
   getStatusColor: (status: string) => string;
@@ -381,9 +433,13 @@ const ServerDetails = ({
   server,
   llmProviders,
   selectedLLM,
+  selectedGlmOcr,
   savingLLM,
+  savingGlmOcr,
   onChangeLLM,
+  onChangeGlmOcr,
   onSaveLLM,
+  onSaveGlmOcr,
   onDelete,
   onClose,
   getStatusColor,
@@ -475,6 +531,36 @@ const ServerDetails = ({
           Runtime binding for this MCP. Changes apply without docker restart.
         </p>
       </div>
+
+      {server.name === 'pdf2md-enhanced' && (
+        <div>
+          <label className="text-sm font-semibold text-slate-700">GLM-OCR Provider</label>
+          <div className="flex items-center gap-2 mt-2">
+            <select
+              value={selectedGlmOcr}
+              onChange={(e) => onChangeGlmOcr(e.target.value)}
+              className="px-3 py-2 border border-slate-300 rounded-lg bg-white text-slate-900 text-sm min-w-[220px]"
+            >
+              <option value="">(Disabled / None)</option>
+              {llmProviders.map((p) => (
+                <option key={p.name} value={p.name}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={() => onSaveGlmOcr(server.name, selectedGlmOcr)}
+              disabled={savingGlmOcr}
+              className="px-3 py-2 bg-indigo-500 text-white rounded-lg text-sm font-medium hover:bg-indigo-600 disabled:opacity-50"
+            >
+              {savingGlmOcr ? 'Saving...' : 'Save'}
+            </button>
+          </div>
+          <p className="text-xs text-slate-500 mt-1">
+            Injected as ocr_config.glm_ocr for PDF2MD Enhanced page extraction.
+          </p>
+        </div>
+      )}
 
       {server.metadata?.dependencies && server.metadata.dependencies.length > 0 && (
         <div>

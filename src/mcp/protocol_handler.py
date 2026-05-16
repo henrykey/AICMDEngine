@@ -313,8 +313,8 @@ class MCPProtocolHandler:
         if "system_service_token" in arguments:
             arguments = {k: v for k, v in arguments.items() if k != "system_service_token"}
 
-        # Inject per-MCP LLM provider configuration for external OCR/VLM MCPs.
-        arguments = await self._inject_external_vlm_config(
+        # Inject per-MCP model provider configuration for external OCR/VLM MCPs.
+        arguments = await self._inject_external_model_configs(
             mcp_name=mcp_name,
             tool_name=tool_name,
             arguments=arguments,
@@ -345,7 +345,7 @@ class MCPProtocolHandler:
             logger.error(f"Tool execution error: {e}")
             raise
 
-    async def _inject_external_vlm_config(
+    async def _inject_external_model_configs(
         self,
         mcp_name: str,
         tool_name: str,
@@ -353,48 +353,73 @@ class MCPProtocolHandler:
         context: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        Inject vlm_config for external MCPs from runtime MCP->LLM binding.
-        Priority:
-        1) Explicit request args (caller-provided vlm_config/vlm_defaults)
-        2) MongoDB mcp_server_settings.llm_provider
-        3) EXTERNAL_MCPS static config field (llm_provider/vlm)
+        Inject VLM and OCR configs for external MCPs from runtime MCP bindings.
+        Explicit request args always win over router injection.
         """
         args = dict(arguments or {})
 
-        # Respect explicit caller override.
-        if args.get("vlm_config") or args.get("vlm_defaults"):
-            logger.info(
-                "[%s.%s] caller provided VLM config directly; skip router injection",
-                mcp_name,
-                tool_name,
-            )
-            return args
-
-        # Currently only pdf2md-enhanced requires runtime injected vlm_config.
+        # Currently only pdf2md-enhanced requires runtime injected model config.
         if mcp_name != "pdf2md-enhanced":
-            return args
-
-        provider_name = await self._resolve_mcp_llm_provider(mcp_name, context)
-        if not provider_name:
-            logger.info("[%s.%s] no MCP->LLM binding found; skip VLM injection", mcp_name, tool_name)
             return args
 
         provider_manager = context.get("provider_manager")
         if provider_manager is None:
-            logger.warning(f"[{mcp_name}] provider_manager unavailable, skip VLM injection")
+            logger.warning(f"[{mcp_name}] provider_manager unavailable, skip model injection")
             return args
 
+        vlm_injection_keys = {
+            "start_task": "vlm_defaults",
+            "process_task_page": "vlm_config",
+            "extract_page_layout_enhanced": "vlm_config",
+            "extract_page_tables": "vlm_config",
+            "extract_page_formulas": "vlm_config",
+            "extract_page_figures": "vlm_config",
+            "extract_page_structured": "vlm_config",
+        }
+        vlm_key = vlm_injection_keys.get(tool_name)
+        if vlm_key and "vlm_config" not in args and "vlm_defaults" not in args:
+            provider_name = await self._resolve_mcp_llm_provider(mcp_name, context)
+            if provider_name:
+                vlm_config = self._build_model_config_from_provider(provider_manager, provider_name, mcp_name, "VLM")
+                if vlm_config:
+                    args[vlm_key] = vlm_config
+            else:
+                logger.info("[%s.%s] no MCP->LLM binding found; skip VLM injection", mcp_name, tool_name)
+
+        ocr_injection_tools = {
+            "process_task_page",
+            "analyze_page_layout",
+            "extract_page_layout_enhanced",
+            "extract_page_tables",
+            "extract_page_formulas",
+            "extract_page_figures",
+            "extract_page_structured",
+        }
+        if tool_name in ocr_injection_tools and "ocr_config" not in args:
+            provider_name = await self._resolve_mcp_glm_ocr_provider(mcp_name, context)
+            if provider_name:
+                glm_ocr_config = self._build_model_config_from_provider(provider_manager, provider_name, mcp_name, "GLM-OCR")
+                if glm_ocr_config:
+                    glm_ocr_config["enabled"] = True
+                    args["ocr_config"] = {"glm_ocr": glm_ocr_config}
+            else:
+                logger.info("[%s.%s] no MCP->GLM-OCR binding found; skip OCR injection", mcp_name, tool_name)
+
+        return args
+
+    @staticmethod
+    def _build_model_config_from_provider(provider_manager: Any, provider_name: str, mcp_name: str, label: str) -> Optional[Dict[str, Any]]:
         provider = provider_manager.get_provider(provider_name)
         if not provider:
-            logger.warning(f"[{mcp_name}] provider '{provider_name}' not found, skip VLM injection")
-            return args
+            logger.warning(f"[{mcp_name}] provider '{provider_name}' not found, skip {label} injection")
+            return None
 
         api_key = provider_manager.config_loader.get_api_key(provider.api_key_ref)
         if not api_key:
-            logger.warning(f"[{mcp_name}] provider '{provider_name}' api_key not available, skip VLM injection")
-            return args
+            logger.warning(f"[{mcp_name}] provider '{provider_name}' api_key not available, skip {label} injection")
+            return None
 
-        vlm_config = {
+        return {
             "provider": provider.name,
             "model": provider.model,
             "base_url": provider.base_url,
@@ -403,13 +428,6 @@ class MCPProtocolHandler:
             "temperature": provider.temperature,
             "max_tokens": provider.max_tokens,
         }
-
-        if tool_name == "start_task":
-            args["vlm_defaults"] = vlm_config
-        elif tool_name == "process_task_page":
-            args["vlm_config"] = vlm_config
-
-        return args
 
     async def _resolve_mcp_llm_provider(self, mcp_name: str, context: Dict[str, Any]) -> Optional[str]:
         mongodb = context.get("mongodb")
@@ -426,6 +444,28 @@ class MCPProtocolHandler:
             mcp = registry.get_mcp(mcp_name)
             cfg = getattr(mcp, "external_config", {}) if mcp else {}
             static_provider = cfg.get("llm_provider") or cfg.get("vlm")
+            if static_provider:
+                return str(static_provider).strip()
+
+        return None
+
+    async def _resolve_mcp_glm_ocr_provider(self, mcp_name: str, context: Dict[str, Any]) -> Optional[str]:
+        mongodb = context.get("mongodb")
+        if mongodb is not None:
+            try:
+                doc = await mongodb.mcp_server_settings.find_one({"server_name": mcp_name})
+                if doc and doc.get("glm_ocr_provider"):
+                    return str(doc.get("glm_ocr_provider")).strip()
+            except Exception as exc:
+                logger.warning(f"[{mcp_name}] failed to read mcp_server_settings: {exc}")
+
+        registry = context.get("registry")
+        if registry:
+            mcp = registry.get_mcp(mcp_name)
+            cfg = getattr(mcp, "external_config", {}) if mcp else {}
+            static_provider = cfg.get("glm_ocr_provider") or cfg.get("ocr_provider")
+            if not static_provider and isinstance(cfg.get("glm_ocr"), dict):
+                static_provider = cfg["glm_ocr"].get("provider")
             if static_provider:
                 return str(static_provider).strip()
 

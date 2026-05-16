@@ -10,8 +10,10 @@ from fastmcp import FastMCP
 
 from .page_processor import process_page
 from .single_page_tools import (
+    analyze_page_layout_direct,
     extract_page_figures_direct,
     extract_page_formulas_direct,
+    extract_page_layout_enhanced_direct,
     extract_page_structured_direct,
     extract_page_tables_direct,
 )
@@ -179,6 +181,37 @@ async def extract_page_tables(
     )
 
 
+@mcp.tool("analyze_page_layout")
+async def analyze_page_layout(
+    file_path: Optional[str] = None,
+    file_data: Optional[str] = None,
+    file_url: Optional[str] = None,
+    page_no: int = 1,
+    input_type: str = "auto",
+    output_format: str = "json",
+    ocr_config: Optional[Dict[str, Any]] = None,
+    routing_config: Optional[Dict[str, Any]] = None,
+    return_crop_images: bool = False,
+    need_layout_visualization: bool = False,
+) -> str:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: analyze_page_layout_direct(
+            file_path=file_path,
+            file_data=file_data,
+            file_url=file_url,
+            page_no=page_no,
+            input_type=input_type,
+            output_format=output_format,
+            ocr_config=ocr_config,
+            routing_config=routing_config,
+            return_crop_images=return_crop_images,
+            need_layout_visualization=need_layout_visualization,
+        ),
+    )
+
+
 @mcp.tool("extract_page_formulas")
 async def extract_page_formulas(
     file_path: Optional[str] = None,
@@ -203,6 +236,35 @@ async def extract_page_formulas(
             input_type=input_type,
             output_format=output_format,
             describe=describe,
+            ocr_config=ocr_config,
+            vlm_config=_normalize_vlm_config(vlm_config),
+            routing_config=routing_config,
+        ),
+    )
+
+
+@mcp.tool("extract_page_layout_enhanced")
+async def extract_page_layout_enhanced(
+    file_path: Optional[str] = None,
+    file_data: Optional[str] = None,
+    file_url: Optional[str] = None,
+    page_no: int = 1,
+    input_type: str = "auto",
+    output_format: str = "json",
+    ocr_config: Optional[Dict[str, Any]] = None,
+    vlm_config: Optional[Dict[str, Any]] = None,
+    routing_config: Optional[Dict[str, Any]] = None,
+) -> str:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: extract_page_layout_enhanced_direct(
+            file_path=file_path,
+            file_data=file_data,
+            file_url=file_url,
+            page_no=page_no,
+            input_type=input_type,
+            output_format=output_format,
             ocr_config=ocr_config,
             vlm_config=_normalize_vlm_config(vlm_config),
             routing_config=routing_config,

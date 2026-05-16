@@ -10,6 +10,8 @@ Task-oriented MCP service for page-by-page PDF processing.
 
 - `start_task`
 - `process_task_page`
+- `analyze_page_layout`
+- `extract_page_layout_enhanced`
 - `extract_page_tables`
 - `extract_page_formulas`
 - `extract_page_figures`
@@ -22,8 +24,11 @@ Task-oriented MCP service for page-by-page PDF processing.
 ## Runtime OCR configuration
 
 `process_task_page` keeps the existing `vlm_config` argument and also accepts optional `ocr_config`.
+The single-page tools also accept both arguments.
 
-`ocr_config` is injected by the caller at runtime. The service does not require global environment variables for normal GLM-OCR or VLM-OCR routing.
+`ocr_config` can be injected by the caller at runtime. When called through the AICMDEngine MCP router, Plan2's MCP settings can also bind a separate `GLM-OCR Provider` for `pdf2md-enhanced`; the router converts that provider into `ocr_config.glm_ocr` for `process_task_page` and the single-page extraction tools. The existing `LLM Provider` binding remains the VLM provider and is injected as `vlm_config` or `vlm_defaults`.
+
+The service does not require global environment variables for normal GLM-OCR or VLM-OCR routing.
 
 Example:
 
@@ -93,7 +98,7 @@ Each page result includes:
 
 These tools are direct补漏 tools for one page or one page image. They do not create tasks, do not update task status, and do not write page results to `data/tasks`.
 
-All four tools accept the same input shape:
+All single-page tools accept the same source fields:
 
 ```python
 file_path: Optional[str] = None
@@ -102,13 +107,132 @@ file_url: Optional[str] = None
 page_no: int = 1
 input_type: str = "auto"      # auto | pdf | image
 output_format: str = "json"   # json | markdown
-describe: bool = True
 ocr_config: Optional[dict] = None
-vlm_config: Optional[dict] = None
 routing_config: Optional[dict] = None
 ```
 
+`extract_page_tables`, `extract_page_formulas`, `extract_page_figures`, `extract_page_structured`, and `extract_page_layout_enhanced` also accept `vlm_config`. `extract_page_tables`, `extract_page_formulas`, `extract_page_figures`, and `extract_page_structured` accept `describe`. `analyze_page_layout` is a GLM-OCR layout-only tool and does not require VLM config.
+
 Use exactly one of `file_path`, `file_data`, or `file_url`. For PDF input, `page_no` selects the page. For image input, the image is treated as a single page.
+
+### `analyze_page_layout`
+
+Recognizes the layout of a single page or page image. Use this first when the page type is unclear.
+
+Strategy:
+
+- Uses GLM-OCR `layout_parsing`.
+- Returns page Markdown plus normalized layout blocks.
+- Each block includes type, normalized bbox, content, width, and height.
+- The summary recommends which single-page repair tool to use next.
+
+JSON result shape:
+
+```json
+{
+  "tool": "analyze_page_layout",
+  "source": {"input_type": "image", "page_no": 1, "source_sha1": "..."},
+  "markdown": "...",
+  "blocks": [
+    {"index": 1, "type": "text|table|formula|image", "bbox": [0, 0, 1, 1], "content": ""}
+  ],
+  "summary": {
+    "block_counts": {"text": 2, "table": 1},
+    "dominant_type": "mixed",
+    "has_text": true,
+    "has_table": true,
+    "has_formula": false,
+    "has_image": false,
+    "recommended_tool": "extract_page_structured"
+  },
+  "model_calls": {"glm_ocr": 1, "vlm_ocr": 0},
+  "warnings": []
+}
+```
+
+### `extract_page_layout_enhanced`
+
+Runs one GLM-OCR layout pass and returns the page Markdown, layout blocks, and block-derived table/formula/figure arrays. For `image` blocks, it calls VLM once with the full page image plus block `bbox`/index hints, then attaches semantic descriptions to the matching figure items. It does not crop images or upload/store files.
+
+Strategy:
+
+- Uses GLM-OCR `layout_parsing`.
+- Returns full-page Markdown as recognized by GLM-OCR.
+- Returns normalized blocks with bbox and content.
+- Derives `tables`, `formulas`, and `figures` directly from block labels.
+- Uses VLM only to describe `image` blocks; if there are no image blocks, VLM is not called.
+
+JSON result shape:
+
+```json
+{
+  "tool": "extract_page_layout_enhanced",
+  "source": {"input_type": "image", "page_no": 1, "source_sha1": "..."},
+  "markdown": "...",
+  "blocks": [
+    {"index": 1, "type": "text|table|formula|image", "bbox": [0, 0, 1, 1], "content": ""}
+  ],
+  "tables": [{"source": "glm_ocr_layout", "markdown": "...", "bbox": [0, 0, 1, 1]}],
+  "formulas": [{"source": "glm_ocr_layout", "latex": "$$...$$", "bbox": [0, 0, 1, 1]}],
+  "figures": [{"source": "glm_ocr_layout+vlm_ocr", "caption": "Figure 1", "description": "...", "bbox": [0, 0, 1, 1]}],
+  "summary": {"recommended_tool": "extract_page_structured"},
+  "model_calls": {"glm_ocr": 1, "vlm_ocr": 1},
+  "warnings": []
+}
+```
+
+Field details:
+
+- `tool`: Always `extract_page_layout_enhanced`.
+- `source`: Input metadata.
+  - `input_type`: Resolved input type, `image` or `pdf`.
+  - `page_no`: Page number used for PDF input. Image input is always treated as one page.
+  - `source_sha1`: SHA1 of the original input file.
+- `markdown`: Full-page Markdown returned by GLM-OCR layout parsing. This is the page-level reading-order output and may include text, formulas, table HTML/Markdown, and image placeholders depending on GLM-OCR output.
+- `blocks`: Normalized layout blocks from GLM-OCR.
+  - `page`: 1-based page index from the GLM-OCR layout response.
+  - `index`: Block index assigned by GLM-OCR.
+  - `type`: Block label such as `text`, `title`, `table`, `formula`, `image`, or `unknown`.
+  - `bbox`: `[x1, y1, x2, y2]` coordinates from GLM-OCR.
+  - `content`: Raw text/HTML/LaTeX content for the block when GLM-OCR provides it.
+  - `width` / `height`: Block dimensions when present in the GLM-OCR response.
+  - `raw`: Original GLM-OCR block payload for callers that need provider-specific fields.
+- `tables`: Blocks whose `type` is `table`, normalized into table items.
+  - `source`: Always `glm_ocr_layout`.
+  - `title`: Best-effort table title derived from the table content.
+  - `markdown`: Table content from the layout block. HTML tables are preserved/normalized; empty cells are filled as `n/a` where the post-processor can detect them.
+  - `description`: Empty string for this tool; table semantic description is not generated here.
+  - `context`: Empty string unless future GLM output provides nearby context.
+  - `block_index`: The source layout block index.
+  - `bbox`: The source layout block bbox.
+- `formulas`: Blocks whose `type` is `formula`, normalized into formula items.
+  - `source`: Always `glm_ocr_layout`.
+  - `latex`: Formula content wrapped as a display math block when needed.
+  - `description`: Empty string for this tool.
+  - `variables`: Empty string for this tool.
+  - `context`: Empty string for this tool.
+  - `block_index`: The source layout block index.
+  - `bbox`: The source layout block bbox.
+- `figures`: Blocks whose `type` is `image`, optionally enriched by VLM.
+  - `source`: `glm_ocr_layout` when only the layout block is available; `glm_ocr_layout+vlm_ocr` when VLM matched and described the image block.
+  - `caption`: Best-effort caption from GLM/VLM, or `Figure N`.
+  - `type`: VLM figure type such as `schematic`, `chart`, `diagram`, `figure`, or `unknown`.
+  - `description`: VLM semantic description when available. Without VLM enrichment, this is the GLM block content or empty.
+  - `labels`: Visible labels returned by VLM.
+  - `context`: Nearby context returned by VLM.
+  - `block_index`: The source layout block index.
+  - `bbox`: The source layout block bbox.
+- `summary`: Layout summary.
+  - `block_counts`: Count by block type.
+  - `dominant_type`: `table`, `formula`, `image`, `text`, `mixed`, or `unknown`.
+  - `has_text` / `has_table` / `has_formula` / `has_image`: Boolean flags derived from `blocks`.
+  - `recommended_tool`: Suggested follow-up single-page tool when a more focused repair pass is useful.
+- `model_calls`: Model call counts.
+  - `glm_ocr`: Normally `1` when GLM-OCR is enabled.
+  - `vlm_ocr`: `1` only when image blocks exist and VLM is available; otherwise `0`.
+- `warnings`: Non-fatal failures such as GLM-OCR unavailability, VLM unavailability for image descriptions, or model call errors.
+
+Important boundary: this tool does not crop images or store/upload image files. If a visual element is embedded inside a table and GLM-OCR does not emit a separate `image` block for it, it will remain part of the table/block content and will not receive a separate `figures` entry.
 
 ### `extract_page_tables`
 
@@ -142,22 +266,68 @@ JSON result shape:
 
 ### `extract_page_formulas`
 
-Extracts formulas only. It ignores tables and figures.
+Extracts a formula page or local formula crop. It returns the recognized page/crop as Markdown in natural reading order and indexes the LaTeX formulas in `items`. Tables and figures are not structurally extracted by this tool.
 
 Strategy:
 
-- GLM-OCR is preferred for LaTeX normalization.
-- VLM-OCR is fallback when GLM-OCR is unavailable or returns no formulas.
-- PDF text layer is used only as context for description and variable extraction.
+- GLM-OCR is preferred for full formula-page Markdown and LaTeX normalization.
+- The top-level `markdown` field preserves formula titles, surrounding explanation, `式中` variable text, and formula positions.
+- `items` contains formula indexes extracted from the Markdown, with nearby description, variables, and context.
+- VLM-OCR is fallback when GLM-OCR is unavailable or returns no formula Markdown.
+
+JSON result shape:
+
+```json
+{
+  "tool": "extract_page_formulas",
+  "source": {"input_type": "image", "page_no": 1, "source_sha1": "..."},
+  "markdown": "所需最小泄放面积按公式（B.13）计算：\n\n$$...$$\n\n式中：...",
+  "items": [
+    {
+      "source": "glm_ocr | vlm_ocr",
+      "latex": "$$...$$",
+      "description": "",
+      "variables": "",
+      "context": ""
+    }
+  ],
+  "model_calls": {"glm_ocr": 0, "vlm_ocr": 0},
+  "warnings": []
+}
+```
 
 ### `extract_page_figures`
 
-Extracts figures only and returns figure descriptions. It ignores tables and formulas.
+Extracts a page or local crop that contains figures/illustrations. It returns the recognized page/crop as Markdown in natural reading order and indexes figure descriptions in `items`. Tables and formulas are not structurally extracted by this tool.
 
 Strategy:
 
 - VLM-OCR is required for final figure semantic descriptions.
-- If VLM-OCR is unavailable, the tool returns no figure items and includes a warning instead of fabricating a description.
+- The top-level `markdown` field preserves surrounding text, figure caption, figure position, and concise figure description.
+- `items` contains figure indexes with caption, type, labels, description, and context.
+- If VLM-OCR is unavailable, the tool returns empty Markdown/items and includes a warning instead of fabricating a description.
+
+JSON result shape:
+
+```json
+{
+  "tool": "extract_page_figures",
+  "source": {"input_type": "image", "page_no": 1, "source_sha1": "..."},
+  "markdown": "正文...\n\n## 图1 ...\n\n图像描述：...",
+  "items": [
+    {
+      "source": "vlm_ocr",
+      "caption": "",
+      "type": "schematic|chart|diagram|figure|unknown",
+      "description": "",
+      "labels": [],
+      "context": ""
+    }
+  ],
+  "model_calls": {"glm_ocr": 0, "vlm_ocr": 0},
+  "warnings": []
+}
+```
 
 ### `extract_page_structured`
 
