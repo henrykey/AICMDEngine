@@ -111,7 +111,7 @@ ocr_config: Optional[dict] = None
 routing_config: Optional[dict] = None
 ```
 
-`extract_page_tables`, `extract_page_formulas`, `extract_page_figures`, `extract_page_structured`, and `extract_page_layout_enhanced` also accept `vlm_config`. `extract_page_tables`, `extract_page_formulas`, `extract_page_figures`, and `extract_page_structured` accept `describe`. `analyze_page_layout` is a GLM-OCR layout-only tool and does not require VLM config.
+`extract_page_tables`, `extract_page_formulas`, `extract_page_figures`, `extract_page_structured`, and `extract_page_layout_enhanced` also accept `vlm_config`. `extract_page_tables`, `extract_page_formulas`, `extract_page_figures`, and `extract_page_structured` accept `describe`. `extract_page_tables` also accepts `table_rows_format` (`structured_json`, `markdown`, `csv`, or `tsv`) and defaults to `structured_json` so DocIntel can publish normalized rows without parsing Markdown. `analyze_page_layout` is a GLM-OCR layout-only tool and does not require VLM config.
 
 Use exactly one of `file_path`, `file_data`, or `file_url`. For PDF input, `page_no` selects the page. For image input, the image is treated as a single page.
 
@@ -238,11 +238,21 @@ Important boundary: this tool does not crop images or store/upload image files. 
 
 Extracts tables only. It ignores formulas and figures even when they are visible on the same page.
 
+This section describes the contract for the single-page repair tools only: `extract_page_tables` and table items returned by `extract_page_structured`. It does not change the task/document pipeline output schema used by `start_task`, `process_task_page`, `finalize_task`, `prepare_rag_chunks`, or standard document parsing. Task/page processing continues to publish page `render`, `rag`, `elements`, markdown, chunks, and layout structures in the legacy document pipeline shape.
+
 Strategy:
 
 - PDF input tries PyMuPDF native tables first.
 - If native tables are unavailable, GLM-OCR is used when enabled.
 - VLM-OCR is fallback when GLM-OCR is unavailable or returns no tables.
+- `tableRowsContent` is always normalized publishable table rows, never raw HTML.
+- Raw OCR/VLM HTML is preserved in `sourceHtml` or `rawText` for audit.
+- HTML/model `rowspan` is expanded by filling covered cells with the source cell text, not `n/a`.
+- HTML/model `colspan` is expanded into logical columns when possible; complex headers keep source span metadata and are marked `degraded=true` and `manualReviewRequired=true`.
+- Empty cell sources are distinguished with `cell_status`: `merged_fill`, `blank_in_source`, `unreadable`, and `recognized`.
+- `items[]` contains every extracted table. `tables` is an alias of `items`.
+- When exactly one table is available, the first table's normalized schema is also promoted to the result top level for DocIntel compatibility.
+- If local post-processing cannot reliably infer table orientation, `orientation` is `0` and `warnings` includes `orientation_defaulted_to_0`. OCR/VLM-provided `orientation` values `0/90/180/270` are preserved.
 
 JSON result shape:
 
@@ -250,19 +260,80 @@ JSON result shape:
 {
   "tool": "extract_page_tables",
   "source": {"input_type": "pdf", "page_no": 1, "source_sha1": "..."},
+  "columns": ["牌号", "热处理状态", "规格mm"],
+  "normalized_rows": [["20", "正火", "≤M22"], ["20", "正火", "M24~M48"]],
+  "rows": [["20", "正火", "≤M22"], ["20", "正火", "M24~M48"]],
+  "source_cells": [
+    {"row": 1, "col": 0, "text": "20", "rowspan": 2, "colspan": 1, "confidence": 0.98}
+  ],
+  "cell_status": [
+    {"row": 2, "col": 0, "status": "merged_fill", "source_row": 1, "source_col": 0}
+  ],
+  "orientation": 0,
+  "raw_html": "<table>...</table>",
+  "sourceHtml": "<table>...</table>",
+  "markdown": "| 牌号 | 热处理状态 | 规格mm |\n| --- | --- | --- |\n| 20 | 正火 | ≤M22 |\n| 20 | 正火 | M24~M48 |",
+  "tableRowsFormat": "structured_json",
+  "tableRowsContent": "{\"table_title\":\"\",\"orientation\":0,\"columns\":[\"牌号\",\"热处理状态\",\"规格mm\"],\"normalized_rows\":[[\"20\",\"正火\",\"≤M22\"],[\"20\",\"正火\",\"M24~M48\"]],\"rows\":[[\"20\",\"正火\",\"≤M22\"],[\"20\",\"正火\",\"M24~M48\"]],\"source_cells\":[{\"row\":1,\"col\":0,\"text\":\"20\",\"rowspan\":2,\"colspan\":1,\"confidence\":0.98}],\"cell_status\":[{\"row\":2,\"col\":0,\"status\":\"merged_fill\",\"source_row\":1,\"source_col\":0}],\"markdown\":\"| 牌号 | 热处理状态 | 规格mm |\\n| --- | --- | --- |\\n| 20 | 正火 | ≤M22 |\\n| 20 | 正火 | M24~M48 |\",\"degraded\":false,\"manualReviewRequired\":false,\"warnings\":[],\"reason\":\"\"}",
+  "degraded": false,
+  "manualReviewRequired": false,
+  "reason": "",
   "items": [
     {
       "source": "pymupdf | glm_ocr | vlm_ocr",
       "title": "",
       "markdown": "",
       "description": "",
+      "semanticDesc": "",
+      "tableRowsFormat": "structured_json",
+      "tableRowsContent": "{\"columns\":[\"牌号\",\"热处理状态\",\"规格mm\"],\"normalized_rows\":[[\"20\",\"正火\",\"≤M22\"],[\"20\",\"正火\",\"M24~M48\"]]}",
+      "orientation": 0,
+      "columns": ["牌号", "热处理状态", "规格mm"],
+      "normalized_rows": [["20", "正火", "≤M22"], ["20", "正火", "M24~M48"]],
+      "source_cells": [
+        {"row": 1, "col": 0, "text": "20", "rowspan": 2, "colspan": 1, "confidence": 0.98}
+      ],
+      "cell_status": [
+        {"row": 2, "col": 0, "status": "merged_fill", "source_row": 1, "source_col": 0}
+      ],
+      "raw_html": "<table>...</table>",
+      "sourceHtml": "<table>...</table>",
+      "rawText": "",
+      "warnings": [],
+      "degraded": false,
+      "manualReviewRequired": false,
+      "reason": "",
       "context": ""
     }
+  ],
+  "tables": [
+    {"source": "pymupdf | glm_ocr | vlm_ocr", "columns": ["牌号", "热处理状态", "规格mm"], "normalized_rows": [["20", "正火", "≤M22"], ["20", "正火", "M24~M48"]]}
   ],
   "model_calls": {"glm_ocr": 0, "vlm_ocr": 0},
   "warnings": []
 }
 ```
+
+Table item field details:
+
+- `markdown`: Backward-compatible normalized Markdown table. If the model returned HTML, this field contains the converted Markdown table, not HTML.
+- `semanticDesc`: Alias of `description` for table semantics.
+- `tableRowsFormat`: Requested normalized rows format.
+  - `structured_json`: default. `tableRowsContent` is a JSON string that can be parsed with `JSON.parse`/`json.loads`. It contains `table_title`, `orientation`, `columns`, `normalized_rows`, `rows`, `source_cells`, `cell_status`, `markdown`, `degraded`, `manualReviewRequired`, `warnings`, and `reason`. It intentionally does not embed raw HTML.
+  - `markdown`: `tableRowsContent` is a Markdown table, but normalized fields are still available on the item and, for a single table, on the result top level.
+  - `csv`: `tableRowsContent` is CSV text.
+  - `tsv`: `tableRowsContent` is TSV text.
+- `tableRowsContent`: Publishable normalized row data. It must not contain `<table`.
+- `orientation`: Detected table orientation in degrees. Expected values are `0`, `90`, `180`, or `270` when supplied by OCR/VLM output.
+- `columns`: Header/logical column labels for the normalized matrix.
+- `normalized_rows`: Matrix rows with consistent width. `rowspan` fill values repeat the original source text.
+- `source_cells`: Traceability records with `row`, `col`, `text`, `rowspan`, `colspan`, and `confidence`.
+- `cell_status`: Per-cell provenance/status records. `merged_fill` points back to `source_row` and `source_col`; true blanks use `blank_in_source`; unreadable content uses `unreadable`.
+- `raw_html`: Alias of original HTML table when available.
+- `sourceHtml`: Original HTML table from OCR/VLM when the model returned HTML.
+- `rawText`: Original raw model text when useful for audit and different from `sourceHtml`.
+- `warnings`: Item-level warnings produced by table normalization.
+- `degraded` / `manualReviewRequired` / `reason`: Set when normalization may be lossy or ambiguous, especially for complex merged cells.
 
 ### `extract_page_formulas`
 

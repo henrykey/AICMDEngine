@@ -1,4 +1,5 @@
 import base64
+import asyncio
 import importlib.util
 import json
 import sys
@@ -36,8 +37,12 @@ _load_module(
     ROOT / "mcp/servers/PDF2MDEnhanced/ocr_clients/openai_compatible_ocr_client.py",
 )
 _load_module(f"{PACKAGE_NAME}.ocr_clients", ROOT / "mcp/servers/PDF2MDEnhanced/ocr_clients/__init__.py")
+_load_module(f"{PACKAGE_NAME}.models", ROOT / "mcp/servers/PDF2MDEnhanced/models.py")
+_load_module(f"{PACKAGE_NAME}.source_resolver", ROOT / "mcp/servers/PDF2MDEnhanced/source_resolver.py")
+_load_module(f"{PACKAGE_NAME}.task_manager", ROOT / "mcp/servers/PDF2MDEnhanced/task_manager.py")
 page_processor = _load_module(f"{PACKAGE_NAME}.page_processor", ROOT / "mcp/servers/PDF2MDEnhanced/page_processor.py")
 single_page_tools = _load_module(f"{PACKAGE_NAME}.single_page_tools", ROOT / "mcp/servers/PDF2MDEnhanced/single_page_tools.py")
+server = _load_module(f"{PACKAGE_NAME}.server", ROOT / "mcp/servers/PDF2MDEnhanced/server.py")
 
 OcrElement = sys.modules[f"{PACKAGE_NAME}.ocr_clients.ocr_models"].OcrElement
 OcrResult = sys.modules[f"{PACKAGE_NAME}.ocr_clients.ocr_models"].OcrResult
@@ -233,8 +238,17 @@ def test_extract_page_tables_only_uses_table_items(monkeypatch):
     assert result["tool"] == "extract_page_tables"
     assert len(result["items"]) == 1
     assert result["items"][0]["markdown"].startswith("| A | B |")
+    assert result["tables"] == result["items"]
+    assert result["columns"] == result["items"][0]["columns"]
+    assert result["normalized_rows"] == result["items"][0]["normalized_rows"]
+    assert result["source_cells"] == result["items"][0]["source_cells"]
+    assert result["cell_status"] == result["items"][0]["cell_status"]
+    assert result["orientation"] == result["items"][0]["orientation"]
+    assert result["tableRowsFormat"] == "structured_json"
+    assert isinstance(result["tableRowsContent"], str)
+    assert json.loads(result["tableRowsContent"])["normalized_rows"] == result["normalized_rows"]
     assert result["model_calls"] == {"glm_ocr": 1, "vlm_ocr": 0}
-    assert "空白单元格必须输出字符串" in FakeGLMOcrClient.prompts[0]
+    assert "目标是可查询的标准矩阵" in FakeGLMOcrClient.prompts[0]
 
 
 def test_extract_page_tables_recovers_localized_json_table(monkeypatch):
@@ -268,6 +282,8 @@ def test_extract_page_tables_recovers_localized_json_table(monkeypatch):
     assert result["items"][0]["title"] == "表 B.9"
     assert "| 泄放压力 MPa | 205 | 225 | 250 | 275 |" in result["items"][0]["markdown"]
     assert "| 2.50 | n/a | n/a | n/a | 0.946 |" in result["items"][0]["markdown"]
+    assert result["items"][0]["normalized_rows"][1] == ["2.50", "n/a", "n/a", "n/a", "0.946"]
+    assert any(cell["status"] == "unreadable" for cell in result["items"][0]["cell_status"])
 
 
 def test_extract_page_tables_recovers_html_table_from_glm_markdown(monkeypatch):
@@ -290,7 +306,11 @@ def test_extract_page_tables_recovers_html_table_from_glm_markdown(monkeypatch):
 
     assert len(result["items"]) == 1
     assert "| 泄放压力 MPa | 205 | 225 | 250 | 275 |" in result["items"][0]["markdown"]
-    assert "| 2.50 | n/a | n/a | n/a | 0.946 |" in result["items"][0]["markdown"]
+    assert "| 2.50 |  |  |  | 0.946 |" in result["items"][0]["markdown"]
+    assert result["items"][0]["tableRowsFormat"] == "structured_json"
+    assert "<table" not in result["items"][0]["tableRowsContent"].lower()
+    assert json.loads(result["items"][0]["tableRowsContent"])["normalized_rows"] == [["2.50", "", "", "", "0.946"]]
+    assert result["items"][0]["sourceHtml"].startswith("<table>")
     assert result["model_calls"] == {"glm_ocr": 1, "vlm_ocr": 0}
 
 
@@ -317,8 +337,14 @@ def test_extract_page_tables_recovers_html_table_from_raw_text(monkeypatch):
     )
 
     assert len(result["items"]) == 1
-    assert "| 泄放压力MPa | 过热蒸汽泄放温度/℃ | n/a | n/a |" in result["items"][0]["markdown"]
-    assert "| 1.50 | n/a | n/a | 0.957 |" in result["items"][0]["markdown"]
+    assert "| 泄放压力MPa | 过热蒸汽泄放温度/℃ | 过热蒸汽泄放温度/℃ | 过热蒸汽泄放温度/℃ |" in result["items"][0]["markdown"]
+    assert "| 泄放压力MPa | 205 | 225 | 250 |" in result["items"][0]["markdown"]
+    assert "| 1.50 |  |  | 0.957 |" in result["items"][0]["markdown"]
+    assert result["items"][0]["cell_status"][4]["status"] == "merged_fill"
+    assert "<table" not in result["items"][0]["tableRowsContent"].lower()
+    assert result["items"][0]["sourceHtml"].startswith('<table class="table table-bordered"')
+    assert result["items"][0]["degraded"] is True
+    assert result["items"][0]["manualReviewRequired"] is True
 
 
 def test_extract_page_tables_fills_empty_html_cells_from_glm_table(monkeypatch):
@@ -342,8 +368,622 @@ def test_extract_page_tables_fills_empty_html_cells_from_glm_table(monkeypatch):
         )
     )
 
-    assert "<td>n/a</td>" in result["items"][0]["markdown"]
-    assert "<td></td>" not in result["items"][0]["markdown"]
+    assert "| A |  | C |" in result["items"][0]["markdown"]
+    assert result["items"][0]["cell_status"][1]["status"] == "blank_in_source"
+    assert "<table" not in result["items"][0]["tableRowsContent"].lower()
+    assert "<td></td>" in result["items"][0]["sourceHtml"]
+
+
+def test_extract_page_tables_structured_json_contract_for_html(monkeypatch):
+    _patch_clients(monkeypatch)
+    FakeGLMOcrClient.result = OcrResult(
+        markdown="<table><tr><th>A</th><th>B</th></tr><tr><td></td><td>2</td></tr></table>"
+    )
+
+    result = json.loads(
+        single_page_tools.extract_page_tables_direct(
+            file_data=PNG_DATA,
+            input_type="image",
+            table_rows_format="structured_json",
+            ocr_config={"glm_ocr": {"enabled": True, "model": "glm", "api_key": "x", "base_url": "http://x"}},
+        )
+    )
+
+    content = result["items"][0]["tableRowsContent"]
+    assert isinstance(content, str)
+    assert "<table" not in content.lower()
+    content = json.loads(content)
+    assert content["columns"] == ["A", "B"]
+    assert content["normalized_rows"] == [["", "2"]]
+    assert content["cell_status"][2]["status"] == "blank_in_source"
+    assert "raw_html" not in content
+    assert result["items"][0]["raw_html"].startswith("<table>")
+    assert result["items"][0]["sourceHtml"].startswith("<table>")
+
+
+def test_extract_page_tables_markdown_blank_stays_blank_not_unreadable(monkeypatch):
+    _patch_clients(monkeypatch)
+    FakeGLMOcrClient.result = OcrResult(
+        tables=[
+            OcrElement(
+                kind="table",
+                source="glm_ocr",
+                markdown="| A | B |\n| --- | --- |\n|  | 2 |",
+            )
+        ]
+    )
+
+    result = json.loads(
+        single_page_tools.extract_page_tables_direct(
+            file_data=PNG_DATA,
+            input_type="image",
+            table_rows_format="structured_json",
+            ocr_config={"glm_ocr": {"enabled": True, "model": "glm", "api_key": "x", "base_url": "http://x"}},
+        )
+    )
+
+    item = result["items"][0]
+    assert item["normalized_rows"] == [["", "2"]]
+    assert item["cell_status"][2]["status"] == "blank_in_source"
+    assert "n/a" not in item["tableRowsContent"]
+    assert json.loads(item["tableRowsContent"])["normalized_rows"] == [["", "2"]]
+
+
+def test_extract_page_tables_distinguishes_blank_and_unreadable_status(monkeypatch):
+    _patch_clients(monkeypatch)
+    FakeGLMOcrClient.result = OcrResult(
+        tables=[
+            OcrElement(
+                kind="table",
+                source="glm_ocr",
+                markdown="| A | B | C |\n| --- | --- | --- |\n|  | n/a | 3 |",
+            )
+        ]
+    )
+
+    result = json.loads(
+        single_page_tools.extract_page_tables_direct(
+            file_data=PNG_DATA,
+            input_type="image",
+            ocr_config={"glm_ocr": {"enabled": True, "model": "glm", "api_key": "x", "base_url": "http://x"}},
+        )
+    )
+
+    statuses = {(cell["row"], cell["col"]): cell["status"] for cell in result["items"][0]["cell_status"]}
+    assert statuses[(1, 0)] == "blank_in_source"
+    assert statuses[(1, 1)] == "unreadable"
+
+
+def test_extract_page_tables_accepts_model_normalized_json_schema(monkeypatch):
+    _patch_clients(monkeypatch)
+    FakeGLMOcrClient.result = normalize_text_response(
+        json.dumps(
+            {
+                "table_title": "表 1",
+                "orientation": 90,
+                "columns": ["牌号", "状态", "规格"],
+                "normalized_rows": [["20", "正火", "≤M22"], ["20", "正火", "M24~M48"]],
+                "source_cells": [{"row": 1, "col": 0, "text": "20", "rowspan": 2, "colspan": 1, "confidence": 0.98}],
+                "cell_status": [{"row": 2, "col": 0, "status": "merged_fill", "source_row": 1, "source_col": 0}],
+                "degraded": False,
+                "manualReviewRequired": False,
+                "warnings": [],
+            },
+            ensure_ascii=False,
+        ),
+        "glm_ocr",
+    )
+
+    result = json.loads(
+        single_page_tools.extract_page_tables_direct(
+            file_data=PNG_DATA,
+            input_type="image",
+            table_rows_format="structured_json",
+            ocr_config={"glm_ocr": {"enabled": True, "model": "glm", "api_key": "x", "base_url": "http://x"}},
+        )
+    )
+
+    item = result["items"][0]
+    assert item["orientation"] == 90
+    assert item["columns"] == ["牌号", "状态", "规格"]
+    assert item["normalized_rows"] == [["20", "正火", "≤M22"], ["20", "正火", "M24~M48"]]
+    assert item["source_cells"][0]["rowspan"] == 2
+    assert json.loads(item["tableRowsContent"])["normalized_rows"] == item["normalized_rows"]
+
+
+def test_extract_page_tables_model_rows_wider_than_columns_degraded(monkeypatch):
+    _patch_clients(monkeypatch)
+    FakeGLMOcrClient.result = normalize_text_response(
+        json.dumps(
+            {
+                "columns": ["A", "B"],
+                "normalized_rows": [["1", "2", "extra"]],
+                "source_cells": [],
+                "cell_status": [],
+            },
+            ensure_ascii=False,
+        ),
+        "glm_ocr",
+    )
+
+    result = json.loads(
+        single_page_tools.extract_page_tables_direct(
+            file_data=PNG_DATA,
+            input_type="image",
+            ocr_config={"glm_ocr": {"enabled": True, "model": "glm", "api_key": "x", "base_url": "http://x"}},
+        )
+    )
+
+    item = result["items"][0]
+    assert item["columns"] == ["A", "B"]
+    assert item["normalized_rows"] == [["1", "2", "extra"]]
+    assert item["degraded"] is True
+    assert item["manualReviewRequired"] is True
+    assert "inconsistent_row_width" in item["warnings"]
+    assert "inconsistent_row_width" in item["reason"]
+    assert json.loads(item["tableRowsContent"])["normalized_rows"] == [["1", "2", "extra"]]
+
+
+def test_extract_page_tables_preserves_zero_values_in_model_schema(monkeypatch):
+    _patch_clients(monkeypatch)
+    FakeGLMOcrClient.result = normalize_text_response(
+        json.dumps(
+            {
+                "columns": ["A", 0, False],
+                "normalized_rows": [[0, False, ""]],
+                "source_cells": [],
+                "cell_status": [],
+            },
+            ensure_ascii=False,
+        ),
+        "glm_ocr",
+    )
+
+    result = json.loads(
+        single_page_tools.extract_page_tables_direct(
+            file_data=PNG_DATA,
+            input_type="image",
+            ocr_config={"glm_ocr": {"enabled": True, "model": "glm", "api_key": "x", "base_url": "http://x"}},
+        )
+    )
+
+    item = result["items"][0]
+    assert item["columns"] == ["A", "0", "False"]
+    assert item["normalized_rows"] == [["0", "False", ""]]
+    payload = json.loads(item["tableRowsContent"])
+    assert payload["columns"] == ["A", "0", "False"]
+    assert payload["normalized_rows"] == [["0", "False", ""]]
+    assert result["columns"] == ["A", "0", "False"]
+    assert result["normalized_rows"] == [["0", "False", ""]]
+
+
+def test_extract_page_tables_model_html_markdown_not_publishable_structured_json(monkeypatch):
+    _patch_clients(monkeypatch)
+    FakeGLMOcrClient.result = normalize_text_response(
+        json.dumps(
+            {
+                "columns": ["A", "B"],
+                "normalized_rows": [["1", "2"]],
+                "markdown": "<table><tr><td>A</td><td>B</td></tr></table>",
+                "source_cells": [],
+                "cell_status": [],
+            },
+            ensure_ascii=False,
+        ),
+        "glm_ocr",
+    )
+
+    result = json.loads(
+        single_page_tools.extract_page_tables_direct(
+            file_data=PNG_DATA,
+            input_type="image",
+            ocr_config={"glm_ocr": {"enabled": True, "model": "glm", "api_key": "x", "base_url": "http://x"}},
+        )
+    )
+
+    item = result["items"][0]
+    assert item["degraded"] is True
+    assert item["manualReviewRequired"] is True
+    assert "html_removed_from_tableRowsContent" in item["warnings"]
+    assert item["tableRowsContent"] == ""
+    assert result["tableRowsContent"] == ""
+    assert item["raw_html"].startswith("<table>")
+
+
+def test_extract_page_tables_repairs_markdown_left_group_rowspan_by_profile(monkeypatch):
+    _patch_clients(monkeypatch)
+    FakeGLMOcrClient.result = OcrResult(
+        markdown=(
+            "| 材料 | 热处理状态 | 直径mm | Rm MPa |\n"
+            "| --- | --- | --- | --- |\n"
+            "| 合金钢 | 调质 | ≤22 | 800 |\n"
+            "| 22~48 | 780 |"
+        )
+    )
+
+    result = json.loads(
+        single_page_tools.extract_page_tables_direct(
+            file_data=PNG_DATA,
+            input_type="image",
+            ocr_config={"glm_ocr": {"enabled": True, "model": "glm", "api_key": "x", "base_url": "http://x"}},
+        )
+    )
+
+    item = result["items"][0]
+    assert item["normalized_rows"] == [["合金钢", "调质", "≤22", "800"], ["合金钢", "调质", "22~48", "780"]]
+    assert any(cell["status"] == "merged_fill" and cell["row"] == 2 and cell["col"] == 0 for cell in item["cell_status"])
+    assert any(cell["status"] == "merged_fill" and cell["row"] == 2 and cell["col"] == 1 for cell in item["cell_status"])
+    assert "markdown_merged_cell_repaired" in item["warnings"]
+    assert item["manualReviewRequired"] is False
+
+
+def test_extract_page_tables_repairs_markdown_right_metric_rowspan_by_profile(monkeypatch):
+    _patch_clients(monkeypatch)
+    FakeGLMOcrClient.result = OcrResult(
+        markdown=(
+            "| 压力 MPa | 温度℃ | 系数A | 系数B |\n"
+            "| --- | --- | --- | --- |\n"
+            "| 1.0 | 100 | 0.95 | 0.88 |\n"
+            "| 1.5 | 120 |"
+        )
+    )
+
+    result = json.loads(
+        single_page_tools.extract_page_tables_direct(
+            file_data=PNG_DATA,
+            input_type="image",
+            ocr_config={"glm_ocr": {"enabled": True, "model": "glm", "api_key": "x", "base_url": "http://x"}},
+        )
+    )
+
+    item = result["items"][0]
+    assert item["normalized_rows"] == [["1.0", "100", "0.95", "0.88"], ["1.5", "120", "0.95", "0.88"]]
+    assert any(cell["status"] == "merged_fill" and cell["row"] == 2 and cell["col"] == 2 for cell in item["cell_status"])
+    assert any(cell["status"] == "merged_fill" and cell["row"] == 2 and cell["col"] == 3 for cell in item["cell_status"])
+    assert "markdown_merged_cell_repaired" in item["warnings"]
+    assert item["manualReviewRequired"] is False
+
+
+def test_extract_page_tables_repairs_markdown_without_grade_or_mxx(monkeypatch):
+    _patch_clients(monkeypatch)
+    FakeGLMOcrClient.result = OcrResult(
+        markdown=(
+            "| 试样 | 处理条件 | 厚度mm | 硬度HV |\n"
+            "| --- | --- | --- | --- |\n"
+            "| S1 | 固溶 | 5~8 | 210 |\n"
+            "| 8~12 | 215 |"
+        )
+    )
+
+    result = json.loads(
+        single_page_tools.extract_page_tables_direct(
+            file_data=PNG_DATA,
+            input_type="image",
+            ocr_config={"glm_ocr": {"enabled": True, "model": "glm", "api_key": "x", "base_url": "http://x"}},
+        )
+    )
+
+    item = result["items"][0]
+    assert item["normalized_rows"] == [["S1", "固溶", "5~8", "210"], ["S1", "固溶", "8~12", "215"]]
+    assert "markdown_merged_cell_repaired" in item["warnings"]
+    assert item["manualReviewRequired"] is False
+
+
+def test_extract_page_tables_ambiguous_markdown_repair_requires_review(monkeypatch):
+    _patch_clients(monkeypatch)
+    FakeGLMOcrClient.result = OcrResult(
+        markdown="| A | B | C |\n| --- | --- | --- |\n| x | y | z |\n| m | n |"
+    )
+
+    result = json.loads(
+        single_page_tools.extract_page_tables_direct(
+            file_data=PNG_DATA,
+            input_type="image",
+            ocr_config={"glm_ocr": {"enabled": True, "model": "glm", "api_key": "x", "base_url": "http://x"}},
+        )
+    )
+
+    item = result["items"][0]
+    assert item["normalized_rows"] == [["x", "y", "z"], ["m", "n", ""]]
+    assert item["degraded"] is True
+    assert item["manualReviewRequired"] is True
+    assert "ambiguous_markdown_merged_cell_repair" in item["warnings"]
+
+
+def test_extract_page_tables_html_structured_source_bypasses_markdown_repair(monkeypatch):
+    _patch_clients(monkeypatch)
+    FakeGLMOcrClient.result = OcrResult(
+        markdown=(
+            '<table><tr><th>材料</th><th>状态</th><th>规格</th></tr>'
+            '<tr><td rowspan="2">合金钢</td><td rowspan="2">调质</td><td>≤22</td></tr>'
+            '<tr><td>22~48</td></tr></table>'
+        )
+    )
+
+    result = json.loads(
+        single_page_tools.extract_page_tables_direct(
+            file_data=PNG_DATA,
+            input_type="image",
+            ocr_config={"glm_ocr": {"enabled": True, "model": "glm", "api_key": "x", "base_url": "http://x"}},
+        )
+    )
+
+    item = result["items"][0]
+    assert item["normalized_rows"] == [["合金钢", "调质", "≤22"], ["合金钢", "调质", "22~48"]]
+    assert any(cell.get("rowspan") == 2 for cell in item["source_cells"])
+    assert "markdown_merged_cell_repaired" not in item["warnings"]
+
+
+def test_extract_page_tables_top_level_warnings_merge_without_overwrite(monkeypatch):
+    _patch_clients(monkeypatch)
+    monkeypatch.setattr(
+        single_page_tools,
+        "_prepare_context",
+        lambda *args, **kwargs: single_page_tools.SinglePageContext(
+            input_type="image",
+            source_path=__file__,
+            image_path=__file__,
+            page_no=1,
+            page_text="",
+            native_tables=[],
+        ),
+    )
+
+    def fake_extract_tables(ctx, glm, vlm, describe, model_calls, warnings, allow_native=True, table_rows_format="structured_json"):
+        _ = ctx, glm, vlm, describe, allow_native, table_rows_format
+        model_calls["glm_ocr"] = 1
+        warnings.append("outer_warning")
+        return [
+            {
+                "source": "glm_ocr",
+                "title": "",
+                "markdown": "| A |\n| --- |\n| 1 |",
+                "tableRowsFormat": "structured_json",
+                "tableRowsContent": "{}",
+                "columns": ["A"],
+                "normalized_rows": [["1"]],
+                "source_cells": [],
+                "cell_status": [],
+                "orientation": 0,
+                "raw_html": "",
+                "sourceHtml": "",
+                "warnings": ["item_warning"],
+                "degraded": False,
+                "manualReviewRequired": False,
+                "reason": "",
+                "context": "",
+            }
+        ]
+
+    monkeypatch.setattr(single_page_tools, "_extract_tables", fake_extract_tables)
+
+    result = json.loads(
+        single_page_tools.extract_page_tables_direct(
+            file_data=PNG_DATA,
+            input_type="image",
+            ocr_config={"glm_ocr": {"enabled": False}},
+        )
+    )
+
+    assert result["warnings"] == ["outer_warning", "item_warning"]
+
+
+def test_extract_page_tables_normalizes_rowspan_without_na_or_pseudo_columns(monkeypatch):
+    _patch_clients(monkeypatch)
+    FakeGLMOcrClient.result = OcrResult(
+        markdown=(
+            '<table><tr><th>牌号</th><th>热处理状态/调质状态的回火温度℃</th><th>规格mm</th>'
+            '<th>Rm MPa</th><th>Rel(Rp0.2) MPa</th><th>A %</th><th>0℃冲击吸收能量平均值(KV2) J</th></tr>'
+            '<tr><td rowspan="2">20</td><td rowspan="2">正火</td><td>≤M22</td>'
+            '<td>≥410</td><td>≥245</td><td rowspan="2">≥25</td><td rowspan="2">≥41</td></tr>'
+            '<tr><td>M24~M48</td><td>≥410</td><td>≥245</td></tr></table>'
+        )
+    )
+
+    result = json.loads(
+        single_page_tools.extract_page_tables_direct(
+            file_data=PNG_DATA,
+            input_type="image",
+            table_rows_format="structured_json",
+            ocr_config={"glm_ocr": {"enabled": True, "model": "glm", "api_key": "x", "base_url": "http://x"}},
+        )
+    )
+
+    item = result["items"][0]
+    assert item["columns"] == [
+        "牌号",
+        "热处理状态/调质状态的回火温度℃",
+        "规格mm",
+        "Rm MPa",
+        "Rel(Rp0.2) MPa",
+        "A %",
+        "0℃冲击吸收能量平均值(KV2) J",
+    ]
+    assert item["normalized_rows"] == [
+        ["20", "正火", "≤M22", "≥410", "≥245", "≥25", "≥41"],
+        ["20", "正火", "M24~M48", "≥410", "≥245", "≥25", "≥41"],
+    ]
+    assert all(len(row) == 7 for row in item["normalized_rows"])
+    assert any(cell["row"] == 2 and cell["col"] == 2 and cell["text"] == "M24~M48" for cell in item["source_cells"])
+    assert "n/a" not in json.dumps(item["normalized_rows"], ensure_ascii=False)
+    assert any(cell["status"] == "merged_fill" and cell["row"] == 2 and cell["col"] == 0 for cell in item["cell_status"])
+    assert item["degraded"] is False
+    assert item["manualReviewRequired"] is False
+    assert result["columns"] == item["columns"]
+    assert result["normalized_rows"] == item["normalized_rows"]
+    assert json.loads(result["tableRowsContent"])["normalized_rows"] == item["normalized_rows"]
+
+
+def test_extract_page_tables_vlm_html_contract_when_glm_unavailable(monkeypatch):
+    _patch_clients(monkeypatch)
+
+    result = json.loads(
+        single_page_tools.extract_page_tables_direct(
+            file_data=PNG_DATA,
+            input_type="image",
+            ocr_config={"glm_ocr": {"enabled": False}},
+            vlm_config={"model": "vlm", "api_key": "x", "base_url": "http://x"},
+        )
+    )
+
+    item = result["items"][0]
+    assert item["source"] == "vlm_ocr"
+    assert item["tableRowsFormat"] == "structured_json"
+    assert "<table" not in item["tableRowsContent"].lower()
+    assert json.loads(item["tableRowsContent"])["columns"] == ["C", "D"]
+
+
+def test_extract_page_tables_docintel_complex_html_contract(monkeypatch):
+    _patch_clients(monkeypatch)
+    html = (
+        '<table border="1"><tr><td>材料</td><td>螺栓直径/mm</td><td>热处理状态</td>'
+        '<td colspan="2">许用应力/MPa\n取下列各值中的最小值</td></tr>'
+        '<tr><td rowspan="2">非合金钢</td><td>≤M22</td><td rowspan="2">热轧、正火</td>'
+        '<td>$\\frac{R_{\\mathrm{eL}}^{\\prime}}{2.7}$</td>'
+        '<td rowspan="8">$\\frac{R_{\\mathrm{d}}^{\\prime}}{1.5}$</td></tr></table>'
+    )
+    FakeGLMOcrClient.result = OcrResult(markdown=html)
+
+    result = json.loads(
+        single_page_tools.extract_page_tables_direct(
+            file_data=PNG_DATA,
+            input_type="image",
+            ocr_config={"glm_ocr": {"enabled": True, "model": "glm", "api_key": "x", "base_url": "http://x"}},
+        )
+    )
+
+    item = result["items"][0]
+    assert "<table" not in item["tableRowsContent"].lower()
+    content = json.loads(item["tableRowsContent"])
+    assert content["columns"] == ["材料", "螺栓直径/mm", "热处理状态", "许用应力/MPa 取下列各值中的最小值", "许用应力/MPa 取下列各值中的最小值"]
+    assert "n/a" not in item["tableRowsContent"]
+    assert item["sourceHtml"] == html
+    assert item["degraded"] is True
+    assert item["manualReviewRequired"] is True
+    assert "colspan" in item["reason"]
+    assert "complex_header" in item["warnings"]
+
+
+def test_process_task_page_does_not_promote_single_page_table_schema(monkeypatch):
+    class FakeTask:
+        source_path = "/tmp/demo.pdf"
+        planned_pages = [1]
+
+    class FakeManager:
+        def update_page_running(self, task_id, page_no):
+            self.running = (task_id, page_no)
+
+        def get_task(self, task_id):
+            _ = task_id
+            return FakeTask()
+
+        def update_page_result(self, task_id, page_no, result):
+            self.saved = (task_id, page_no, result)
+
+        def update_page_failed(self, task_id, page_no, error):
+            self.failed = (task_id, page_no, error)
+
+    page_result = {
+        "task_page_id": "page1",
+        "page_no": 1,
+        "route_selected": "text_only",
+        "render": {"markdown": "| A | B |\n| --- | --- |\n| 1 | 2 |"},
+        "rag": {
+            "content": "page text",
+            "page_text": "page text",
+            "elements": {
+                "tables": [
+                    {
+                        "source": "pymupdf",
+                        "title": "A / B",
+                        "markdown": "| A | B |\n| --- | --- |\n| 1 | 2 |",
+                        "semantic_summary": "table",
+                        "context": "",
+                    }
+                ],
+                "formulas": [],
+                "figures": [],
+            },
+        },
+        "elements": {
+            "tables": [
+                {
+                    "source": "pymupdf",
+                    "title": "A / B",
+                    "markdown": "| A | B |\n| --- | --- |\n| 1 | 2 |",
+                    "semantic_summary": "table",
+                    "context": "",
+                }
+            ],
+            "formulas": [],
+            "figures": [],
+        },
+        "next_context": {},
+    }
+
+    monkeypatch.setattr(server, "manager", FakeManager())
+    monkeypatch.setattr(server, "process_page", lambda *args, **kwargs: page_result)
+
+    process_task_page_fn = getattr(server.process_task_page, "fn", server.process_task_page)
+    result = json.loads(asyncio.run(process_task_page_fn(task_id="task1", page_no=1, policy="force_direct")))
+
+    assert result["page_result"] == page_result
+    top_level_forbidden = {
+        "columns",
+        "normalized_rows",
+        "rows",
+        "source_cells",
+        "cell_status",
+        "tableRowsContent",
+        "tableRowsFormat",
+        "raw_html",
+        "tables",
+    }
+    table_item_forbidden = top_level_forbidden - {"tables"}
+    assert top_level_forbidden.isdisjoint(result.keys())
+    assert top_level_forbidden.isdisjoint(result["page_result"].keys())
+    assert table_item_forbidden.isdisjoint(result["page_result"]["elements"]["tables"][0].keys())
+    assert table_item_forbidden.isdisjoint(result["page_result"]["rag"]["elements"]["tables"][0].keys())
+
+
+def test_single_page_table_schema_is_not_used_by_task_output_elements():
+    markdown = "| A | B |\n| --- | --- |\n| 1 | 2 |"
+    elements = page_processor._build_output_elements(markdown, {"tables": [markdown], "formulas": [], "figures": []}, "text_only")
+
+    assert elements["tables"] == [
+        {
+            "source": "pymupdf",
+            "title": "",
+            "markdown": markdown,
+            "semantic_summary": "表格：包含 3 行、2 列。",
+            "context": "",
+        }
+    ]
+    forbidden = {"columns", "normalized_rows", "rows", "source_cells", "cell_status", "tableRowsContent", "tableRowsFormat", "raw_html"}
+    assert forbidden.isdisjoint(elements["tables"][0].keys())
+
+
+def test_task_ocr_table_elements_remain_markdown_only_for_normalized_model_json():
+    result = normalize_text_response(
+        json.dumps(
+            {
+                "columns": ["牌号", "状态", "规格"],
+                "normalized_rows": [["20", "正火", "≤M22"], ["20", "正火", "M24~M48"]],
+                "source_cells": [{"row": 1, "col": 0, "text": "20", "rowspan": 2, "colspan": 1, "confidence": 0.98}],
+                "cell_status": [{"row": 2, "col": 0, "status": "merged_fill", "source_row": 1, "source_col": 0}],
+            },
+            ensure_ascii=False,
+        ),
+        "glm_ocr",
+    )
+
+    structured = page_processor._structured_from_ocr_result(result, include_figures=False)
+
+    assert structured == {
+        "tables": ["| 牌号 | 状态 | 规格 |\n| --- | --- | --- |\n| 20 | 正火 | ≤M22 |\n| 20 | 正火 | M24~M48 |"],
+        "formulas": [],
+        "figures": [],
+    }
 
 
 def test_extract_page_formulas_only_uses_formula_items(monkeypatch):

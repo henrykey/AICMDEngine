@@ -40,8 +40,9 @@ def normalize_ocr_payload(payload: Any, source: str) -> OcrResult:
     localized_table = _localized_table_payload_to_markdown(data)
     if localized_table and not (merged_elements.get("tables") or data.get("tables")):
         merged_elements["tables"] = [{
+            **data,
             "title": _pick_str(data, "表名", "table_title", "title"),
-            "markdown": localized_table,
+            "markdown": _pick_str(data, "raw_html", "markdown") or localized_table,
             "description": _pick_str(data, "列分组标题", "column_group_title", "description"),
         }]
 
@@ -94,7 +95,7 @@ def _normalize_items(value: Any, kind: str, source: str) -> List[OcrElement]:
                 )
             )
         else:
-            s = str(item or "").strip()
+            s = _cell_to_text(item)
             if not s:
                 continue
             if kind == "table":
@@ -118,14 +119,16 @@ def _pick_str(data: Dict[str, Any], *names: str) -> str:
 
 def _localized_table_payload_to_markdown(data: Dict[str, Any]) -> str:
     columns = data.get("列标题") or data.get("columns")
-    rows = data.get("数据") or data.get("rows")
+    rows = data.get("数据") or data.get("rows") or data.get("normalized_rows")
     row_header = data.get("行标题") or data.get("row_header") or "row"
     if not isinstance(columns, list) or not isinstance(rows, list):
         return ""
-    headers = [str(col or "").strip() for col in columns if str(col or "").strip()]
+    headers = [_cell_to_text(col) for col in columns if _cell_to_text(col)]
     if not headers:
         return ""
     markdown_rows: List[List[str]] = [[str(row_header).strip(), *headers]]
+    if data.get("normalized_rows") is rows and all(isinstance(row, list) for row in rows):
+        return _table_data_to_markdown([headers, *rows])
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -146,7 +149,7 @@ def _table_data_to_markdown(rows: List[Any]) -> str:
     width = max((len(row) for row in rows), default=0)
     if width <= 1:
         return ""
-    normalized = [[str(cell or "").strip() for cell in row] + [""] * (width - len(row)) for row in rows]
+    normalized = [[_cell_to_text(cell) for cell in row] + [""] * (width - len(row)) for row in rows]
     header = normalized[0]
     body = normalized[1:]
     lines = [
@@ -155,3 +158,7 @@ def _table_data_to_markdown(rows: List[Any]) -> str:
     ]
     lines.extend("| " + " | ".join(row[:width]) + " |" for row in body)
     return "\n".join(lines).strip()
+
+
+def _cell_to_text(value: Any) -> str:
+    return "" if value is None else str(value).strip()

@@ -47,6 +47,7 @@ def extract_page_tables_direct(
     input_type: str = "auto",
     output_format: str = "json",
     describe: bool = True,
+    table_rows_format: str = "structured_json",
     ocr_config: Optional[Dict[str, Any]] = None,
     vlm_config: Optional[Dict[str, Any]] = None,
     routing_config: Optional[Dict[str, Any]] = None,
@@ -60,6 +61,7 @@ def extract_page_tables_direct(
         page_no=page_no,
         input_type=input_type,
         describe=describe,
+        table_rows_format=table_rows_format,
         ocr_config=ocr_config,
         vlm_config=vlm_config,
         routing_config=routing_config,
@@ -218,6 +220,7 @@ def _extract_single_page(
     ocr_config: Optional[Dict[str, Any]],
     vlm_config: Optional[Dict[str, Any]],
     routing_config: Optional[Dict[str, Any]],
+    table_rows_format: str = "structured_json",
 ) -> Dict[str, Any]:
     _validate_output_target(target)
     with tempfile.TemporaryDirectory(prefix="pdf2md_enh_single_page_") as work_dir:
@@ -237,14 +240,14 @@ def _extract_single_page(
         model_calls = {"glm_ocr": 0, "vlm_ocr": 0}
 
         if target == "tables":
-            items = _extract_tables(ctx, glm, vlm, describe, model_calls, warnings)
+            items = _extract_tables(ctx, glm, vlm, describe, model_calls, warnings, table_rows_format=table_rows_format)
             return _base_result(tool, ctx, model_calls, warnings, items=items)
         if target == "formulas":
             return _extract_formula_page_result(ctx, glm, vlm, describe, model_calls, warnings)
         if target == "figures":
             return _extract_figure_page_result(ctx, vlm, model_calls, warnings)
 
-        tables = _extract_tables(ctx, glm, vlm, describe, model_calls, warnings, allow_native=True)
+        tables = _extract_tables(ctx, glm, vlm, describe, model_calls, warnings, allow_native=True, table_rows_format=table_rows_format)
         formulas = _extract_formulas(ctx, glm, vlm, describe, model_calls, warnings)
         figures = _extract_figures(ctx, vlm, model_calls, warnings)
         figure_semantics_missing = any(
@@ -435,19 +438,23 @@ def _extract_tables(
     model_calls: Dict[str, int],
     warnings: List[str],
     allow_native: bool = True,
+    table_rows_format: str = "structured_json",
 ) -> List[Dict[str, Any]]:
     if allow_native and ctx.input_type == "pdf" and ctx.native_tables:
-        return [_table_item("pymupdf", table, ctx.page_text, describe) for table in ctx.native_tables]
+        return [_table_item("pymupdf", table, ctx.page_text, describe, table_rows_format=table_rows_format) for table in ctx.native_tables]
 
     if glm.enabled:
         try:
             model_calls["glm_ocr"] += 1
             result = glm.extract_page(ctx.image_path, prompt=_prompt_tables(ctx.page_text, describe))
-            items = [_table_item("glm_ocr", item.markdown or item.text, ctx.page_text, describe, item) for item in result.tables]
+            items = [
+                _table_item("glm_ocr", item.markdown or item.text, ctx.page_text, describe, item, table_rows_format=table_rows_format)
+                for item in result.tables
+            ]
             if not items:
-                recovered = _recover_table_from_result(result)
+                recovered, source_text = _recover_table_from_result(result)
                 if recovered:
-                    items = [_table_item("glm_ocr", recovered, ctx.page_text, describe)]
+                    items = [_table_item("glm_ocr", recovered, ctx.page_text, describe, table_rows_format=table_rows_format, source_text=source_text)]
             if items:
                 return items
             warnings.append("glm_ocr_returned_no_tables")
@@ -458,11 +465,14 @@ def _extract_tables(
         try:
             model_calls["vlm_ocr"] += 1
             result = _call_vlm_structured(vlm, ctx.image_path, _prompt_tables(ctx.page_text, describe))
-            items = [_table_item("vlm_ocr", item.markdown or item.text, ctx.page_text, describe, item) for item in result.tables]
+            items = [
+                _table_item("vlm_ocr", item.markdown or item.text, ctx.page_text, describe, item, table_rows_format=table_rows_format)
+                for item in result.tables
+            ]
             if not items:
-                recovered = _recover_table_from_result(result)
+                recovered, source_text = _recover_table_from_result(result)
                 if recovered:
-                    items = [_table_item("vlm_ocr", recovered, ctx.page_text, describe)]
+                    items = [_table_item("vlm_ocr", recovered, ctx.page_text, describe, table_rows_format=table_rows_format, source_text=source_text)]
             if items:
                 return items
             warnings.append("vlm_ocr_returned_no_tables")
@@ -626,19 +636,44 @@ def _table_item(
     page_text: str,
     describe: bool,
     raw_item: Optional[OcrElement] = None,
+    table_rows_format: str = "structured_json",
+    source_text: str = "",
 ) -> Dict[str, Any]:
-    table_md = _normalize_table_output(str(markdown or "").strip())
+    raw_text = source_text or str(markdown or "").strip()
+    normalized = _normalize_table_contract(raw_text, table_rows_format)
+    if raw_item and isinstance(raw_item.raw, dict):
+        normalized = _merge_model_normalized_table(normalized, raw_item.raw)
+    table_md = normalized["markdown"]
     title = (raw_item.title if raw_item else "") or _find_table_title(page_text) or _table_title_from_markdown(table_md)
     desc = (raw_item.description if raw_item else "") if describe else ""
     if describe and not desc:
         desc = _describe_table(title, table_md, page_text)
-    return {
+    item = {
         "source": source,
         "title": title,
         "markdown": table_md,
         "description": desc,
+        "semanticDesc": desc,
+        "tableRowsFormat": normalized["tableRowsFormat"],
+        "tableRowsContent": normalized["tableRowsContent"],
+        "orientation": normalized["orientation"],
+        "columns": normalized["columns"],
+        "normalized_rows": normalized["normalized_rows"],
+        "source_cells": normalized["source_cells"],
+        "cell_status": normalized["cell_status"],
+        "raw_html": normalized["raw_html"],
+        "warnings": normalized["warnings"],
+        "degraded": normalized["degraded"],
+        "manualReviewRequired": normalized["manualReviewRequired"],
         "context": (raw_item.context if raw_item else "") or _near_context(page_text, title),
     }
+    if normalized["reason"]:
+        item["reason"] = normalized["reason"]
+    if normalized["sourceHtml"]:
+        item["sourceHtml"] = normalized["sourceHtml"]
+    if normalized["rawText"]:
+        item["rawText"] = normalized["rawText"]
+    return item
 
 
 def _formula_item(source: str, item: OcrElement, page_text: str, describe: bool) -> Dict[str, Any]:
@@ -989,13 +1024,40 @@ def _base_result(
     warnings: List[str],
     items: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    return {
+    result = {
         "tool": tool,
         "source": _source_payload(ctx),
         "items": items,
         "model_calls": model_calls,
         "warnings": _dedupe(warnings),
     }
+    if tool == "extract_page_tables":
+        result["tables"] = items
+        if items:
+            _promote_first_table_fields(result, items[0])
+    return result
+
+
+def _promote_first_table_fields(result: Dict[str, Any], item: Dict[str, Any]) -> None:
+    for key in [
+        "columns",
+        "normalized_rows",
+        "source_cells",
+        "cell_status",
+        "orientation",
+        "raw_html",
+        "sourceHtml",
+        "markdown",
+        "tableRowsFormat",
+        "tableRowsContent",
+        "degraded",
+        "manualReviewRequired",
+        "reason",
+    ]:
+        if key in item:
+            result[key] = item[key]
+    result["rows"] = item.get("normalized_rows") or []
+    result["warnings"] = _dedupe([*result.get("warnings", []), *item.get("warnings", [])])
 
 
 def _source_payload(ctx: SinglePageContext) -> Dict[str, Any]:
@@ -1219,19 +1281,22 @@ def _vlm_ocr_config(ocr_config: Optional[Dict[str, Any]]) -> Optional[Dict[str, 
 def _prompt_tables(page_text: str, describe: bool) -> str:
     return (
         "识别截图中的表格内容，输出严格 JSON，不要输出 Markdown、HTML 或解释。\n"
-        "请按表格网格线逐行逐列读取，不能按文本连续顺序重排。\n"
+        "请按表格网格线逐行逐列读取，不能按文本连续顺序重排。目标是可查询的标准矩阵，不是视觉 Markdown。\n"
         "规则：\n"
         "1. 识别表名。\n"
-        "2. 分离行标题、列分组标题、列标题；行标题不要混入列标题。\n"
-        "3. 如果有多级表头，保留最上层列分组标题。\n"
-        "4. 数据区按行输出，每行必须包含所有列标题对应的字段。\n"
-        "5. 空白单元格必须输出字符串 \"n/a\"，不能省略，不能输出空字符串。\n"
-        "6. 禁止因为空白单元格导致后续数值左移。\n"
-        "7. 单元格数字必须按图中原样抄录，不要根据相邻数字推断或修正。\n"
-        "8. 看不清的单元格输出 \"n/a\"，不要猜。\n"
-        "9. 输出前自检：每行字段集合必须完全一致，且包含所有列标题。\n"
+        "2. 检测页面/表格方向，orientation 只能是 0/90/180/270；横置或倒置时按旋正后的逻辑顺序抽取。\n"
+        "3. 识别行、列、单元格边界、rowspan、colspan；source_cells 必须包含 row/col/text/rowspan/colspan/confidence。\n"
+        "4. 输出 normalized_rows：每行列数必须一致；rowspan 覆盖区域必须向下填充原单元格文本，不能写成 n/a。\n"
+        "5. colspan 按逻辑列展开；无法可靠拆分时仍保留矩阵并设置 degraded/manualReviewRequired/warnings。\n"
+        "6. 区分空白来源：merged_fill、blank_in_source、unreadable、recognized，并在 cell_status 返回。\n"
+        "7. 禁止因为空白或合并单元格导致后续数值左移；禁止额外产生尾部 n/a 伪列。\n"
+        "8. 单元格数字必须按图中原样抄录，不要根据相邻数字推断或修正；看不清的单元格标记 unreadable。\n"
+        "9. 可以额外返回 markdown/raw_html，但必须返回 normalized JSON。\n"
         "JSON schema："
-        "{\"表名\":\"\",\"行标题\":\"\",\"列分组标题\":\"\",\"列标题\":[],\"数据\":[{\"行标题值\":\"\",\"列1\":\"\",\"列2\":\"\"}]}。\n"
+        "{\"table_title\":\"\",\"orientation\":0,\"columns\":[],\"normalized_rows\":[[]],"
+        "\"source_cells\":[{\"row\":0,\"col\":0,\"text\":\"\",\"rowspan\":1,\"colspan\":1,\"confidence\":1.0}],"
+        "\"cell_status\":[{\"row\":0,\"col\":0,\"status\":\"recognized\"}],"
+        "\"raw_html\":\"\",\"markdown\":\"\",\"degraded\":false,\"manualReviewRequired\":false,\"warnings\":[]}。\n"
         f"是否需要语义描述：{bool(describe)}。\n"
         f"可用的文本层上下文：\n{_trim_context(page_text)}"
     )
@@ -1330,7 +1395,7 @@ def _recover_table_markdown(text: str) -> str:
     return _html_table_to_markdown(value)
 
 
-def _recover_table_from_result(result: OcrResult) -> str:
+def _recover_table_from_result(result: OcrResult) -> tuple[str, str]:
     raw = result.raw if isinstance(result.raw, dict) else {}
     candidates = [
         result.markdown,
@@ -1343,17 +1408,207 @@ def _recover_table_from_result(result: OcrResult) -> str:
     for candidate in candidates:
         if isinstance(candidate, dict):
             candidate = candidate.get("content") or candidate.get("text")
-        recovered = _recover_table_markdown(str(candidate or ""))
+        source_text = str(candidate or "")
+        recovered = _recover_table_markdown(source_text)
         if recovered:
-            return recovered
-    return ""
+            return recovered, source_text
+    return "", ""
 
 
 def _normalize_table_output(table_md: str) -> str:
-    value = str(table_md or "").strip()
-    if "<table" in value.lower():
-        return _fill_empty_html_table_cells(value)
-    return value
+    return _normalize_table_contract(table_md, "markdown")["markdown"]
+
+
+def _normalize_table_contract(table_text: str, table_rows_format: str = "markdown") -> Dict[str, Any]:
+    raw_text = str(table_text or "").strip()
+    source_html = _extract_html_table(raw_text)
+    warnings: List[str] = []
+    degraded = False
+    manual_review = False
+    reason = ""
+
+    if source_html:
+        grid, meta = _html_table_to_grid(source_html)
+        markdown = _grid_to_markdown(grid) if grid else ""
+        warnings.extend(meta["warnings"])
+        degraded = bool(meta["degraded"])
+        manual_review = bool(meta["manualReviewRequired"])
+        reason = str(meta["reason"] or "")
+    else:
+        markdown = _recover_table_markdown(raw_text) or raw_text
+        grid, meta = _markdown_table_to_grid_and_meta(markdown)
+        warnings.extend(meta["warnings"])
+        degraded = bool(meta["degraded"])
+        manual_review = bool(meta["manualReviewRequired"])
+        reason = str(meta["reason"] or "")
+
+    if not markdown:
+        markdown = raw_text
+    fmt = _normalize_table_rows_format(table_rows_format)
+    table_rows_content: Any
+    if fmt == "markdown":
+        table_rows_content = markdown
+    elif fmt == "csv":
+        table_rows_content = _grid_to_delimited(grid or _markdown_table_to_grid(markdown), ",")
+    elif fmt == "tsv":
+        table_rows_content = _grid_to_delimited(grid or _markdown_table_to_grid(markdown), "\t")
+    else:
+        table_rows_content = _structured_table_payload_json(
+            _structured_table_payload(grid, meta, source_html, markdown, degraded, manual_review, warnings, reason)
+        )
+
+    if isinstance(table_rows_content, str) and "<table" in table_rows_content.lower():
+        warnings.append("html_removed_from_tableRowsContent")
+        table_rows_content = markdown if fmt == "markdown" else ""
+        degraded = True
+        manual_review = True
+        reason = reason or "normalized output would contain html"
+
+    return {
+        "markdown": markdown,
+        "tableRowsFormat": fmt,
+        "tableRowsContent": table_rows_content,
+        "orientation": meta.get("orientation", 0),
+        "columns": meta.get("columns", grid[0] if grid else []),
+        "normalized_rows": meta.get("normalized_rows", grid[1:] if len(grid) > 1 else []),
+        "source_cells": meta.get("source_cells", []),
+        "cell_status": meta.get("cell_status", []),
+        "raw_html": source_html,
+        "sourceHtml": source_html,
+        "rawText": raw_text if raw_text and raw_text != source_html else "",
+        "warnings": _dedupe(warnings),
+        "degraded": degraded,
+        "manualReviewRequired": manual_review,
+        "reason": reason,
+    }
+
+
+def _merge_model_normalized_table(normalized: Dict[str, Any], raw: Dict[str, Any]) -> Dict[str, Any]:
+    columns = raw.get("columns")
+    rows = raw.get("normalized_rows") or raw.get("rows")
+    if not isinstance(columns, list) or not isinstance(rows, list):
+        return normalized
+    norm_columns = [_cell_to_text(cell) for cell in columns]
+    norm_rows = [
+        [_cell_to_text(cell) for cell in row]
+        for row in rows
+        if isinstance(row, list)
+    ]
+    if not norm_columns or not norm_rows:
+        return normalized
+
+    column_width = len(norm_columns)
+    inconsistent_row_width = any(len(row) > column_width for row in norm_rows)
+    for row in norm_rows:
+        if len(row) < column_width:
+            row.extend([""] * (column_width - len(row)))
+
+    grid = [norm_columns, *norm_rows]
+    raw_markdown = _cell_to_text(raw.get("markdown"))
+    raw_html = _cell_to_text(raw.get("raw_html")) or _cell_to_text(normalized.get("raw_html"))
+    html_leak = bool(_contains_html_table(raw_markdown))
+    markdown = (normalized.get("markdown") if html_leak else raw_markdown) or _grid_to_markdown(grid)
+    if html_leak and not raw_html:
+        raw_html = raw_markdown
+    warnings = _dedupe([*normalized.get("warnings", []), *[str(w) for w in raw.get("warnings", []) if str(w).strip()]])
+    warnings = _model_orientation_warnings(raw, warnings)
+    if inconsistent_row_width:
+        warnings.append("inconsistent_row_width")
+    if html_leak:
+        warnings.append("html_removed_from_tableRowsContent")
+    degraded = bool(raw.get("degraded", normalized.get("degraded", False)))
+    manual_review = bool(raw.get("manualReviewRequired", normalized.get("manualReviewRequired", False)))
+    if inconsistent_row_width or html_leak:
+        degraded = True
+        manual_review = True
+    reason = str(raw.get("reason") or normalized.get("reason") or "")
+    if inconsistent_row_width and "inconsistent_row_width" not in reason:
+        reason = _join_reasons(reason, "inconsistent_row_width: row data is wider than columns")
+    if html_leak:
+        reason = _join_reasons(reason, "normalized output would contain html")
+    source_cells = raw.get("source_cells") if isinstance(raw.get("source_cells"), list) else normalized.get("source_cells", [])
+    cell_status = raw.get("cell_status") if isinstance(raw.get("cell_status"), list) else normalized.get("cell_status", [])
+    structured_content = _structured_table_payload_json(
+        _structured_table_payload(
+            grid,
+            {
+                "orientation": raw.get("orientation", normalized.get("orientation", 0)),
+                "columns": norm_columns,
+                "normalized_rows": norm_rows,
+                "source_cells": source_cells,
+                "cell_status": cell_status,
+            },
+            raw_html,
+            markdown,
+            degraded,
+            manual_review,
+            _dedupe(_model_orientation_warnings(raw, warnings)),
+            reason,
+        )
+    )
+    if html_leak:
+        structured_content = ""
+
+    merged = dict(normalized)
+    merged.update(
+        {
+            "markdown": markdown,
+            "tableRowsContent": structured_content
+            if normalized.get("tableRowsFormat") == "structured_json"
+            else normalized.get("tableRowsContent"),
+            "orientation": raw.get("orientation", normalized.get("orientation", 0)),
+            "columns": norm_columns,
+            "normalized_rows": norm_rows,
+            "source_cells": source_cells,
+            "cell_status": cell_status,
+            "raw_html": raw_html,
+            "sourceHtml": raw_html,
+            "warnings": _dedupe(warnings),
+            "degraded": degraded,
+            "manualReviewRequired": manual_review,
+            "reason": reason,
+        }
+    )
+    if normalized.get("tableRowsFormat") == "markdown":
+        merged["tableRowsContent"] = markdown
+    elif normalized.get("tableRowsFormat") == "csv":
+        merged["tableRowsContent"] = _grid_to_delimited(grid, ",")
+    elif normalized.get("tableRowsFormat") == "tsv":
+        merged["tableRowsContent"] = _grid_to_delimited(grid, "\t")
+    if html_leak and normalized.get("tableRowsFormat") in {"csv", "tsv"}:
+        merged["tableRowsContent"] = ""
+    return merged
+
+
+def _model_orientation_warnings(raw: Dict[str, Any], warnings: List[str]) -> List[str]:
+    if raw.get("orientation") in {0, 90, 180, 270, "0", "90", "180", "270"}:
+        return [warning for warning in warnings if warning != "orientation_defaulted_to_0"]
+    return warnings
+
+
+def _cell_to_text(value: Any) -> str:
+    return "" if value is None else str(value).strip()
+
+
+def _contains_html_table(value: str) -> bool:
+    return "<table" in str(value or "").lower()
+
+
+def _join_reasons(existing: str, addition: str) -> str:
+    existing = str(existing or "").strip()
+    addition = str(addition or "").strip()
+    if not existing:
+        return addition
+    if not addition or addition in existing:
+        return existing
+    return f"{existing}; {addition}"
+
+
+def _normalize_table_rows_format(value: str) -> str:
+    fmt = str(value or "markdown").strip().lower()
+    if fmt in {"markdown", "csv", "tsv", "structured_json"}:
+        return fmt
+    return "markdown"
 
 
 def _fill_empty_html_table_cells(table_html: str) -> str:
@@ -1388,41 +1643,112 @@ def _extract_first_markdown_table(text: str) -> str:
 
 
 def _html_table_to_markdown(text: str) -> str:
+    grid, _meta = _html_table_to_grid(text)
+    return _grid_to_markdown(grid)
+
+
+def _extract_html_table(text: str) -> str:
     if "<table" not in str(text or "").lower():
         return ""
-    match = re.search(r"(?is)<table\b[^>]*>.*?</table>", text)
-    table = match.group(0) if match else text
-    grid: List[List[str]] = []
-    row_index = 0
-    for row_match in re.finditer(r"(?is)<tr\b[^>]*>(.*?)</tr>", table):
-        while len(grid) <= row_index:
-            grid.append([])
+    match = re.search(r"(?is)<table\b[^>]*>.*?</table>", str(text or ""))
+    return match.group(0) if match else str(text or "")
+
+
+def _html_table_to_grid(text: str) -> tuple[List[List[str]], Dict[str, Any]]:
+    table = _extract_html_table(text)
+    if not table:
+        return [], {"warnings": [], "degraded": False, "manualReviewRequired": False, "reason": ""}
+    html_rows = [row_match.group(1) for row_match in re.finditer(r"(?is)<tr\b[^>]*>(.*?)</tr>", table)]
+    grid: List[List[Optional[str]]] = [[] for _ in html_rows]
+    cell_status: List[Dict[str, Any]] = []
+    source_cells: List[Dict[str, Any]] = []
+    has_spans = False
+    has_colspan = False
+    clipped_rowspan = False
+    for row_index, row_html in enumerate(html_rows):
         row = grid[row_index]
         col_index = 0
-        for cell_match in re.finditer(r"(?is)<(td|th)\b([^>]*)>(.*?)</\1>", row_match.group(1)):
+        for cell_match in re.finditer(r"(?is)<(td|th)\b([^>]*)>(.*?)</\1>", row_html):
             while col_index < len(row) and row[col_index] is not None:
                 col_index += 1
             attrs = cell_match.group(2)
-            cell_text = _clean_html_cell(cell_match.group(3))
+            cell_text, source_status = _clean_html_cell_with_status(cell_match.group(3))
             rowspan = max(1, _html_int_attr(attrs, "rowspan"))
             colspan = max(1, _html_int_attr(attrs, "colspan"))
-            for r in range(rowspan):
-                while len(grid) <= row_index + r:
-                    grid.append([])
+            if rowspan > 1 or colspan > 1:
+                has_spans = True
+            if colspan > 1:
+                has_colspan = True
+            if row_index + rowspan > len(html_rows):
+                clipped_rowspan = True
+            source_cells.append(
+                {
+                    "row": row_index,
+                    "col": col_index,
+                    "text": cell_text,
+                    "rowspan": rowspan,
+                    "colspan": colspan,
+                    "confidence": 1.0,
+                }
+            )
+            for r in range(min(rowspan, len(html_rows) - row_index)):
                 target = grid[row_index + r]
-                _ensure_row_width(target, col_index + colspan)
+                _ensure_optional_row_width(target, col_index + colspan)
                 for c in range(colspan):
-                    target[col_index + c] = cell_text if r == 0 and c == 0 else "n/a"
+                    target[col_index + c] = cell_text
+                    status = source_status if r == 0 and c == 0 else "merged_fill"
+                    entry: Dict[str, Any] = {"row": row_index + r, "col": col_index + c, "status": status}
+                    if status == "merged_fill":
+                        entry["source_row"] = row_index
+                        entry["source_col"] = col_index
+                    cell_status.append(entry)
             col_index += colspan
-        row_index += 1
     normalized = [
-        [cell if cell is not None else "n/a" for cell in row]
+        [cell if cell is not None else "" for cell in row]
         for row in grid
-        if any(str(cell or "").strip() for cell in row)
+        if any(_cell_to_text(cell) for cell in row)
     ]
     if not normalized:
-        return ""
+        return [], {"warnings": ["html_table_parse_empty"], "degraded": True, "manualReviewRequired": True, "reason": "html table could not be parsed into rows"}
     width = max(len(row) for row in normalized)
+    for row_idx, row in enumerate(normalized):
+        old_width = len(row)
+        _ensure_row_width(row, width)
+        for col_idx in range(old_width, width):
+            cell_status.append({"row": row_idx, "col": col_idx, "status": "blank_in_source"})
+    warnings: List[str] = []
+    reason = ""
+    if has_spans:
+        warnings.append("html_table_contains_rowspan_or_colspan")
+    if has_colspan:
+        warnings.append("complex_header")
+    if clipped_rowspan:
+        warnings.append("rowspan_exceeds_observed_rows")
+    if has_colspan:
+        reason = "colspan expanded into logical columns; verify complex headers"
+    elif clipped_rowspan:
+        reason = "rowspan exceeded observed table rows and was clipped to avoid pseudo rows"
+    orientation, orientation_reliable = _table_orientation_status(table)
+    if not orientation_reliable:
+        warnings.append("orientation_defaulted_to_0")
+    return normalized, {
+        "warnings": warnings,
+        "degraded": has_colspan or clipped_rowspan,
+        "manualReviewRequired": has_colspan or clipped_rowspan,
+        "reason": reason,
+        "orientation": orientation,
+        "columns": normalized[0] if normalized else [],
+        "normalized_rows": normalized[1:] if len(normalized) > 1 else [],
+        "source_cells": source_cells,
+        "cell_status": _dedupe_cell_status(cell_status),
+    }
+
+
+def _grid_to_markdown(grid: List[List[str]]) -> str:
+    if not grid:
+        return ""
+    width = max(len(row) for row in grid)
+    normalized = [list(row) for row in grid]
     for row in normalized:
         _ensure_row_width(row, width)
     lines = [
@@ -1433,26 +1759,456 @@ def _html_table_to_markdown(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _markdown_table_to_grid(markdown: str) -> List[List[str]]:
+    return _markdown_table_to_grid_and_meta(markdown)[0]
+
+
+def _markdown_table_to_grid_and_meta(markdown: str) -> tuple[List[List[str]], Dict[str, Any]]:
+    lines = [line.strip() for line in str(markdown or "").splitlines() if "|" in line]
+    rows: List[List[str]] = []
+    for line in lines:
+        cells = [cell.strip().replace("\\|", "|") for cell in line.strip().strip("|").split("|")]
+        if cells and all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
+            continue
+        rows.append(cells)
+    if not rows:
+        return [], _grid_table_meta([])
+    width = max(len(row) for row in rows)
+    if width <= 1:
+        return rows, _grid_table_meta(rows)
+    repaired, repair_meta = _repair_markdown_merged_rows(rows, width)
+    meta = _grid_table_meta(repaired)
+    warnings = _dedupe([*meta.get("warnings", []), *repair_meta.get("warnings", [])])
+    meta.update(
+        {
+            "columns": repaired[0] if repaired else [],
+            "normalized_rows": repaired[1:] if len(repaired) > 1 else [],
+            "source_cells": repair_meta.get("source_cells") or meta.get("source_cells", []),
+            "cell_status": repair_meta.get("cell_status") or meta.get("cell_status", []),
+            "warnings": warnings,
+            "degraded": bool(repair_meta.get("degraded", False)),
+            "manualReviewRequired": bool(repair_meta.get("manualReviewRequired", False)),
+            "reason": str(repair_meta.get("reason") or ""),
+        }
+    )
+    return repaired, meta
+
+
+def _repair_markdown_merged_rows(rows: List[List[str]], width: int) -> tuple[List[List[str]], Dict[str, Any]]:
+    normalized: List[List[str]] = []
+    source_cells: List[Dict[str, Any]] = []
+    cell_status: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    degraded = False
+    manual_review = False
+    reason = ""
+    profiles = _build_column_profiles(rows, width)
+    previous_complete_row: Optional[List[str]] = None
+    previous_complete_idx: Optional[int] = None
+
+    for row_idx, original in enumerate(rows):
+        row = list(original)
+        if len(row) >= width:
+            normalized_row = row[:width]
+            if len(row) > width:
+                degraded = True
+                manual_review = True
+                warnings.append("inconsistent_row_width")
+                reason = _join_reasons(reason, "inconsistent_row_width: markdown row is wider than header")
+            normalized.append(normalized_row)
+            _record_markdown_cells(row_idx, normalized_row, source_cells, cell_status)
+            if row_idx > 0 and len(row) == width:
+                previous_complete_row = normalized_row
+                previous_complete_idx = row_idx
+            continue
+
+        missing_count = width - len(row)
+        if row_idx == 0 or not previous_complete_row or previous_complete_idx is None:
+            normalized_row = row + [""] * missing_count
+            normalized.append(normalized_row)
+            _record_markdown_cells(row_idx, normalized_row, source_cells, cell_status, original_width=len(row))
+            degraded = True
+            manual_review = True
+            warnings.append("ambiguous_markdown_merged_cell_repair")
+            reason = _join_reasons(reason, "cannot reliably infer missing markdown table columns")
+            continue
+
+        candidates = _markdown_alignment_candidates(row, width, previous_complete_row, previous_complete_idx, row_idx, profiles)
+        ranked = sorted(candidates, key=lambda item: item["score"], reverse=True)
+        best = ranked[0] if ranked else None
+        second_score = ranked[1]["score"] if len(ranked) > 1 else -999.0
+        if best and best["score"] >= 1.0 and best["score"] - second_score >= 2.0:
+            normalized_row = best["row"]
+            normalized.append(normalized_row)
+            source_cells.extend(best["source_cells"])
+            cell_status.extend(best["cell_status"])
+            warnings.append("markdown_merged_cell_repaired")
+        else:
+            normalized_row = row + [""] * missing_count
+            normalized.append(normalized_row)
+            _record_markdown_cells(row_idx, normalized_row, source_cells, cell_status, original_width=len(row))
+            degraded = True
+            manual_review = True
+            warnings.append("ambiguous_markdown_merged_cell_repair")
+            reason = _join_reasons(reason, "cannot reliably infer missing markdown table columns")
+
+    return normalized, {
+        "source_cells": source_cells,
+        "cell_status": _dedupe_cell_status(cell_status),
+        "warnings": _dedupe(warnings),
+        "degraded": degraded,
+        "manualReviewRequired": manual_review,
+        "reason": reason,
+    }
+
+
+def _record_markdown_cells(
+    row_idx: int,
+    row: List[str],
+    source_cells: List[Dict[str, Any]],
+    cell_status: List[Dict[str, Any]],
+    original_width: Optional[int] = None,
+) -> None:
+    original_width = len(row) if original_width is None else original_width
+    for col_idx, value in enumerate(row):
+        text = _cell_to_text(value)
+        status = _cell_status_from_text(text) if col_idx < original_width else "blank_in_source"
+        cell_status.append({"row": row_idx, "col": col_idx, "status": status})
+        if col_idx < original_width:
+            source_cells.append(
+                {
+                    "row": row_idx,
+                    "col": col_idx,
+                    "text": "" if status == "blank_in_source" else text,
+                    "rowspan": 1,
+                    "colspan": 1,
+                    "confidence": 1.0,
+                }
+            )
+
+
+def _markdown_alignment_candidates(
+    row: List[str],
+    width: int,
+    previous_row: List[str],
+    previous_row_idx: int,
+    row_idx: int,
+    profiles: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    missing = width - len(row)
+    candidates: List[Dict[str, Any]] = []
+    missing_sets: List[set[int]] = []
+    for left_missing in range(missing + 1):
+        right_missing = missing - left_missing
+        missing_cols = set(range(left_missing)) | set(range(width - right_missing, width))
+        if len(missing_cols) == missing:
+            missing_sets.append(missing_cols)
+    unique_sets: List[set[int]] = []
+    seen = set()
+    for item in missing_sets:
+        key = tuple(sorted(item))
+        if key not in seen:
+            seen.add(key)
+            unique_sets.append(item)
+
+    for missing_cols in unique_sets:
+        values: List[str] = []
+        source_cells: List[Dict[str, Any]] = []
+        cell_status: List[Dict[str, Any]] = []
+        src_idx = 0
+        score = 0.0
+        for col_idx in range(width):
+            if col_idx in missing_cols:
+                inherited = previous_row[col_idx] if col_idx < len(previous_row) else ""
+                values.append(inherited)
+                cell_status.append(
+                    {
+                        "row": row_idx,
+                        "col": col_idx,
+                        "status": "merged_fill",
+                        "source_row": previous_row_idx,
+                        "source_col": col_idx,
+                    }
+                )
+                if inherited:
+                    score += 0.35
+                continue
+            value = row[src_idx] if src_idx < len(row) else ""
+            values.append(value)
+            cell_score = _score_cell_for_column(value, profiles[col_idx] if col_idx < len(profiles) else {})
+            score += cell_score
+            status = _cell_status_from_text(value)
+            cell_status.append({"row": row_idx, "col": col_idx, "status": status})
+            source_cells.append(
+                {
+                    "row": row_idx,
+                    "col": col_idx,
+                    "text": "" if status == "blank_in_source" else _cell_to_text(value),
+                    "rowspan": 1,
+                    "colspan": 1,
+                    "confidence": 1.0,
+                }
+            )
+            src_idx += 1
+        candidates.append({"row": values, "score": score, "source_cells": source_cells, "cell_status": cell_status})
+    return candidates
+
+
+def _build_column_profiles(rows: List[List[str]], width: int) -> List[Dict[str, Any]]:
+    headers = rows[0] if rows else []
+    complete_rows = [row for row in rows[1:] if len(row) == width]
+    profiles: List[Dict[str, Any]] = []
+    for col_idx in range(width):
+        header = headers[col_idx] if col_idx < len(headers) else ""
+        categories = [_classify_table_cell(header, header=True)]
+        for row in complete_rows:
+            categories.append(_classify_table_cell(row[col_idx] if col_idx < len(row) else ""))
+        counts: Dict[str, int] = {}
+        for category in categories:
+            if category and category != "blank":
+                counts[category] = counts.get(category, 0) + 1
+        profiles.append({"header": header, "counts": counts})
+    return profiles
+
+
+def _classify_table_cell(value: Any, header: bool = False) -> str:
+    text = _cell_to_text(value)
+    compact = text.replace(" ", "")
+    lower = compact.lower()
+    if not compact:
+        return "blank"
+    if _is_unreadable_marker(compact):
+        return "unreadable"
+    if "%" in compact or "％" in compact:
+        return "percent"
+    if "℃" in compact or "温度" in compact:
+        return "temperature"
+    if header:
+        if re.search(r"材料|型号|类别|等级|代号|名称", compact):
+            return "material"
+        if re.search(r"状态|条件|处理|工艺|方式", compact):
+            return "status"
+        if re.search(r"直径|尺寸|厚度|长度|宽度|mm|公称|范围", lower):
+            return "range"
+        if re.search(r"系数|比值|比例", compact):
+            return "ratio"
+        if re.search(r"mpa|能量|强度|压力|数值|质量|重量|硬度|伸长|冲击", lower):
+            return "numeric"
+    if re.search(r"[~～]", compact) or re.fullmatch(r"[A-Za-z]*\d+(?:[~～\-][A-Za-z]*\d+)+", compact):
+        return "range"
+    if (
+        re.fullmatch(r"[≤≥<>]?\s*M?\d+(?:[.,]\d+)?(?:\s*[~～\-]\s*M?\d+(?:[.,]\d+)?)?", compact, flags=re.IGNORECASE)
+        and (re.search(r"[≤≥<>M]", compact, flags=re.IGNORECASE) or re.search(r"[~～\-]", compact))
+    ):
+        return "range"
+    if re.fullmatch(r"[<>≤≥=]*\s*-?\d+(?:[.,]\d+)?", compact):
+        numeric = _parse_float(compact)
+        if numeric is not None and 0 <= numeric <= 1 and re.search(r"[.,]", compact):
+            return "ratio"
+        if re.fullmatch(r"[<>≤≥=]*\s*-?\d+", compact):
+            return "integer"
+        return "decimal"
+    if re.search(r"\d", compact) and re.search(r"[A-Za-z]", compact):
+        return "model"
+    if re.search(r"正火|退火|淬火|回火|热轧|冷轧|调质|固溶|时效|处理|状态|条件", compact):
+        return "status"
+    if re.search(r"钢|铁|铜|铝|合金|材料|级", compact):
+        return "material"
+    return "text"
+
+
+def _score_cell_for_column(value: Any, profile: Dict[str, Any]) -> float:
+    category = _classify_table_cell(value)
+    counts = profile.get("counts") if isinstance(profile, dict) else {}
+    if not isinstance(counts, dict):
+        counts = {}
+    if category == "blank":
+        return -0.5
+    if category == "unreadable":
+        return 0.0
+    score = 0.0
+    if counts.get(category):
+        score += 3.0 + min(2.0, float(counts.get(category, 0)) * 0.4)
+    if category in {"numeric", "integer", "decimal", "ratio", "range"} and any(
+        counts.get(name) for name in ["numeric", "integer", "decimal", "ratio", "range"]
+    ):
+        score += 1.5
+    if category == "ratio" and (counts.get("integer") or counts.get("temperature")):
+        score -= 1.0
+    if category == "integer" and counts.get("ratio"):
+        score -= 1.5
+    if category == "decimal" and counts.get("ratio"):
+        score -= 0.75
+    if category in {"material", "model", "text"} and (counts.get("material") or counts.get("model")):
+        score += 1.0
+    if category == "status" and counts.get("status"):
+        score += 1.0
+    if not score and counts:
+        score -= 1.0
+    return score
+
+
+def _parse_float(value: str) -> Optional[float]:
+    cleaned = re.sub(r"^[<>≤≥=]+", "", str(value or "").strip()).replace(",", ".")
+    try:
+        return float(cleaned)
+    except Exception:
+        return None
+
+
+def _grid_table_meta(grid: List[List[str]]) -> Dict[str, Any]:
+    cell_status: List[Dict[str, Any]] = []
+    source_cells: List[Dict[str, Any]] = []
+    for row_idx, row in enumerate(grid):
+        for col_idx, value in enumerate(row):
+            text = _cell_to_text(value)
+            status = _cell_status_from_text(text)
+            cell_status.append({"row": row_idx, "col": col_idx, "status": status})
+            source_cells.append(
+                {
+                    "row": row_idx,
+                    "col": col_idx,
+                    "text": "" if status == "blank_in_source" else text,
+                    "rowspan": 1,
+                    "colspan": 1,
+                    "confidence": 1.0,
+                }
+            )
+    orientation, orientation_reliable = _table_orientation_status(_grid_to_markdown(grid))
+    warnings = [] if orientation_reliable else ["orientation_defaulted_to_0"]
+    return {
+        "orientation": orientation,
+        "columns": grid[0] if grid else [],
+        "normalized_rows": grid[1:] if len(grid) > 1 else [],
+        "source_cells": source_cells,
+        "cell_status": cell_status,
+        "warnings": warnings,
+        "degraded": False,
+        "manualReviewRequired": False,
+        "reason": "",
+    }
+
+
+def _structured_table_payload(
+    grid: List[List[str]],
+    meta: Dict[str, Any],
+    raw_html: str,
+    markdown: str,
+    degraded: bool,
+    manual_review: bool,
+    warnings: List[str],
+    reason: str,
+) -> Dict[str, Any]:
+    columns = meta.get("columns") or (grid[0] if grid else [])
+    normalized_rows = meta.get("normalized_rows") or (grid[1:] if len(grid) > 1 else [])
+    return {
+        "table_title": _table_title_from_markdown(markdown),
+        "orientation": meta.get("orientation", 0),
+        "columns": columns,
+        "normalized_rows": normalized_rows,
+        "rows": normalized_rows,
+        "source_cells": meta.get("source_cells", []),
+        "cell_status": meta.get("cell_status", []),
+        "raw_html": raw_html,
+        "markdown": markdown,
+        "degraded": degraded,
+        "manualReviewRequired": manual_review,
+        "warnings": _dedupe(warnings),
+        "reason": reason,
+    }
+
+
+def _structured_table_payload_json(payload: Dict[str, Any]) -> str:
+    publish_payload = dict(payload)
+    publish_payload.pop("raw_html", None)
+    return json.dumps(publish_payload, ensure_ascii=False)
+
+
+def _grid_to_delimited(grid: List[List[str]], delimiter: str) -> str:
+    if not grid:
+        return ""
+    escaped_rows = []
+    for row in grid:
+        values = []
+        for cell in row:
+            value = str(cell if cell is not None else "")
+            if delimiter == "," and any(ch in value for ch in [",", "\"", "\n"]):
+                value = "\"" + value.replace("\"", "\"\"") + "\""
+            values.append(value)
+        escaped_rows.append(delimiter.join(values))
+    return "\n".join(escaped_rows)
+
+
 def _html_int_attr(attrs: str, name: str) -> int:
     match = re.search(rf"(?i)\b{re.escape(name)}\s*=\s*['\"]?(\d+)", str(attrs or ""))
     return int(match.group(1)) if match else 1
 
 
 def _clean_html_cell(value: str) -> str:
+    return _clean_html_cell_with_status(value)[0] or "n/a"
+
+
+def _clean_html_cell_with_status(value: str) -> tuple[str, str]:
     text = re.sub(r"(?is)<br\s*/?>", "\n", str(value or ""))
     text = re.sub(r"(?is)<[^>]+>", " ", text)
     text = html.unescape(text)
     text = re.sub(r"\s+", " ", text).strip()
-    return text or "n/a"
+    if not text:
+        return "", "blank_in_source"
+    if _is_unreadable_marker(text):
+        return text, "unreadable"
+    return text, "recognized"
+
+
+def _cell_status_from_text(text: str) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return "blank_in_source"
+    if _is_unreadable_marker(value):
+        return "unreadable"
+    return "recognized"
+
+
+def _is_unreadable_marker(text: str) -> bool:
+    value = str(text or "").strip().lower()
+    return value in {"n/a", "na", "n.a.", "?", "？", "无法识别", "看不清", "unreadable"}
+
+
+def _table_orientation_from_text(text: str) -> int:
+    return _table_orientation_status(text)[0]
+
+
+def _table_orientation_status(text: str) -> tuple[int, bool]:
+    match = re.search(r'(?i)\borientation\b\s*[:=]\s*["\']?(0|90|180|270)', str(text or ""))
+    if match:
+        return int(match.group(1)), True
+    return 0, False
 
 
 def _ensure_row_width(row: List[str], width: int) -> None:
     while len(row) < width:
-        row.append("n/a")
+        row.append("")
+
+
+def _ensure_optional_row_width(row: List[Optional[str]], width: int) -> None:
+    while len(row) < width:
+        row.append(None)
+
+
+def _dedupe_cell_status(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    seen = set()
+    out: List[Dict[str, Any]] = []
+    for item in items:
+        key = (item.get("row"), item.get("col"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
 
 
 def _escape_markdown_cell(value: str) -> str:
-    return str(value or "n/a").replace("|", "\\|")
+    return str(value if value is not None else "").replace("|", "\\|")
 
 
 def _trim_context(text: str, limit: int = 1800) -> str:
