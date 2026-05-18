@@ -111,6 +111,7 @@ class FakeGLMOcrClient:
 class FakeVLMClient:
     enabled = True
     prompts = []
+    result_text = None
 
     def __init__(self, cfg):
         self.enabled = bool(cfg is not None)
@@ -120,6 +121,8 @@ class FakeVLMClient:
         _ = image_path
         _ = max_tokens
         self.__class__.prompts.append(prompt)
+        if self.__class__.result_text is not None:
+            return self.__class__.result_text
         if "image blocks" in prompt:
             return json.dumps(
                 {
@@ -221,6 +224,7 @@ def _patch_clients(monkeypatch):
     FakeGLMOcrClient.error = None
     FakeGLMOcrClient.prompts = []
     FakeVLMClient.prompts = []
+    FakeVLMClient.result_text = None
 
 
 def test_extract_page_tables_only_uses_table_items(monkeypatch):
@@ -1203,3 +1207,110 @@ def test_extract_page_structured_returns_separate_arrays(monkeypatch):
     assert len(result["formulas"]) == 1
     assert len(result["figures"]) == 1
     assert result["semantic_status"]["complete"] is True
+
+
+def test_revise_page_markdown_file_data_custom_prompt_calls_vlm_and_returns_page_text(monkeypatch):
+    _patch_clients(monkeypatch)
+    FakeVLMClient.result_text = "```markdown\n# Revised\n\n正文\n```"
+
+    result = json.loads(
+        single_page_tools.revise_page_markdown_direct(
+            file_data=PNG_DATA,
+            page_no=27,
+            prompt="只按图片重写这一页",
+            context={"tenant_id": "t1", "doc_id": "d1", "page_text": "BAD_NORMALIZED_TEXT"},
+            vlm_config={"model": "vlm", "api_key": "x", "base_url": "http://x"},
+        )
+    )
+
+    assert result["pageText"] == "# Revised\n\n正文"
+    assert result["page_no"] == 27
+    assert result["output_format"] == "markdown"
+    assert result["warnings"] == []
+    assert result["vlm"]["enabled"] is True
+    assert FakeVLMClient.prompts == ["只按图片重写这一页"]
+
+
+def test_revise_page_markdown_empty_prompt_uses_default_prompt(monkeypatch):
+    _patch_clients(monkeypatch)
+    FakeVLMClient.result_text = "修订后的正文"
+
+    result = json.loads(
+        single_page_tools.revise_page_markdown_direct(
+            file_data=PNG_DATA,
+            prompt="",
+            vlm_config={"model": "vlm", "api_key": "x", "base_url": "http://x"},
+        )
+    )
+
+    assert result["pageText"] == "修订后的正文"
+    assert "请根据这张单页渲染图片" in FakeVLMClient.prompts[0]
+    assert "只输出修订后的页面 Markdown" in FakeVLMClient.prompts[0]
+
+
+def test_revise_page_markdown_accepts_vlm_config_from_routing_config(monkeypatch):
+    _patch_clients(monkeypatch)
+    FakeVLMClient.result_text = "通过 routing_config 修订"
+
+    result = json.loads(
+        single_page_tools.revise_page_markdown_direct(
+            file_data=PNG_DATA,
+            routing_config={"vlm_ocr": {"model": "vlm", "api_key": "x", "base_url": "http://x"}},
+        )
+    )
+
+    assert result["pageText"] == "通过 routing_config 修订"
+    assert result["warnings"] == []
+    assert result["vlm"]["enabled"] is True
+
+
+def test_revise_page_markdown_does_not_send_current_page_text_to_vlm(monkeypatch, tmp_path):
+    _patch_clients(monkeypatch)
+    pdf = tmp_path / "demo.pdf"
+    pdf.write_bytes(b"%PDF fake")
+    rendered = tmp_path / "page.png"
+    rendered.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    monkeypatch.setattr(single_page_tools.fitz, "open", lambda path: FakeDoc())
+    monkeypatch.setattr(single_page_tools, "_render_page_image", lambda *args, **kwargs: rendered)
+    FakeVLMClient.result_text = "从图片修订"
+
+    result = json.loads(
+        single_page_tools.revise_page_markdown_direct(
+            file_path=str(pdf),
+            page_no=1,
+            prompt="重写页面，不要参考旧文本",
+            context={"page_text": "BAD_NORMALIZED_TEXT"},
+            vlm_config={"model": "vlm", "api_key": "x", "base_url": "http://x"},
+        )
+    )
+
+    assert result["pageText"] == "从图片修订"
+    assert "BAD_NORMALIZED_TEXT" not in FakeVLMClient.prompts[0]
+    assert "表 1 参数表" not in FakeVLMClient.prompts[0]
+
+
+def test_revise_page_markdown_requires_exactly_one_source(monkeypatch):
+    _patch_clients(monkeypatch)
+
+    for kwargs in [{}, {"file_data": PNG_DATA, "file_url": "https://example.com/page.png"}]:
+        try:
+            single_page_tools.revise_page_markdown_direct(
+                **kwargs,
+                vlm_config={"model": "vlm", "api_key": "x", "base_url": "http://x"},
+            )
+        except ValueError as exc:
+            assert "exactly one source is required" in str(exc)
+        else:
+            raise AssertionError("expected ValueError")
+
+
+def test_revise_page_markdown_tool_schema_exposed():
+    tools = asyncio.run(server.mcp.get_tools())
+    tool = tools["revise_page_markdown"]
+    schema = tool.parameters
+    properties = schema["properties"]
+
+    assert "prompt" in properties
+    assert "file_data" in properties
+    assert "file_path" in properties
+    assert "file_url" in properties

@@ -16,6 +16,7 @@ from .single_page_tools import (
     extract_page_layout_enhanced_direct,
     extract_page_structured_direct,
     extract_page_tables_direct,
+    revise_page_markdown_direct,
 )
 from .task_manager import TaskManager
 
@@ -330,6 +331,41 @@ async def extract_page_structured(
             output_format=output_format,
             describe=describe,
             ocr_config=ocr_config,
+            vlm_config=_normalize_vlm_config(vlm_config),
+            routing_config=routing_config,
+        ),
+    )
+
+
+@mcp.tool("revise_page_markdown")
+async def revise_page_markdown(
+    file_data: Optional[str] = None,
+    file_path: Optional[str] = None,
+    file_url: Optional[str] = None,
+    content_type: str = "image/png",
+    filename: Optional[str] = None,
+    page_no: int = 1,
+    prompt: Optional[str] = None,
+    context: Optional[Dict[str, Any]] = None,
+    output_target: str = "page_text",
+    output_format: str = "markdown",
+    vlm_config: Optional[Dict[str, Any]] = None,
+    routing_config: Optional[Dict[str, Any]] = None,
+) -> str:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: revise_page_markdown_direct(
+            file_data=file_data,
+            file_path=file_path,
+            file_url=file_url,
+            content_type=content_type,
+            filename=filename,
+            page_no=page_no,
+            prompt=prompt,
+            context=context,
+            output_target=output_target,
+            output_format=output_format,
             vlm_config=_normalize_vlm_config(vlm_config),
             routing_config=routing_config,
         ),

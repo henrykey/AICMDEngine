@@ -23,6 +23,12 @@ from .vlm_client import DynamicVLMClient
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 PDF_EXTENSIONS = {".pdf"}
+DEFAULT_REVISE_PAGE_MARKDOWN_PROMPT = """请根据这张单页渲染图片，重新生成该页可审核的 Markdown 内容。
+要求：
+1. 以页面图片为准修正乱码、错字、漏字、错误换行和明显 OCR 错误。
+2. 保留表格、公式、图示的可读结构；无法可靠结构化时保留占位说明，不要编造数据。
+3. 保留 Markdown、LaTeX、placeholder 这类人读校对格式。
+4. 只输出修订后的页面 Markdown，不要输出解释、代码围栏或额外标题。"""
 
 
 @dataclass
@@ -206,6 +212,59 @@ def extract_page_layout_enhanced_direct(
         routing_config=routing_config,
     )
     return _serialize_result(result, output_format)
+
+
+def revise_page_markdown_direct(
+    file_data: Optional[str] = None,
+    file_path: Optional[str] = None,
+    file_url: Optional[str] = None,
+    content_type: str = "image/png",
+    filename: Optional[str] = None,
+    page_no: int = 1,
+    prompt: Optional[str] = None,
+    context: Optional[Dict[str, Any]] = None,
+    output_target: str = "page_text",
+    output_format: str = "markdown",
+    vlm_config: Optional[Dict[str, Any]] = None,
+    routing_config: Optional[Dict[str, Any]] = None,
+) -> str:
+    _ = content_type
+    _ = filename
+    _ = context
+    _ = output_target
+    final_prompt = str(prompt or "").strip() or DEFAULT_REVISE_PAGE_MARKDOWN_PROMPT
+    with tempfile.TemporaryDirectory(prefix="pdf2md_enh_revise_page_") as work_dir:
+        ctx = _prepare_context(
+            Path(work_dir),
+            file_path=file_path,
+            file_data=file_data,
+            file_url=file_url,
+            page_no=page_no,
+            input_type="auto",
+            routing_config=routing_config,
+        )
+        warnings: List[str] = []
+        vlm = DynamicVLMClient(_resolve_revise_vlm_config(vlm_config, routing_config))
+        vlm_info = _vlm_debug_info(vlm)
+        if not vlm.enabled:
+            warnings.append("vlm_ocr_unavailable_for_page_revision")
+            page_text = ""
+        else:
+            try:
+                raw = vlm._call_image_prompt(ctx.image_path, final_prompt, max_tokens=vlm.max_tokens)
+                page_text = _normalize_page_markdown(raw)
+            except Exception as exc:
+                warnings.append(f"vlm_ocr_failed: {exc}")
+                page_text = ""
+
+        result = {
+            "pageText": page_text,
+            "page_no": ctx.page_no,
+            "output_format": output_format or "markdown",
+            "warnings": _dedupe(warnings),
+            "vlm": vlm_info,
+        }
+        return json.dumps(result, ensure_ascii=False)
 
 
 def _extract_single_page(
@@ -614,6 +673,39 @@ def _extract_figure_page_result(
 def _call_vlm_structured(vlm: DynamicVLMClient, image_path: str, prompt: str) -> OcrResult:
     text = vlm._call_image_prompt(image_path, prompt, max_tokens=min(vlm.max_tokens, 4096))
     return normalize_text_response(text, "vlm_ocr")
+
+
+def _vlm_debug_info(vlm: DynamicVLMClient) -> Dict[str, Any]:
+    return {
+        "enabled": bool(getattr(vlm, "enabled", False)),
+        "provider": getattr(vlm, "provider", "") or "",
+        "model": getattr(vlm, "model", "") or "",
+        "base_url": getattr(vlm, "base_url", "") or "",
+        "max_tokens": getattr(vlm, "max_tokens", None),
+        "timeout_sec": getattr(vlm, "timeout_sec", None),
+        "has_api_key": bool(getattr(vlm, "api_key", "")),
+    }
+
+
+def _resolve_revise_vlm_config(
+    vlm_config: Optional[Dict[str, Any]],
+    routing_config: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    if vlm_config:
+        return vlm_config
+    if not isinstance(routing_config, dict):
+        return None
+
+    direct = routing_config.get("vlm_ocr")
+    if isinstance(direct, dict) and direct.get("enabled", True):
+        return direct
+
+    ocr_config = routing_config.get("ocr_config")
+    if isinstance(ocr_config, dict):
+        nested = ocr_config.get("vlm_ocr")
+        if isinstance(nested, dict) and nested.get("enabled", True):
+            return nested
+    return None
 
 
 def _native_table_markdowns(page: fitz.Page) -> List[str]:

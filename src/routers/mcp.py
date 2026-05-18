@@ -8,6 +8,7 @@ from datetime import datetime
 import logging
 
 from src.mcp.registry import MCPRegistry, ToolResult
+from src.mcp.protocol_handler import choose_vlm_injection_key, get_tool_schema_properties
 
 logger = logging.getLogger(__name__)
 
@@ -250,33 +251,11 @@ async def execute_mcp_tool(
     # Extract "llm" parameter if present
     llm_provider = kwargs.pop("llm", None)
 
-    # Runtime LLM binding injection for external MCPs (REST path consistency with WS path)
-    server_vlm_targets = {
-        "pdf2md-enhanced": {
-            "default_key": "vlm_config",
-            "skip_if_present": ["vlm_config", "vlm_defaults"],
-            "tool_keys": {
-                "start_task": "vlm_defaults",
-                "process_task_page": "vlm_config",
-                "extract_page_layout_enhanced": "vlm_config",
-                "extract_page_tables": "vlm_config",
-                "extract_page_formulas": "vlm_config",
-                "extract_page_figures": "vlm_config",
-                "extract_page_structured": "vlm_config",
-            },
-        },
-        "pageindex": {
-            "default_key": "vlm_config",
-            "skip_if_present": ["vlm_config"],
-            "tool_keys": {"build_index_from_pdf": "vlm_config", "build_index_from_markdown": "vlm_config", "build": "vlm_config"},
-        },
-    }
-    inject_cfg = server_vlm_targets.get(server_name)
-    if (
-        inject_cfg
-        and tool_name in inject_cfg["tool_keys"]
-        and not any(k in kwargs for k in inject_cfg["skip_if_present"])
-    ):
+    # Runtime model binding injection for external MCPs (REST path consistency with WS path).
+    # Injection is schema-driven: only tools that declare these fields receive provider configs.
+    properties = get_tool_schema_properties(registry, server_name, tool_name)
+    vlm_key = choose_vlm_injection_key(properties, kwargs)
+    if vlm_key:
         llm_map = await _load_mcp_llm_map(request)
         bound_provider = llm_map.get(server_name)
         if not bound_provider:
@@ -285,19 +264,11 @@ async def execute_mcp_tool(
         if bound_provider:
             vlm_config = _build_vlm_config_from_provider(request, bound_provider)
             if vlm_config:
-                inject_key = inject_cfg["tool_keys"].get(tool_name, inject_cfg["default_key"])
-                kwargs[inject_key] = vlm_config
+                kwargs[vlm_key] = vlm_config
+        else:
+            logger.info("[%s.%s] no MCP->LLM binding found; skip VLM injection", server_name, tool_name)
 
-    pdf2md_ocr_tools = {
-        "process_task_page",
-        "analyze_page_layout",
-        "extract_page_layout_enhanced",
-        "extract_page_tables",
-        "extract_page_formulas",
-        "extract_page_figures",
-        "extract_page_structured",
-    }
-    if server_name == "pdf2md-enhanced" and tool_name in pdf2md_ocr_tools and "ocr_config" not in kwargs:
+    if "ocr_config" in properties and "ocr_config" not in kwargs:
         provider_settings = await _load_mcp_provider_settings(request)
         bound_ocr_provider = (provider_settings.get(server_name) or {}).get("glm_ocr_provider")
         if not bound_ocr_provider:
@@ -307,6 +278,8 @@ async def execute_mcp_tool(
             ocr_config = _build_glm_ocr_config_from_provider(request, bound_ocr_provider)
             if ocr_config:
                 kwargs["ocr_config"] = ocr_config
+        else:
+            logger.info("[%s.%s] no MCP->GLM-OCR binding found; skip OCR injection", server_name, tool_name)
 
     try:
         result = await registry.execute_command(

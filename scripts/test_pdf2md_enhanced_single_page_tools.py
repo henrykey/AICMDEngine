@@ -7,6 +7,7 @@ Examples:
   python scripts/test_pdf2md_enhanced_single_page_tools.py --input /path/to/page.png --input-type image
   python scripts/test_pdf2md_enhanced_single_page_tools.py --input /path/to/doc.pdf --page 12 --provider ZAI-OCR
   python scripts/test_pdf2md_enhanced_single_page_tools.py --input /path/to/page.pdf --tool all
+  python scripts/test_pdf2md_enhanced_single_page_tools.py --input /path/to/page.png --input-type image --tool revise --provider multmode
 
 By default the script:
   1. reads provider config from mcp-router /api/llm/providers/{provider}
@@ -38,6 +39,7 @@ TOOL_NAMES = {
     "formulas": "extract_page_formulas",
     "figures": "extract_page_figures",
     "structured": "extract_page_structured",
+    "revise": "revise_page_markdown",
 }
 
 
@@ -102,6 +104,32 @@ def _build_ocr_config(args: argparse.Namespace) -> Dict[str, Any]:
     if not glm_ocr["base_url"]:
         raise RuntimeError("Provider config does not include base_url")
     return {"glm_ocr": glm_ocr}
+
+
+def _build_vlm_config(args: argparse.Namespace) -> Dict[str, Any]:
+    if args.provider_config:
+        with open(args.provider_config, "r", encoding="utf-8") as f:
+            provider = json.load(f)
+    else:
+        router = args.router_url.rstrip("/")
+        provider = _read_json(f"{router}/api/llm/providers/{args.provider}", timeout=args.http_timeout)
+
+    api_key = _resolve_api_key(str(provider.get("api_key_ref") or ""), args.api_key)
+    provider_timeout = int(provider.get("timeout") or args.http_timeout)
+    args.effective_timeout = int(args.timeout or provider_timeout)
+    vlm_config = {
+        "provider": provider.get("name") or args.provider,
+        "base_url": provider.get("base_url"),
+        "model": provider.get("model"),
+        "api_key": api_key,
+        "timeout_sec": provider_timeout,
+        "max_tokens": int(provider.get("max_tokens") or 4096),
+        "temperature": float(provider.get("temperature") or 0.1),
+        "max_retries": int(args.max_retries),
+    }
+    if not vlm_config["base_url"] or not vlm_config["model"]:
+        raise RuntimeError("Provider config does not include base_url/model")
+    return vlm_config
 
 
 def _encode_file(path: Path) -> str:
@@ -194,6 +222,13 @@ def _print_summary(tool_key: str, text: str) -> None:
     warnings = data.get("warnings") or []
     if warnings:
         print(f"warnings: {warnings}")
+    if tool_key == "revise":
+        page_text = str(data.get("pageText") or "")
+        print(f"page_no: {data.get('page_no')}")
+        print(f"pageText length: {len(page_text)}")
+        print(f"vlm: {json.dumps(data.get('vlm') or {}, ensure_ascii=False)}")
+        print(f"pageText preview: {page_text[:500]}")
+        return
     if tool_key == "structured":
         _print_items_summary(data.get("tables") or [], "tables")
         _print_items_summary(data.get("formulas") or [], "formulas")
@@ -218,7 +253,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", required=True, help="Path to a single-page image or PDF/document PDF")
     parser.add_argument(
         "--tool",
-        choices=["layout", "enhanced", "tables", "formulas", "figures", "structured", "all"],
+        choices=["layout", "enhanced", "tables", "formulas", "figures", "structured", "revise", "all"],
         default="tables",
         help="Tool to test. Default starts with tables.",
     )
@@ -233,6 +268,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--api-key", default=None, help="Override provider API key")
     parser.add_argument("--provider-config", default=None, help="JSON file with provider config")
     parser.add_argument("--ocr-config", default=None, help="JSON file with full ocr_config")
+    parser.add_argument("--prompt", default=None, help="Custom prompt for revise_page_markdown")
+    parser.add_argument(
+        "--explicit-vlm-config",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="For --tool revise, explicitly pass vlm_config from provider config. Disable to test router auto-injection.",
+    )
     parser.add_argument("--timeout", type=int, default=None, help="Override call timeout. Defaults to provider timeout.")
     parser.add_argument("--http-timeout", type=int, default=30, help="Timeout for short config/API setup calls.")
     parser.add_argument("--max-retries", type=int, default=0)
@@ -244,15 +286,24 @@ def parse_args() -> argparse.Namespace:
 async def async_main() -> int:
     args = parse_args()
     input_path = Path(args.input).expanduser().resolve()
-    ocr_config = _build_ocr_config(args)
+    revise_only = args.tool == "revise"
+    ocr_config = {} if revise_only else _build_ocr_config(args)
+    vlm_config = _build_vlm_config(args) if revise_only and args.explicit_vlm_config else None
+    if revise_only and not args.explicit_vlm_config:
+        args.effective_timeout = int(args.timeout or 600)
     payload = {
         "file_data": _encode_file(input_path),
         "page_no": args.page,
-        "input_type": args.input_type,
         "output_format": args.output_format,
-        "ocr_config": ocr_config,
         "routing_config": {"render_dpi": args.render_dpi},
     }
+    if not revise_only:
+        payload["input_type"] = args.input_type
+        payload["ocr_config"] = ocr_config
+    if vlm_config:
+        payload["vlm_config"] = vlm_config
+    if args.prompt:
+        payload["prompt"] = args.prompt
 
     tool_keys = list(TOOL_NAMES.keys()) if args.tool == "all" else [args.tool]
     outputs: Dict[str, str] = {}
@@ -260,7 +311,7 @@ async def async_main() -> int:
         tool_name = TOOL_NAMES[tool_key]
         print(f"\n=== {tool_name} ===")
         call_payload = dict(payload)
-        if tool_key not in {"layout", "enhanced"}:
+        if tool_key not in {"layout", "enhanced", "revise"}:
             call_payload["describe"] = args.describe
         if args.via == "router":
             text = await _call_router(args, tool_name, call_payload)

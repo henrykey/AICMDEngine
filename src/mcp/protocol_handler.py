@@ -10,6 +10,56 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def get_tool_schema_properties(registry: Any, mcp_name: str, tool_name: str) -> Dict[str, Any]:
+    """Return JSON schema properties for a registered MCP tool."""
+    candidates = []
+    if registry and hasattr(registry, "get_tool_info"):
+        try:
+            tool_info = registry.get_tool_info(mcp_name, tool_name)
+            if tool_info:
+                candidates.append(tool_info)
+        except Exception as exc:
+            logger.warning("[%s.%s] failed to read tool schema: %s", mcp_name, tool_name, exc)
+
+    if registry and hasattr(registry, "get_mcp"):
+        mcp = registry.get_mcp(mcp_name)
+        tools_cache = getattr(mcp, "tools_cache", None) if mcp else None
+        if isinstance(tools_cache, dict) and tools_cache.get(tool_name):
+            candidates.append(tools_cache[tool_name])
+        if mcp and hasattr(mcp, "get_info"):
+            info = mcp.get_info() or {}
+            tools = info.get("tools", [])
+            if isinstance(tools, dict):
+                if tools.get(tool_name):
+                    candidates.append(tools[tool_name])
+            elif isinstance(tools, list):
+                for item in tools:
+                    if isinstance(item, dict) and item.get("name") == tool_name:
+                        candidates.append(item)
+                        break
+
+    for tool_info in candidates:
+        if not isinstance(tool_info, dict):
+            continue
+        schema = tool_info.get("inputSchema") or tool_info.get("input_schema") or {}
+        if not isinstance(schema, dict):
+            continue
+        properties = schema.get("properties") or {}
+        if isinstance(properties, dict) and properties:
+            return properties
+    return {}
+
+
+def choose_vlm_injection_key(properties: Dict[str, Any], args: Dict[str, Any]) -> Optional[str]:
+    if "vlm_config" in args or "vlm_defaults" in args:
+        return None
+    if "vlm_defaults" in properties:
+        return "vlm_defaults"
+    if "vlm_config" in properties:
+        return "vlm_config"
+    return None
+
+
 class MCPMessage:
     """MCP消息模型"""
 
@@ -357,9 +407,14 @@ class MCPProtocolHandler:
         Explicit request args always win over router injection.
         """
         args = dict(arguments or {})
+        registry = context.get("registry")
+        properties = get_tool_schema_properties(registry, mcp_name, tool_name)
+        if not properties:
+            return args
 
-        # Currently only pdf2md-enhanced requires runtime injected model config.
-        if mcp_name != "pdf2md-enhanced":
+        vlm_key = choose_vlm_injection_key(properties, args)
+        should_inject_ocr = "ocr_config" in properties and "ocr_config" not in args
+        if not vlm_key and not should_inject_ocr:
             return args
 
         provider_manager = context.get("provider_manager")
@@ -367,17 +422,7 @@ class MCPProtocolHandler:
             logger.warning(f"[{mcp_name}] provider_manager unavailable, skip model injection")
             return args
 
-        vlm_injection_keys = {
-            "start_task": "vlm_defaults",
-            "process_task_page": "vlm_config",
-            "extract_page_layout_enhanced": "vlm_config",
-            "extract_page_tables": "vlm_config",
-            "extract_page_formulas": "vlm_config",
-            "extract_page_figures": "vlm_config",
-            "extract_page_structured": "vlm_config",
-        }
-        vlm_key = vlm_injection_keys.get(tool_name)
-        if vlm_key and "vlm_config" not in args and "vlm_defaults" not in args:
+        if vlm_key:
             provider_name = await self._resolve_mcp_llm_provider(mcp_name, context)
             if provider_name:
                 vlm_config = self._build_model_config_from_provider(provider_manager, provider_name, mcp_name, "VLM")
@@ -386,16 +431,7 @@ class MCPProtocolHandler:
             else:
                 logger.info("[%s.%s] no MCP->LLM binding found; skip VLM injection", mcp_name, tool_name)
 
-        ocr_injection_tools = {
-            "process_task_page",
-            "analyze_page_layout",
-            "extract_page_layout_enhanced",
-            "extract_page_tables",
-            "extract_page_formulas",
-            "extract_page_figures",
-            "extract_page_structured",
-        }
-        if tool_name in ocr_injection_tools and "ocr_config" not in args:
+        if should_inject_ocr:
             provider_name = await self._resolve_mcp_glm_ocr_provider(mcp_name, context)
             if provider_name:
                 glm_ocr_config = self._build_model_config_from_provider(provider_manager, provider_name, mcp_name, "GLM-OCR")

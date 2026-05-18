@@ -66,44 +66,25 @@ class FakeMongo:
     mcp_server_settings = FakeSettingsCollection()
 
 
-def test_pdf2md_protocol_injects_glm_ocr_config_for_single_page_tools():
-    handler = MCPProtocolHandler()
-
-    args = asyncio.run(
-        handler._inject_external_model_configs(
-            mcp_name="pdf2md-enhanced",
-            tool_name="extract_page_tables",
-            arguments={"file_path": "/tmp/page.pdf"},
-            context={"mongodb": FakeMongo(), "provider_manager": FakeProviderManager()},
-        )
-    )
-
-    assert args["vlm_config"]["provider"] == "glmocr"
-    assert args["ocr_config"]["glm_ocr"]["enabled"] is True
-    assert args["ocr_config"]["glm_ocr"]["provider"] == "glmocr"
-    assert args["ocr_config"]["glm_ocr"]["api_key"] == "secret-key"
+def _tool_info(*properties, schema_key="inputSchema"):
+    return {
+        "name": "fake",
+        schema_key: {
+            "type": "object",
+            "properties": {name: {"type": "object"} for name in properties},
+        },
+    }
 
 
-def test_pdf2md_protocol_respects_explicit_ocr_config():
-    handler = MCPProtocolHandler()
-    explicit = {"glm_ocr": {"enabled": False, "provider": "manual"}}
-
-    args = asyncio.run(
-        handler._inject_external_model_configs(
-            mcp_name="pdf2md-enhanced",
-            tool_name="process_task_page",
-            arguments={"ocr_config": explicit},
-            context={"mongodb": FakeMongo(), "provider_manager": FakeProviderManager()},
-        )
-    )
-
-    assert args["ocr_config"] is explicit
-    assert args["vlm_config"]["provider"] == "glmocr"
-
-
-class FakeRegistry:
-    def __init__(self):
+class FakeSchemaRegistry:
+    def __init__(self, schemas=None):
+        self.schemas = schemas or {}
         self.kwargs = None
+        self.tool_name = None
+
+    def get_tool_info(self, mcp_name, tool_name):
+        assert mcp_name == "pdf2md-enhanced"
+        return self.schemas.get(tool_name)
 
     def get_mcp(self, name):
         assert name == "pdf2md-enhanced"
@@ -111,10 +92,86 @@ class FakeRegistry:
 
     async def execute_command(self, mcp_name, tool_name, llm_provider=None, **kwargs):
         assert mcp_name == "pdf2md-enhanced"
-        assert tool_name == "extract_page_tables"
         assert llm_provider is None
+        self.tool_name = tool_name
         self.kwargs = kwargs
         return type("Result", (), {"content": "ok"})()
+
+
+def _protocol_inject(tool_name, arguments=None, schemas=None):
+    handler = MCPProtocolHandler()
+    registry = FakeSchemaRegistry(schemas or {tool_name: _tool_info("vlm_config", "ocr_config")})
+
+    return asyncio.run(
+        handler._inject_external_model_configs(
+            mcp_name="pdf2md-enhanced",
+            tool_name=tool_name,
+            arguments=arguments or {"file_path": "/tmp/page.pdf"},
+            context={"mongodb": FakeMongo(), "provider_manager": FakeProviderManager(), "registry": registry},
+        )
+    )
+
+
+def test_protocol_injects_vlm_config_for_schema_declared_new_tool():
+    args = _protocol_inject("revise_page_markdown", schemas={"revise_page_markdown": _tool_info("vlm_config")})
+
+    assert args["vlm_config"]["provider"] == "glmocr"
+    assert args["vlm_config"]["api_key"] == "secret-key"
+    assert "vlm_defaults" not in args
+
+
+def test_protocol_injects_vlm_defaults_for_schema_declared_defaults_tool():
+    args = _protocol_inject("start_task", schemas={"start_task": _tool_info("vlm_defaults")})
+
+    assert args["vlm_defaults"]["provider"] == "glmocr"
+    assert "vlm_config" not in args
+
+
+def test_protocol_does_not_inject_vlm_when_schema_has_no_vlm_field():
+    args = _protocol_inject("plain_tool", schemas={"plain_tool": _tool_info("file_path")})
+
+    assert "vlm_config" not in args
+    assert "vlm_defaults" not in args
+    assert "ocr_config" not in args
+
+
+def test_protocol_respects_explicit_vlm_config():
+    explicit = {"provider": "manual"}
+    args = _protocol_inject(
+        "revise_page_markdown",
+        arguments={"file_path": "/tmp/page.pdf", "vlm_config": explicit},
+        schemas={"revise_page_markdown": _tool_info("vlm_config")},
+    )
+
+    assert args["vlm_config"] is explicit
+
+
+def test_protocol_injects_ocr_config_when_schema_declares_ocr_config():
+    args = _protocol_inject("extract_page_tables", schemas={"extract_page_tables": _tool_info("ocr_config")})
+
+    assert args["ocr_config"]["glm_ocr"]["enabled"] is True
+    assert args["ocr_config"]["glm_ocr"]["provider"] == "glmocr"
+    assert args["ocr_config"]["glm_ocr"]["api_key"] == "secret-key"
+    assert "vlm_config" not in args
+
+
+def test_protocol_reads_input_schema_alias():
+    args = _protocol_inject("revise_page_markdown", schemas={"revise_page_markdown": _tool_info("vlm_config", schema_key="input_schema")})
+
+    assert args["vlm_config"]["provider"] == "glmocr"
+
+
+def test_pdf2md_protocol_respects_explicit_ocr_config():
+    explicit = {"glm_ocr": {"enabled": False, "provider": "manual"}}
+
+    args = _protocol_inject(
+        "process_task_page",
+        arguments={"ocr_config": explicit},
+        schemas={"process_task_page": _tool_info("vlm_config", "ocr_config")},
+    )
+
+    assert args["ocr_config"] is explicit
+    assert args["vlm_config"]["provider"] == "glmocr"
 
 
 class FakeApp:
@@ -132,52 +189,68 @@ class FakeRequest:
         return {"file_path": "/tmp/page.pdf"}
 
 
-def test_pdf2md_rest_injects_glm_ocr_config_for_single_page_tools():
-    registry = FakeRegistry()
+def _rest_execute(tool_name, schemas=None, request_cls=FakeRequest):
+    registry = FakeSchemaRegistry(schemas or {tool_name: _tool_info("vlm_config", "ocr_config")})
 
     response = asyncio.run(
         mcp_router.execute_mcp_tool(
             server_name="pdf2md-enhanced",
-            tool_name="extract_page_tables",
-            request=FakeRequest(registry),
+            tool_name=tool_name,
+            request=request_cls(registry),
         )
     )
+    return response, registry
+
+
+def test_rest_injects_vlm_config_for_schema_declared_new_tool():
+    response, registry = _rest_execute("revise_page_markdown", schemas={"revise_page_markdown": _tool_info("vlm_config")})
 
     assert response["result"]["content"][0]["text"] == "ok"
     assert registry.kwargs["vlm_config"]["provider"] == "glmocr"
+
+
+def test_rest_injects_vlm_defaults_for_schema_declared_defaults_tool():
+    _, registry = _rest_execute("start_task", schemas={"start_task": _tool_info("vlm_defaults")})
+
+    assert registry.kwargs["vlm_defaults"]["provider"] == "glmocr"
+    assert "vlm_config" not in registry.kwargs
+
+
+def test_rest_does_not_inject_vlm_when_schema_has_no_vlm_field():
+    _, registry = _rest_execute("plain_tool", schemas={"plain_tool": _tool_info("file_path")})
+
+    assert "vlm_config" not in registry.kwargs
+    assert "vlm_defaults" not in registry.kwargs
+    assert "ocr_config" not in registry.kwargs
+
+
+class ExplicitVlmRequest(FakeRequest):
+    async def json(self):
+        return {"file_path": "/tmp/page.pdf", "vlm_config": {"provider": "manual"}}
+
+
+def test_rest_respects_explicit_vlm_config():
+    _, registry = _rest_execute(
+        "revise_page_markdown",
+        schemas={"revise_page_markdown": _tool_info("vlm_config")},
+        request_cls=ExplicitVlmRequest,
+    )
+
+    assert registry.kwargs["vlm_config"] == {"provider": "manual"}
+
+
+def test_rest_injects_ocr_config_when_schema_declares_ocr_config():
+    _, registry = _rest_execute("extract_page_tables", schemas={"extract_page_tables": _tool_info("ocr_config")})
+
     assert registry.kwargs["ocr_config"]["glm_ocr"]["enabled"] is True
     assert registry.kwargs["ocr_config"]["glm_ocr"]["provider"] == "glmocr"
+    assert "vlm_config" not in registry.kwargs
 
 
-def test_pdf2md_protocol_injects_glm_ocr_config_for_layout_tool_without_vlm():
-    handler = MCPProtocolHandler()
+def test_protocol_and_rest_paths_inject_consistently_for_combined_schema():
+    schemas = {"extract_page_structured": _tool_info("vlm_config", "ocr_config")}
+    protocol_args = _protocol_inject("extract_page_structured", schemas=schemas)
+    _, registry = _rest_execute("extract_page_structured", schemas=schemas)
 
-    args = asyncio.run(
-        handler._inject_external_model_configs(
-            mcp_name="pdf2md-enhanced",
-            tool_name="analyze_page_layout",
-            arguments={"file_path": "/tmp/page.pdf"},
-            context={"mongodb": FakeMongo(), "provider_manager": FakeProviderManager()},
-        )
-    )
-
-    assert "vlm_config" not in args
-    assert args["ocr_config"]["glm_ocr"]["enabled"] is True
-    assert args["ocr_config"]["glm_ocr"]["provider"] == "glmocr"
-
-
-def test_pdf2md_protocol_injects_both_model_configs_for_enhanced_layout_tool():
-    handler = MCPProtocolHandler()
-
-    args = asyncio.run(
-        handler._inject_external_model_configs(
-            mcp_name="pdf2md-enhanced",
-            tool_name="extract_page_layout_enhanced",
-            arguments={"file_path": "/tmp/page.pdf"},
-            context={"mongodb": FakeMongo(), "provider_manager": FakeProviderManager()},
-        )
-    )
-
-    assert args["vlm_config"]["provider"] == "glmocr"
-    assert args["ocr_config"]["glm_ocr"]["enabled"] is True
-    assert args["ocr_config"]["glm_ocr"]["provider"] == "glmocr"
+    assert protocol_args["vlm_config"]["provider"] == registry.kwargs["vlm_config"]["provider"] == "glmocr"
+    assert protocol_args["ocr_config"]["glm_ocr"]["provider"] == registry.kwargs["ocr_config"]["glm_ocr"]["provider"] == "glmocr"
