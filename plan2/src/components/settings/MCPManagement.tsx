@@ -25,6 +25,13 @@ interface LLMProvider {
   name: string;
 }
 
+const isPdf2mdEnhancedServer = (server?: Pick<MCPServer, 'name' | 'endpoint'> | null) => {
+  if (!server) return false;
+  const name = server.name.trim().toLowerCase();
+  const endpoint = server.endpoint.trim().toLowerCase();
+  return name === 'pdf2md-enhanced' || endpoint === 'mcp://pdf2md-enhanced';
+};
+
 const MCPManagement = () => {
   const [servers, setServers] = useState<MCPServer[]>([]);
   const [llmProviders, setLlmProviders] = useState<LLMProvider[]>([]);
@@ -155,7 +162,7 @@ const MCPManagement = () => {
   useEffect(() => {
     if (selectedServer?.name) {
       fetchServerLLMProvider(selectedServer.name);
-      if (selectedServer.name === 'pdf2md-enhanced') {
+      if (isPdf2mdEnhancedServer(selectedServer)) {
         fetchServerGlmOcrProvider(selectedServer.name);
       } else {
         setSelectedServerGlmOcr('');
@@ -532,7 +539,7 @@ const ServerDetails = ({
         </p>
       </div>
 
-      {server.name === 'pdf2md-enhanced' && (
+      {isPdf2mdEnhancedServer(server) && (
         <div>
           <label className="text-sm font-semibold text-slate-700">GLM-OCR Provider</label>
           <div className="flex items-center gap-2 mt-2">
