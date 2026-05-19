@@ -32,7 +32,12 @@ COPY .wheelhouse/ /opt/wheelhouse/
 
 # 2. 安装 Python 依赖
 RUN if find /opt/wheelhouse -type f ! -name '.gitkeep' | grep -q .; then \
-      pip install --no-index --find-links=/opt/wheelhouse -r requirements.txt; \
+      pip install --no-index --find-links=/opt/wheelhouse -r requirements.txt || \
+        if [ -n "${PIP_INDEX_URL}" ]; then \
+          pip install -i "${PIP_INDEX_URL}" --no-cache-dir -r requirements.txt; \
+        else \
+          pip install --no-cache-dir -r requirements.txt; \
+        fi; \
     elif [ -n "${PIP_INDEX_URL}" ]; then \
       pip install -i "${PIP_INDEX_URL}" --no-cache-dir -r requirements.txt; \
     else \

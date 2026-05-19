@@ -193,6 +193,7 @@ bash AIPlanner/deploy/deploy-remote-build.sh \
 - `plan2`：仅构建/部署 `plan2-ui`
 - `mcp`：仅构建/部署 `office-word` + `pdf2md-enhanced` + `pageindex`
 - `all`：构建/部署全部组件
+- 也可直接传单个服务名：`mcp-router`、`office-word`、`pdf2md-enhanced`、`pageindex`
 
 `deploy-remote-build.sh` 动作说明：
 
@@ -227,6 +228,14 @@ bash AIPlanner/deploy/deploy-remote-build.sh \
   --env-file AIPlanner/.env.ali \
   --app-host aliapp \
   --scope mcp \
+  --mirror cn \
+  all
+
+# 仅部署 pdf2md-enhanced
+bash AIPlanner/deploy/deploy-remote-build.sh \
+  --env-file AIPlanner/.env.ali \
+  --app-host aliapp \
+  --scope pdf2md-enhanced \
   --mirror cn \
   all
 ```

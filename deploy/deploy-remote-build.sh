@@ -12,7 +12,7 @@ fi
 
 ENV_FILE=""
 APP_HOST=""
-APP_USER="root"
+APP_USER=""
 APP_PORT="22"
 REMOTE_DIR="/opt/AICMDEngine"
 REMOTE_SRC_BASE="/opt/AICMDEngine-src"
@@ -70,12 +70,13 @@ Actions:
 Options:
   --env-file PATH
   --app-host HOST
-  --app-user USER
+  --user USER
+  --app-user USER                     Alias for --user
   --app-port PORT
   --remote-dir DIR
   --remote-src-base DIR
   --source-package PATH
-  --scope router|plan2|mcp|all
+  --scope router|plan2|mcp|all|mcp-router|office-word|pdf2md-enhanced|pageindex
   --platform linux/amd64|linux/arm64
   --mirror cn|PREFIX
   --upload-method auto|scp|rsync  (default: auto)
@@ -89,6 +90,7 @@ Examples:
   bash AIPlanner/deploy/deploy-remote-build.sh --env-file AIPlanner/.env.ali --app-host aliapp all
   bash AIPlanner/deploy/deploy-remote-build.sh --env-file AIPlanner/.env.ali --app-host aliapp --mirror cn --upload-method rsync all
   bash AIPlanner/deploy/deploy-remote-build.sh --env-file AIPlanner/.env.ali --app-host aliapp --scope plan2 remote-build
+  bash AIPlanner/deploy/deploy-remote-build.sh --env-file AIPlanner/.env.ali --app-host aliapp --scope pdf2md-enhanced remote-build
 EOF
 }
 
@@ -120,17 +122,17 @@ resolve_env_file() {
 
 validate_scope() {
   case "$1" in
-    router|plan2|mcp|all)
+    router|plan2|mcp|all|mcp-router|office-word|pdf2md-enhanced|pageindex)
       ;;
     *)
-      fail "Invalid scope: $1 (expected: router|plan2|mcp|all)"
+      fail "Invalid scope: $1 (expected: router|plan2|mcp|all|mcp-router|office-word|pdf2md-enhanced|pageindex)"
       ;;
   esac
 }
 
 scope_to_services() {
   case "$DEPLOY_SCOPE" in
-    router)
+    router|mcp-router)
       printf '%s\n' "mcp-router"
       ;;
     plan2)
@@ -140,7 +142,10 @@ scope_to_services() {
       printf '%s\n' "office-word" "pdf2md-enhanced" "pageindex"
       ;;
     all)
-      printf '%s\n' "mcp-router" "plan2"
+      printf '%s\n' "mcp-router" "plan2" "office-word" "pdf2md-enhanced" "pageindex"
+      ;;
+    office-word|pdf2md-enhanced|pageindex)
+      printf '%s\n' "$DEPLOY_SCOPE"
       ;;
   esac
 }
@@ -159,7 +164,7 @@ while [[ $# -gt 0 ]]; do
       APP_HOST="$2"
       shift 2
       ;;
-    --app-user)
+    --user|--app-user)
       APP_USER="$2"
       shift 2
       ;;
@@ -267,11 +272,19 @@ PAGEINDEX_HOST_PORT="${PAGEINDEX_HOST_PORT:-$PAGEINDEX_HOST_PORT_DEFAULT}"
 PLAN2_PUBLIC_BASE_URL="http://${APP_HOST}:${PLAN2_HOST_PORT}"
 
 ssh_app() {
-  ssh -p "$APP_PORT" "$APP_USER@$APP_HOST" "$@"
+  ssh -p "$APP_PORT" "$(remote_login_target)" "$@"
 }
 
 scp_app() {
   scp -P "$APP_PORT" -o Compression=no -c "$SSH_CIPHER" "$@"
+}
+
+remote_login_target() {
+  if [[ -n "$APP_USER" ]]; then
+    printf '%s@%s' "$APP_USER" "$APP_HOST"
+  else
+    printf '%s' "$APP_HOST"
+  fi
 }
 
 detect_remote_rsync() {
@@ -427,8 +440,11 @@ prepare_source_package() {
   require_cmd tar
 
   if [[ "$FORCE_REPACKAGE" != "true" && -f "$SOURCE_PACKAGE" ]]; then
-    log "Using existing source package: $SOURCE_PACKAGE"
-    return
+    if source_package_matches_scope "$SOURCE_PACKAGE"; then
+      log "Using existing source package: $SOURCE_PACKAGE"
+      return
+    fi
+    log "Existing source package does not match scope=$DEPLOY_SCOPE; repackaging: $SOURCE_PACKAGE"
   fi
 
   log "Packaging AIPlanner source tree to $SOURCE_PACKAGE"
@@ -447,7 +463,7 @@ prepare_source_package() {
         AIPlanner/deploy/docker-compose.mcp.yml \
         AIPlanner/deploy/plan2.config.aliyun.json
       ;;
-    router)
+    router|mcp-router)
       log "Using slim source package profile for scope=router"
       COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar -czf "$SOURCE_PACKAGE" \
         -C "$PROJECT_ROOT" \
@@ -455,6 +471,36 @@ prepare_source_package() {
         AIPlanner/requirements.txt \
         AIPlanner/src \
         AIPlanner/.wheelhouse \
+        AIPlanner/deploy/docker-compose.mcp.yml
+      ;;
+    office-word)
+      log "Using slim source package profile for scope=office-word"
+      COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar -czf "$SOURCE_PACKAGE" \
+        -C "$PROJECT_ROOT" \
+        AIPlanner/mcp/servers/office-word \
+        AIPlanner/deploy/docker-compose.mcp.yml
+      ;;
+    pdf2md-enhanced)
+      log "Using slim source package profile for scope=pdf2md-enhanced"
+      COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar -czf "$SOURCE_PACKAGE" \
+        --exclude='AIPlanner/mcp/servers/PDF2MDEnhanced/data/output' \
+        --exclude='AIPlanner/mcp/servers/PDF2MDEnhanced/data/input' \
+        --exclude='AIPlanner/mcp/servers/PDF2MDEnhanced/data/tasks' \
+        --exclude='AIPlanner/mcp/servers/PDF2MDEnhanced/__pycache__' \
+        --exclude='AIPlanner/mcp/servers/PDF2MDEnhanced/**/*.log' \
+        -C "$PROJECT_ROOT" \
+        AIPlanner/mcp/servers/PDF2MDEnhanced \
+        AIPlanner/deploy/docker-compose.mcp.yml
+      ;;
+    pageindex)
+      log "Using slim source package profile for scope=pageindex"
+      COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar -czf "$SOURCE_PACKAGE" \
+        --exclude='AIPlanner/mcp/servers/PageIndex/.git' \
+        --exclude='AIPlanner/mcp/servers/PageIndex/tests' \
+        --exclude='AIPlanner/mcp/servers/PageIndex/__pycache__' \
+        --exclude='AIPlanner/mcp/servers/PageIndex/pageindex/__pycache__' \
+        -C "$PROJECT_ROOT" \
+        AIPlanner/mcp/servers/PageIndex \
         AIPlanner/deploy/docker-compose.mcp.yml
       ;;
     mcp)
@@ -492,6 +538,9 @@ prepare_source_package() {
         AIPlanner/src \
         AIPlanner/.wheelhouse \
         AIPlanner/plan2 \
+        AIPlanner/mcp/servers/office-word \
+        AIPlanner/mcp/servers/PDF2MDEnhanced \
+        AIPlanner/mcp/servers/PageIndex \
         AIPlanner/deploy/docker-compose.mcp.yml \
         AIPlanner/deploy/plan2.config.aliyun.json
       ;;
@@ -506,6 +555,43 @@ archive_has_entry() {
   tar -tzf "$archive" | grep -Fxq "$entry"
 }
 
+source_package_matches_scope() {
+  local archive="$1"
+  [[ -f "$archive" ]] || return 1
+
+  case "$DEPLOY_SCOPE" in
+    router|mcp-router)
+      archive_has_entry "$archive" "AIPlanner/Dockerfile.mcp-router" &&
+        archive_has_entry "$archive" "AIPlanner/src/main.py"
+      ;;
+    plan2)
+      archive_has_entry "$archive" "AIPlanner/plan2/Dockerfile" &&
+        archive_has_entry "$archive" "AIPlanner/deploy/docker-compose.mcp.yml"
+      ;;
+    office-word)
+      archive_has_entry "$archive" "AIPlanner/mcp/servers/office-word/Dockerfile"
+      ;;
+    pdf2md-enhanced)
+      archive_has_entry "$archive" "AIPlanner/mcp/servers/PDF2MDEnhanced/Dockerfile"
+      ;;
+    pageindex)
+      archive_has_entry "$archive" "AIPlanner/mcp/servers/PageIndex/Dockerfile"
+      ;;
+    mcp)
+      archive_has_entry "$archive" "AIPlanner/mcp/servers/office-word/Dockerfile" &&
+        archive_has_entry "$archive" "AIPlanner/mcp/servers/PDF2MDEnhanced/Dockerfile" &&
+        archive_has_entry "$archive" "AIPlanner/mcp/servers/PageIndex/Dockerfile"
+      ;;
+    all)
+      archive_has_entry "$archive" "AIPlanner/Dockerfile.mcp-router" &&
+        archive_has_entry "$archive" "AIPlanner/plan2/Dockerfile" &&
+        archive_has_entry "$archive" "AIPlanner/mcp/servers/office-word/Dockerfile" &&
+        archive_has_entry "$archive" "AIPlanner/mcp/servers/PDF2MDEnhanced/Dockerfile" &&
+        archive_has_entry "$archive" "AIPlanner/mcp/servers/PageIndex/Dockerfile"
+      ;;
+  esac
+}
+
 validate_source_package() {
   local archive="$SOURCE_PACKAGE"
   [[ -f "$archive" ]] || fail "source package not found after packaging: $archive"
@@ -516,13 +602,22 @@ validate_source_package() {
   (( size > 1024 )) || fail "source package is unexpectedly small (${size} bytes): $archive"
 
   case "$DEPLOY_SCOPE" in
-    router)
+    router|mcp-router)
       archive_has_entry "$archive" "AIPlanner/Dockerfile.mcp-router" || fail "source package missing AIPlanner/Dockerfile.mcp-router"
       archive_has_entry "$archive" "AIPlanner/src/main.py" || fail "source package missing AIPlanner/src/main.py"
       ;;
     plan2)
       archive_has_entry "$archive" "AIPlanner/plan2/Dockerfile" || fail "source package missing AIPlanner/plan2/Dockerfile"
       archive_has_entry "$archive" "AIPlanner/deploy/docker-compose.mcp.yml" || fail "source package missing AIPlanner/deploy/docker-compose.mcp.yml"
+      ;;
+    office-word)
+      archive_has_entry "$archive" "AIPlanner/mcp/servers/office-word/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/office-word/Dockerfile"
+      ;;
+    pdf2md-enhanced)
+      archive_has_entry "$archive" "AIPlanner/mcp/servers/PDF2MDEnhanced/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/PDF2MDEnhanced/Dockerfile"
+      ;;
+    pageindex)
+      archive_has_entry "$archive" "AIPlanner/mcp/servers/PageIndex/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/PageIndex/Dockerfile"
       ;;
     mcp)
       archive_has_entry "$archive" "AIPlanner/mcp/servers/office-word/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/office-word/Dockerfile"
@@ -532,6 +627,9 @@ validate_source_package() {
     all)
       archive_has_entry "$archive" "AIPlanner/Dockerfile.mcp-router" || fail "source package missing AIPlanner/Dockerfile.mcp-router"
       archive_has_entry "$archive" "AIPlanner/plan2/Dockerfile" || fail "source package missing AIPlanner/plan2/Dockerfile"
+      archive_has_entry "$archive" "AIPlanner/mcp/servers/office-word/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/office-word/Dockerfile"
+      archive_has_entry "$archive" "AIPlanner/mcp/servers/PDF2MDEnhanced/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/PDF2MDEnhanced/Dockerfile"
+      archive_has_entry "$archive" "AIPlanner/mcp/servers/PageIndex/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/PageIndex/Dockerfile"
       ;;
   esac
 
@@ -552,7 +650,7 @@ upload_source_and_files() {
 
   log "Uploading source package"
   ssh_app "rm -f '$REMOTE_DIR/aiplanner-source.tar.gz'"
-  upload_file_to_app "$SOURCE_PACKAGE" "$APP_USER@$APP_HOST:$REMOTE_DIR/aiplanner-source.tar.gz"
+  upload_file_to_app "$SOURCE_PACKAGE" "$(remote_login_target):$REMOTE_DIR/aiplanner-source.tar.gz"
 
   log "Verifying uploaded source package integrity"
   local_sha="$(calc_local_sha256 "$SOURCE_PACKAGE")"
@@ -563,15 +661,15 @@ upload_source_and_files() {
   log "Uploading env and compose"
   rendered_env="$(mktemp)"
   render_env_with_build_platform "$rendered_env"
-  upload_file_to_app "$rendered_env" "$APP_USER@$APP_HOST:$REMOTE_DIR/.env"
+  upload_file_to_app "$rendered_env" "$(remote_login_target):$REMOTE_DIR/.env"
   rm -f "$rendered_env"
 
-  upload_file_to_app "$SCRIPT_DIR/docker-compose.mcp.yml" "$APP_USER@$APP_HOST:$REMOTE_DIR/docker-compose.mcp.yml"
+  upload_file_to_app "$SCRIPT_DIR/docker-compose.mcp.yml" "$(remote_login_target):$REMOTE_DIR/docker-compose.mcp.yml"
 
   log "Rendering and uploading plan2 config"
   rendered_plan2_config="$(mktemp)"
   render_plan2_config "$rendered_plan2_config"
-  upload_file_to_app "$rendered_plan2_config" "$APP_USER@$APP_HOST:$REMOTE_DIR/plan2/config.json"
+  upload_file_to_app "$rendered_plan2_config" "$(remote_login_target):$REMOTE_DIR/plan2/config.json"
   rm -f "$rendered_plan2_config"
 }
 
@@ -581,9 +679,7 @@ remote_build_and_deploy() {
   local services
   local service_args=""
   mapfile -t services < <(scope_to_services)
-  if [[ "$DEPLOY_SCOPE" != "all" ]]; then
-    service_args="${services[*]}"
-  fi
+  service_args="${services[*]}"
 
   local mirror_prefix=""
   local npm_registry=""
@@ -643,91 +739,69 @@ if [[ '$DOCKER_MIRROR' == 'cn' ]]; then
   echo '🇨🇳 已启用国内依赖源: npm=$npm_registry, pip=$pip_index_url, apt=$apt_mirror'
 fi
 
-case '$DEPLOY_SCOPE' in
-  router)
-    docker build \
-      --platform '$BUILD_PLATFORM' \
-      --pull=false \
-      --build-arg PYTHON_BASE_IMAGE='$python311_base_image' \
-      ${pip_index_url:+--build-arg PIP_INDEX_URL='$pip_index_url'} \
-      ${apt_mirror:+--build-arg APT_MIRROR='$apt_mirror'} \
-      -f Dockerfile.mcp-router \
-      -t '$ROUTER_IMAGE' \
-      .
-    ;;
-  plan2)
-    docker build \
-      --platform '$BUILD_PLATFORM' \
-      --pull=false \
-      --build-arg NODE_BASE_IMAGE='$node_base_image' \
-      --build-arg NGINX_BASE_IMAGE='$nginx_base_image' \
-      ${npm_registry:+--build-arg NPM_REGISTRY='$npm_registry'} \
-      ${alpine_mirror:+--build-arg ALPINE_MIRROR='$alpine_mirror'} \
-      -f plan2/Dockerfile \
-      -t '$PLAN2_IMAGE' \
-      plan2
-    ;;
-  mcp)
-    docker build \
-      --platform '$BUILD_PLATFORM' \
-      --pull=false \
-      --build-arg PYTHON_BASE_IMAGE='$python312_base_image' \
-      ${pip_index_url:+--build-arg PIP_INDEX_URL='$pip_index_url'} \
-      ${apt_mirror:+--build-arg APT_MIRROR='$apt_mirror'} \
-      -f mcp/servers/office-word/Dockerfile \
-      -t '$OFFICE_WORD_IMAGE' \
-      mcp/servers/office-word
+if [[ '$DEPLOY_SCOPE' == 'all' || '$DEPLOY_SCOPE' == 'router' || '$DEPLOY_SCOPE' == 'mcp-router' ]]; then
+  docker build \
+    --platform '$BUILD_PLATFORM' \
+    --pull=false \
+    --build-arg PYTHON_BASE_IMAGE='$python311_base_image' \
+    ${pip_index_url:+--build-arg PIP_INDEX_URL='$pip_index_url'} \
+    ${apt_mirror:+--build-arg APT_MIRROR='$apt_mirror'} \
+    -f Dockerfile.mcp-router \
+    -t '$ROUTER_IMAGE' \
+    .
+fi
 
-    docker build \
-      --platform '$BUILD_PLATFORM' \
-      --pull=false \
-      --build-arg PYTHON_BASE_IMAGE='$python312_base_image' \
-      ${pip_index_url:+--build-arg PIP_INDEX_URL='$pip_index_url'} \
-      ${apt_mirror:+--build-arg APT_MIRROR='$apt_mirror'} \
-      -f mcp/servers/PDF2MDEnhanced/Dockerfile \
-      -t '$PDF2MD_ENH_IMAGE' \
-      mcp/servers/PDF2MDEnhanced
+if [[ '$DEPLOY_SCOPE' == 'all' || '$DEPLOY_SCOPE' == 'plan2' ]]; then
+  docker build \
+    --platform '$BUILD_PLATFORM' \
+    --pull=false \
+    --build-arg NODE_BASE_IMAGE='$node_base_image' \
+    --build-arg NGINX_BASE_IMAGE='$nginx_base_image' \
+    ${npm_registry:+--build-arg NPM_REGISTRY='$npm_registry'} \
+    ${alpine_mirror:+--build-arg ALPINE_MIRROR='$alpine_mirror'} \
+    -f plan2/Dockerfile \
+    -t '$PLAN2_IMAGE' \
+    plan2
+fi
 
-    docker build \
-      --platform '$BUILD_PLATFORM' \
-      --pull=false \
-      --build-arg PYTHON_BASE_IMAGE='$python312_base_image' \
-      ${pip_index_url:+--build-arg PIP_INDEX_URL='$pip_index_url'} \
-      ${apt_mirror:+--build-arg APT_MIRROR='$apt_mirror'} \
-      -f mcp/servers/PageIndex/Dockerfile \
-      -t '$PAGEINDEX_IMAGE' \
-      mcp/servers/PageIndex
-    ;;
-  all)
-    docker build \
-      --platform '$BUILD_PLATFORM' \
-      --pull=false \
-      --build-arg PYTHON_BASE_IMAGE='$python311_base_image' \
-      ${pip_index_url:+--build-arg PIP_INDEX_URL='$pip_index_url'} \
-      ${apt_mirror:+--build-arg APT_MIRROR='$apt_mirror'} \
-      -f Dockerfile.mcp-router \
-      -t '$ROUTER_IMAGE' \
-      .
+if [[ '$DEPLOY_SCOPE' == 'all' || '$DEPLOY_SCOPE' == 'mcp' || '$DEPLOY_SCOPE' == 'office-word' ]]; then
+  docker build \
+    --platform '$BUILD_PLATFORM' \
+    --pull=false \
+    --build-arg PYTHON_BASE_IMAGE='$python312_base_image' \
+    ${pip_index_url:+--build-arg PIP_INDEX_URL='$pip_index_url'} \
+    ${apt_mirror:+--build-arg APT_MIRROR='$apt_mirror'} \
+    -f mcp/servers/office-word/Dockerfile \
+    -t '$OFFICE_WORD_IMAGE' \
+    mcp/servers/office-word
+fi
 
-    docker build \
-      --platform '$BUILD_PLATFORM' \
-      --pull=false \
-      --build-arg NODE_BASE_IMAGE='$node_base_image' \
-      --build-arg NGINX_BASE_IMAGE='$nginx_base_image' \
-      ${npm_registry:+--build-arg NPM_REGISTRY='$npm_registry'} \
-      ${alpine_mirror:+--build-arg ALPINE_MIRROR='$alpine_mirror'} \
-      -f plan2/Dockerfile \
-      -t '$PLAN2_IMAGE' \
-      plan2
-    ;;
-esac
+if [[ '$DEPLOY_SCOPE' == 'all' || '$DEPLOY_SCOPE' == 'mcp' || '$DEPLOY_SCOPE' == 'pdf2md-enhanced' ]]; then
+  docker build \
+    --platform '$BUILD_PLATFORM' \
+    --pull=false \
+    --build-arg PYTHON_BASE_IMAGE='$python312_base_image' \
+    ${pip_index_url:+--build-arg PIP_INDEX_URL='$pip_index_url'} \
+    ${apt_mirror:+--build-arg APT_MIRROR='$apt_mirror'} \
+    -f mcp/servers/PDF2MDEnhanced/Dockerfile \
+    -t '$PDF2MD_ENH_IMAGE' \
+    mcp/servers/PDF2MDEnhanced
+fi
+
+if [[ '$DEPLOY_SCOPE' == 'all' || '$DEPLOY_SCOPE' == 'mcp' || '$DEPLOY_SCOPE' == 'pageindex' ]]; then
+  docker build \
+    --platform '$BUILD_PLATFORM' \
+    --pull=false \
+    --build-arg PYTHON_BASE_IMAGE='$python312_base_image' \
+    ${pip_index_url:+--build-arg PIP_INDEX_URL='$pip_index_url'} \
+    ${apt_mirror:+--build-arg APT_MIRROR='$apt_mirror'} \
+    -f mcp/servers/PageIndex/Dockerfile \
+    -t '$PAGEINDEX_IMAGE' \
+    mcp/servers/PageIndex
+fi
 
 cd '$REMOTE_DIR'
-if [[ '$DEPLOY_SCOPE' == 'all' ]]; then
-  docker compose -f docker-compose.mcp.yml up -d mcp-router plan2
-else
-  docker compose -f docker-compose.mcp.yml up -d $service_args
-fi
+docker compose -f docker-compose.mcp.yml up -d $service_args
 
 # trap EXIT will clean up \$REMOTE_BUILD_DIR after deployment completes
 "

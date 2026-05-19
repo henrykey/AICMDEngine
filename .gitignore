@@ -65,3 +65,4 @@ data/*
 !**/.wheelhouse/.gitkeep
 /deploy/cache/
 /deploy/out/
+./coverage/
