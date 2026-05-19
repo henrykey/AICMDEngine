@@ -77,7 +77,7 @@ def _normalize_items(value: Any, kind: str, source: str) -> List[OcrElement]:
             latex = _pick_str(item, "latex", "formula", "text")
             desc = _pick_str(item, "description", "semantic_summary", "summary")
             title = _pick_str(item, "title", "id", "name")
-            caption = _pick_str(item, "caption", "label")
+            caption = _pick_str(item, "caption", "capture", "figure_name", "figureName", "name", "title", "label")
             context = _pick_str(item, "context", "surrounding_text")
             text = _pick_str(item, "text", "content")
             out.append(

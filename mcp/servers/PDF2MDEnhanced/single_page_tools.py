@@ -878,8 +878,8 @@ def _normalize_page_markdown(markdown: str) -> str:
 
 
 def _figure_item(item: OcrElement, page_text: str) -> Dict[str, Any]:
-    desc = str(item.description or item.text or item.caption or "").strip()
-    caption = item.caption or _figure_caption(desc) or _figure_caption(page_text)
+    desc = str(item.description or item.text or item.caption or item.title or "").strip()
+    caption = item.caption or item.title or _figure_caption(desc) or _figure_caption(page_text)
     labels = item.raw.get("labels", []) if isinstance(item.raw, dict) else []
     if not isinstance(labels, list):
         labels = []
@@ -887,8 +887,12 @@ def _figure_item(item: OcrElement, page_text: str) -> Dict[str, Any]:
     return {
         "source": "vlm_ocr",
         "caption": caption,
+        "capture": caption,
+        "name": caption,
+        "figureName": caption,
         "type": str(item.raw.get("type") or _figure_type(desc)) if isinstance(item.raw, dict) else _figure_type(desc),
         "description": desc,
+        "semanticDesc": desc,
         "labels": labels,
         "context": item.context or _near_context(page_text, caption),
     }
@@ -1035,8 +1039,12 @@ def _figures_from_layout_blocks(blocks: List[Dict[str, Any]]) -> List[Dict[str, 
             {
                 "source": "glm_ocr_layout",
                 "caption": _figure_caption(content) or f"Figure {len(figures) + 1}",
+                "capture": _figure_caption(content) or f"Figure {len(figures) + 1}",
+                "name": _figure_caption(content) or f"Figure {len(figures) + 1}",
+                "figureName": _figure_caption(content) or f"Figure {len(figures) + 1}",
                 "type": "figure",
                 "description": content,
+                "semanticDesc": content,
                 "labels": [],
                 "context": "",
                 "block_index": block.get("index"),
@@ -1090,8 +1098,12 @@ def _enhance_layout_figures_with_vlm(
             {
                 "source": "glm_ocr_layout+vlm_ocr",
                 "caption": detail.get("caption") or enriched.get("caption"),
+                "capture": detail.get("capture") or detail.get("caption") or enriched.get("capture") or enriched.get("caption"),
+                "name": detail.get("name") or detail.get("caption") or enriched.get("name") or enriched.get("caption"),
+                "figureName": detail.get("figureName") or detail.get("caption") or enriched.get("figureName") or enriched.get("caption"),
                 "type": detail.get("type") or enriched.get("type"),
                 "description": detail.get("description") or enriched.get("description"),
+                "semanticDesc": detail.get("semanticDesc") or detail.get("description") or enriched.get("semanticDesc") or enriched.get("description"),
                 "labels": detail.get("labels") or enriched.get("labels") or [],
                 "context": detail.get("context") or enriched.get("context") or "",
             }
@@ -1281,11 +1293,15 @@ def _formulas_markdown(items: List[Dict[str, Any]]) -> List[str]:
 def _figures_markdown(items: List[Dict[str, Any]]) -> List[str]:
     out = []
     for idx, item in enumerate(items, 1):
-        title = item.get("caption") or f"Figure {idx}"
+        title = item.get("caption") or item.get("capture") or item.get("name") or item.get("figureName") or f"Figure {idx}"
         labels = item.get("labels") or []
-        label_line = f"Labels: {', '.join(labels)}" if labels else ""
+        desc = item.get("description") or ""
+        zh = _contains_cjk(" ".join([str(title), str(desc), str(item.get("context") or "")]))
+        type_label = "类型" if zh else "Type"
+        labels_label = "标注" if zh else "Labels"
+        label_line = f"{labels_label}: {', '.join(labels)}" if labels else ""
         out.append(
-            f"## {title}\n\nType: {item.get('type') or 'unknown'}\n\n{item.get('description') or ''}\n\n{label_line}".strip()
+            f"## {title}\n\n{type_label}: {item.get('type') or 'unknown'}\n\n{desc}\n\n{label_line}".strip()
         )
     return out
 
@@ -1418,10 +1434,17 @@ def _prompt_formula_page(page_text: str, describe: bool) -> str:
 
 def _prompt_figures(page_text: str) -> str:
     return (
-        "Extract figures and technical diagrams only from this single page image. Ignore tables and formulas. "
-        "Describe the visual semantics, labels, caption, and figure type. Return strict JSON only: "
-        "{\"figures\":[{\"caption\":\"\",\"type\":\"schematic|chart|diagram|figure|unknown\",\"description\":\"\",\"labels\":[],\"context\":\"\"}],\"tables\":[],\"formulas\":[]}.\n"
-        f"Text-layer context, if useful:\n{_trim_context(page_text)}"
+        "只识别这张单页图片中的插图、示意图、结构图、曲线图或技术图，忽略表格和公式。"
+        "请描述图像语义、可见标注、图题/图注和图类型。必须严格返回 JSON，不要输出解释："
+        "{\"figures\":[{\"caption\":\"\",\"capture\":\"\",\"name\":\"\",\"figureName\":\"\","
+        "\"type\":\"schematic|chart|diagram|figure|unknown\",\"description\":\"\",\"semanticDesc\":\"\","
+        "\"labels\":[],\"context\":\"\"}],\"tables\":[],\"formulas\":[]}。\n"
+        "字段要求：caption/capture/name/figureName 都表示图名/图题；有可见图题/图注时必须抄录原文并填入这些字段。"
+        "description/semanticDesc 都表示图的语义描述。"
+        "语种要求：图名必须抄录图片中可见图题/图注的原文；description/semanticDesc 和 context "
+        "必须优先使用图题/图注的语种，其次使用正文/图片中文字的主要语种；中文页面请用中文描述，不要翻译成英文。"
+        "未见图题时图名字段都留空，不要编造图名。\n"
+        f"可用的文本层上下文：\n{_trim_context(page_text)}"
     )
 
 
@@ -1430,9 +1453,15 @@ def _prompt_figure_page(page_text: str) -> str:
         "识别这张单页图片中的含插图页面内容，只关注正文、图题、图注、插图位置和插图语义描述。"
         "忽略表格和公式的结构化抽取。请按页面自然阅读顺序输出严格 JSON："
         "{\"markdown\":\"整页Markdown，保留正文顺序，并在插图位置写图题和图描述\","
-        "\"figures\":[{\"caption\":\"\",\"type\":\"schematic|chart|diagram|figure|unknown\","
-        "\"description\":\"\",\"labels\":[],\"context\":\"\"}],\"tables\":[],\"formulas\":[]}。"
+        "\"figures\":[{\"caption\":\"\",\"capture\":\"\",\"name\":\"\",\"figureName\":\"\","
+        "\"type\":\"schematic|chart|diagram|figure|unknown\",\"description\":\"\",\"semanticDesc\":\"\","
+        "\"labels\":[],\"context\":\"\"}],\"tables\":[],\"formulas\":[]}。"
         "Markdown 中的每个插图应包含图题和简洁但具体的图像描述。"
+        "字段要求：caption/capture/name/figureName 都表示图名/图题；有可见图题/图注时必须抄录原文并填入这些字段。"
+        "description/semanticDesc 都表示图的语义描述。"
+        "语种要求：图名必须抄录图片中可见图题/图注的原文；Markdown、description/semanticDesc 和 context "
+        "必须优先使用图题/图注的语种，其次使用正文/图片中文字的主要语种；中文页面请用中文描述，不要翻译成英文。"
+        "未见图题时图名字段都留空，不要编造图名。"
         f"可用的文本层上下文：\n{_trim_context(page_text)}"
     )
 
@@ -1462,10 +1491,16 @@ def _prompt_layout_figures(blocks: List[Dict[str, Any]], page_text: str) -> str:
         "不要重新抽取表格、公式或正文。你会看到整页图片，请根据每个 block 的 bbox 定位图像区域并生成语义描述。\n"
         "必须严格按 JSON 返回："
         "{\"figures\":[{\"block_index\":1,\"bbox\":[0,0,1,1],\"caption\":\"\","
-        "\"type\":\"schematic|chart|diagram|figure|unknown\",\"description\":\"\","
+        "\"capture\":\"\",\"name\":\"\",\"figureName\":\"\",\"type\":\"schematic|chart|diagram|figure|unknown\","
+        "\"description\":\"\",\"semanticDesc\":\"\","
         "\"labels\":[],\"context\":\"\"}],\"tables\":[],\"formulas\":[]}。\n"
         "要求：每个输入 image block 最多返回一个对应 figure；block_index 和 bbox 必须原样保留；"
-        "description 要说明图中表达的对象、结构关系、关键标注和可读文字。\n"
+        "description 要说明图中表达的对象、结构关系、关键标注和可读文字。"
+        "字段要求：caption/capture/name/figureName 都表示图名/图题；有可见图题/图注时必须抄录原文并填入这些字段。"
+        "description/semanticDesc 都表示图的语义描述。"
+        "语种要求：图名必须抄录图片中可见图题/图注的原文；description/semanticDesc 和 context "
+        "必须优先使用图题/图注的语种，其次使用正文/图片中文字的主要语种；中文页面请用中文描述，不要翻译成英文。"
+        "未见图题时图名字段都留空，不要编造图名。\n"
         f"image blocks:\n{json.dumps(image_blocks, ensure_ascii=False)}\n"
         f"nearby text/layout context:\n{json.dumps(context_blocks, ensure_ascii=False)}\n"
         f"text-layer context:\n{_trim_context(page_text)}"
@@ -2444,6 +2479,10 @@ def _variables_context(page_text: str) -> str:
         if "式中" in line:
             return " ".join(lines[idx : idx + 5])[:300]
     return ""
+
+
+def _contains_cjk(text: str) -> bool:
+    return bool(re.search(r"[\u3400-\u9fff]", str(text or "")))
 
 
 def _figure_caption(text: str) -> str:

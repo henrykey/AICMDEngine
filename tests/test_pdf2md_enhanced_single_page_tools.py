@@ -131,8 +131,12 @@ class FakeVLMClient:
                             "block_index": 3,
                             "bbox": [10, 10, 40, 40],
                             "caption": "图 1",
+                            "capture": "图 1",
+                            "name": "图 1",
+                            "figureName": "图 1",
                             "type": "diagram",
-                            "description": "A positioned technical diagram with D and R labels.",
+                            "description": "带有 D 和 R 标注的定位技术示意图。",
+                            "semanticDesc": "带有 D 和 R 标注的定位技术示意图。",
                             "labels": ["D", "R"],
                             "context": "正文",
                         }
@@ -144,12 +148,16 @@ class FakeVLMClient:
         if "含插图页面" in prompt:
             return json.dumps(
                 {
-                    "markdown": "正文段落。\n\n## 图 1\n\nA technical diagram with D and R labels.",
+                    "markdown": "正文段落。\n\n## 图 1\n\n带有 D 和 R 标注的技术示意图。",
                     "figures": [
                         {
                             "caption": "图 1",
+                            "capture": "图 1",
+                            "name": "图 1",
+                            "figureName": "图 1",
                             "type": "diagram",
-                            "description": "A technical diagram with D and R labels.",
+                            "description": "带有 D 和 R 标注的技术示意图。",
+                            "semanticDesc": "带有 D 和 R 标注的技术示意图。",
                             "labels": ["D", "R"],
                             "context": "正文段落。",
                         }
@@ -158,14 +166,18 @@ class FakeVLMClient:
                     "formulas": [{"latex": "ignored"}],
                 }
             )
-        if "Extract figures" in prompt:
+        if "插图、示意图、结构图" in prompt:
             return json.dumps(
                 {
                     "figures": [
                         {
                             "caption": "图 1",
+                            "capture": "图 1",
+                            "name": "图 1",
+                            "figureName": "图 1",
                             "type": "diagram",
-                            "description": "A technical diagram with D and R labels.",
+                            "description": "带有 D 和 R 标注的技术示意图。",
+                            "semanticDesc": "带有 D 和 R 标注的技术示意图。",
                             "labels": ["D", "R"],
                         }
                     ],
@@ -1090,9 +1102,15 @@ def test_extract_page_figures_requires_vlm_and_ignores_other_items(monkeypatch):
     assert result["markdown"].startswith("正文段落。")
     assert len(result["items"]) == 1
     assert result["items"][0]["caption"] == "图 1"
+    assert result["items"][0]["capture"] == "图 1"
+    assert result["items"][0]["name"] == "图 1"
+    assert result["items"][0]["figureName"] == "图 1"
+    assert result["items"][0]["description"] == "带有 D 和 R 标注的技术示意图。"
+    assert result["items"][0]["semanticDesc"] == "带有 D 和 R 标注的技术示意图。"
     assert result["items"][0]["source"] == "vlm_ocr"
     assert result["model_calls"] == {"glm_ocr": 0, "vlm_ocr": 1}
     assert "含插图页面" in FakeVLMClient.prompts[0]
+    assert "中文页面请用中文描述" in FakeVLMClient.prompts[0]
 
 
 def test_analyze_page_layout_returns_blocks_and_recommendation(monkeypatch):
@@ -1156,9 +1174,14 @@ def test_extract_page_layout_enhanced_returns_markdown_blocks_and_derived_items(
     assert result["tables"][0]["bbox"] == [0, 25, 100, 70]
     assert result["figures"][0]["bbox"] == [10, 10, 40, 40]
     assert result["figures"][0]["source"] == "glm_ocr_layout+vlm_ocr"
-    assert result["figures"][0]["description"] == "A positioned technical diagram with D and R labels."
+    assert result["figures"][0]["capture"] == "图 1"
+    assert result["figures"][0]["name"] == "图 1"
+    assert result["figures"][0]["figureName"] == "图 1"
+    assert result["figures"][0]["description"] == "带有 D 和 R 标注的定位技术示意图。"
+    assert result["figures"][0]["semanticDesc"] == "带有 D 和 R 标注的定位技术示意图。"
     assert result["model_calls"] == {"glm_ocr": 1, "vlm_ocr": 1}
     assert "image blocks" in FakeVLMClient.prompts[0]
+    assert "中文页面请用中文描述" in FakeVLMClient.prompts[0]
 
 
 def test_extract_page_tables_pdf_uses_native_table_without_model(monkeypatch, tmp_path):
@@ -1206,7 +1229,50 @@ def test_extract_page_structured_returns_separate_arrays(monkeypatch):
     assert len(result["tables"]) == 1
     assert len(result["formulas"]) == 1
     assert len(result["figures"]) == 1
+    assert result["figures"][0]["capture"] == "图 1"
+    assert result["figures"][0]["name"] == "图 1"
+    assert result["figures"][0]["figureName"] == "图 1"
+    assert result["figures"][0]["description"] == "带有 D 和 R 标注的技术示意图。"
+    assert result["figures"][0]["semanticDesc"] == "带有 D 和 R 标注的技术示意图。"
     assert result["semantic_status"]["complete"] is True
+
+
+def test_extract_page_figures_accepts_capture_alias_from_vlm(monkeypatch):
+    _patch_clients(monkeypatch)
+    FakeVLMClient.result_text = json.dumps(
+        {
+            "markdown": "",
+            "figures": [
+                {
+                    "capture": "图 2 管口结构",
+                    "name": "图 2 管口结构",
+                    "type": "diagram",
+                    "description": "显示管口、壳体和补强圈的连接关系。",
+                    "labels": ["A", "B"],
+                }
+            ],
+            "tables": [],
+            "formulas": [],
+        }
+    )
+
+    result = json.loads(
+        single_page_tools.extract_page_figures_direct(
+            file_data=PNG_DATA,
+            input_type="image",
+            vlm_config={"model": "vlm", "api_key": "x", "base_url": "http://x"},
+        )
+    )
+
+    assert result["items"][0]["caption"] == "图 2 管口结构"
+    assert result["items"][0]["capture"] == "图 2 管口结构"
+    assert result["items"][0]["name"] == "图 2 管口结构"
+    assert result["items"][0]["figureName"] == "图 2 管口结构"
+    assert result["items"][0]["description"] == "显示管口、壳体和补强圈的连接关系。"
+    assert result["items"][0]["semanticDesc"] == "显示管口、壳体和补强圈的连接关系。"
+    assert "## 图 2 管口结构" in result["markdown"]
+    assert "类型:" in result["markdown"]
+    assert "标注: A, B" in result["markdown"]
 
 
 def test_revise_page_markdown_file_data_custom_prompt_calls_vlm_and_returns_page_text(monkeypatch):
