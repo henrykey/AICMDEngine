@@ -20,6 +20,13 @@
 - TypeScript/React: follow ESLint (`ui/eslint.config.js`); components use `PascalCase` (e.g., `CommandSets.tsx`).
 - Prefer descriptive names tied to domain concepts (e.g., `command_sets`, `tasks`).
 
+## Code Modification Rules
+- Do not modify code unless the user gives an explicit code-modification instruction.
+- Requests to inspect, investigate, explain, compare specs, or identify causes are read-only by default.
+- Do not infer permission to edit from a reported bug or inconsistency; report findings first unless the user explicitly asks to change code.
+- Documentation changes also require an explicit instruction to modify documentation or the relevant file.
+- Do not build, start, or restart containers; if that is needed, tell the user what to run.
+
 ## Testing Guidelines
 - No dedicated test framework is configured in this repo.
 - Use `node test_llm.js` for quick LLM connectivity checks when needed.

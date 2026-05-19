@@ -63,6 +63,27 @@ def test_glm_ocr_layout_file_payload_uses_data_uri():
     assert client._data_uri_for_file("/tmp/page.pdf", "abc") == "data:application/pdf;base64,abc"
 
 
+def test_glm_ocr_layout_table_title_is_preserved():
+    client = OpenAICompatibleOcrClient({})
+
+    result = client._normalize_layout_parsing_response(
+        {
+            "md_results": "",
+            "layout_details": [
+                [
+                    {
+                        "label": "table",
+                        "table_title": "表 2 材料参数",
+                        "content": "| A | B |\n| --- | --- |\n| 1 | 2 |",
+                    }
+                ]
+            ],
+        }
+    )
+
+    assert result.tables[0].title == "表 2 材料参数"
+
+
 class FakeGLMOcrClient:
     result = None
     error = None
@@ -500,6 +521,7 @@ def test_extract_page_tables_accepts_model_normalized_json_schema(monkeypatch):
     )
 
     item = result["items"][0]
+    assert item["title"] == "表 1"
     assert item["orientation"] == 90
     assert item["columns"] == ["牌号", "状态", "规格"]
     assert item["normalized_rows"] == [["20", "正火", "≤M22"], ["20", "正火", "M24~M48"]]

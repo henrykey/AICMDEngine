@@ -202,6 +202,71 @@ class TestExternalMCPServer:
             assert result.is_error
             assert "token quota exhausted" in result.content
 
+    def test_build_tool_result_logs_model_engine_summary(self, caplog):
+        """测试外部工具JSON结果会记录实际模型/引擎摘要"""
+        mcp = ExternalMCPServer(
+            name="test",
+            command="echo"
+        )
+        result_payload = {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "tool": "extract_page_tables",
+                            "model_calls": {"glm_ocr": 0, "vlm_ocr": 1},
+                            "items": [{"source": "vlm_ocr"}],
+                        }
+                    ),
+                }
+            ],
+            "isError": False,
+        }
+
+        with caplog.at_level("INFO", logger="src.mcp.external_mcp"):
+            result = mcp._build_tool_result_from_response_result("extract_page_tables", result_payload)
+
+        assert not result.is_error
+        assert "Tool 'extract_page_tables' engine summary" in caplog.text
+        assert "engine=vlm_ocr" in caplog.text
+        assert "model_calls={'glm_ocr': 0, 'vlm_ocr': 1}" in caplog.text
+
+    def test_build_tool_result_logs_revise_vlm_summary(self, caplog):
+        """测试revise_page_markdown返回的vlm调试信息会进入日志"""
+        mcp = ExternalMCPServer(
+            name="test",
+            command="echo"
+        )
+        result_payload = {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "pageText": "修订后正文",
+                            "vlm": {
+                                "enabled": True,
+                                "provider": "multmode",
+                                "model": "qwen-vl",
+                                "base_url": "http://llm",
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                }
+            ],
+            "isError": False,
+        }
+
+        with caplog.at_level("INFO", logger="src.mcp.external_mcp"):
+            result = mcp._build_tool_result_from_response_result("revise_page_markdown", result_payload)
+
+        assert not result.is_error
+        assert "Tool 'revise_page_markdown' engine summary" in caplog.text
+        assert "engine=vlm_ocr" in caplog.text
+        assert "'provider': 'multmode'" in caplog.text
+
     @pytest.mark.asyncio
     async def test_execute_external_tool_error(self):
         """测试外部工具返回错误"""

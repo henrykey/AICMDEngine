@@ -736,7 +736,12 @@ def _table_item(
     if raw_item and isinstance(raw_item.raw, dict):
         normalized = _merge_model_normalized_table(normalized, raw_item.raw)
     table_md = normalized["markdown"]
-    title = (raw_item.title if raw_item else "") or _find_table_title(page_text) or _table_title_from_markdown(table_md)
+    title = (
+        (raw_item.title if raw_item else "")
+        or _table_title_from_raw(raw_item.raw if raw_item else None)
+        or _find_table_title(page_text)
+        or _table_title_from_markdown(table_md)
+    )
     desc = (raw_item.description if raw_item else "") if describe else ""
     if describe and not desc:
         desc = _describe_table(title, table_md, page_text)
@@ -2350,6 +2355,16 @@ def _find_table_title(page_text: str) -> str:
         t = line.strip()
         if re.match(r"^(表|Table)\s*", t, flags=re.IGNORECASE):
             return t[:120]
+    return ""
+
+
+def _table_title_from_raw(raw: Any) -> str:
+    if not isinstance(raw, dict):
+        return ""
+    for key in ["table_title", "tableName", "table_name", "表名", "caption", "title", "name"]:
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:120]
     return ""
 
 

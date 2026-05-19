@@ -75,8 +75,11 @@ def _normalize_items(value: Any, kind: str, source: str) -> List[OcrElement]:
         if isinstance(item, dict):
             markdown = _pick_str(item, "markdown", "table_markdown", "data")
             latex = _pick_str(item, "latex", "formula", "text")
-            desc = _pick_str(item, "description", "semantic_summary", "summary")
-            title = _pick_str(item, "title", "id", "name")
+            desc = _pick_str(item, "description", "semanticDesc", "semantic_summary", "summary", "说明", "描述")
+            if kind == "table":
+                title = _pick_str(item, "table_title", "tableName", "table_name", "表名", "title", "id", "name")
+            else:
+                title = _pick_str(item, "title", "id", "name")
             caption = _pick_str(item, "caption", "capture", "figure_name", "figureName", "name", "title", "label")
             context = _pick_str(item, "context", "surrounding_text")
             text = _pick_str(item, "text", "content")

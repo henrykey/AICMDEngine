@@ -182,6 +182,16 @@ class OpenAICompatibleOcrClient:
                 element = OcrElement(kind=label, source=self.source, text=content, raw=item)
                 if label == "table":
                     element.markdown = content
+                    element.title = self._pick_layout_str(
+                        item,
+                        "table_title",
+                        "tableName",
+                        "table_name",
+                        "caption",
+                        "name",
+                        "title",
+                        "表名",
+                    )
                     result.tables.append(element)
                 elif label == "formula":
                     element.latex = content
@@ -191,6 +201,13 @@ class OpenAICompatibleOcrClient:
                     element.caption = "Image"
                     result.figures.append(element)
         return result
+
+    def _pick_layout_str(self, data: Dict[str, Any], *names: str) -> str:
+        for name in names:
+            value = data.get(name)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
 
     def _call_image_prompt(self, image_path: str, prompt: str) -> str:
         with open(image_path, "rb") as f:

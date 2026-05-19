@@ -936,9 +936,91 @@ class ExternalMCPServer(BaseMCPServer):
                     tool_name,
                     len(combined_text),
                 )
+                self._log_tool_engine_summary(tool_name, combined_text)
                 return ToolResult.success(combined_text)
 
         return ToolResult.success(str(result))
+
+    def _log_tool_engine_summary(self, tool_name: str, text: str) -> None:
+        summary = self._extract_tool_engine_summary(text)
+        if not summary:
+            return
+
+        logger.info(
+            "Tool '%s' engine summary: engine=%s model_calls=%s item_sources=%s vlm=%s",
+            tool_name,
+            summary.get("engine"),
+            summary.get("model_calls"),
+            summary.get("item_sources"),
+            summary.get("vlm"),
+        )
+
+    def _extract_tool_engine_summary(self, text: str) -> Optional[Dict[str, Any]]:
+        raw = (text or "").strip()
+        if not raw:
+            return None
+
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+
+        model_calls = payload.get("model_calls") if isinstance(payload.get("model_calls"), dict) else {}
+        sources = self._extract_result_sources(payload)
+        engines = set(sources)
+
+        for key, value in model_calls.items():
+            try:
+                if int(value or 0) > 0:
+                    engines.add(str(key))
+            except Exception:
+                continue
+
+        vlm_info = payload.get("vlm") if isinstance(payload.get("vlm"), dict) else {}
+        if vlm_info and bool(vlm_info.get("enabled")):
+            engines.add("vlm_ocr")
+
+        if not engines and not model_calls and not vlm_info:
+            return None
+
+        engine_order = ["pymupdf", "glm_ocr", "vlm_ocr", "glm_ocr_layout", "glm_ocr_layout+vlm_ocr"]
+        ordered = [engine for engine in engine_order if engine in engines]
+        ordered.extend(sorted(engine for engine in engines if engine not in ordered))
+        return {
+            "engine": "+".join(ordered) if ordered else "unknown",
+            "model_calls": model_calls,
+            "item_sources": sorted(sources),
+            "vlm": {
+                key: vlm_info.get(key)
+                for key in ["enabled", "provider", "model", "base_url", "max_tokens", "timeout_sec"]
+                if key in vlm_info
+            },
+        }
+
+    def _extract_result_sources(self, payload: Dict[str, Any]) -> set:
+        sources = set()
+        for key in ["items", "tables", "formulas", "figures"]:
+            value = payload.get(key)
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        source = item.get("source")
+                        if isinstance(source, str) and source.strip():
+                            sources.add(source.strip())
+
+        elements = payload.get("elements") if isinstance(payload.get("elements"), dict) else {}
+        for key in ["tables", "formulas", "figures"]:
+            value = elements.get(key)
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        source = item.get("source")
+                        if isinstance(source, str) and source.strip():
+                            sources.add(source.strip())
+        return sources
 
     def _extract_embedded_tool_error(self, text: str) -> Optional[str]:
         raw = (text or "").strip()
