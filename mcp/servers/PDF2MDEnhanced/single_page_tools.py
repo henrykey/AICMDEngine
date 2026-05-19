@@ -28,7 +28,8 @@ DEFAULT_REVISE_PAGE_MARKDOWN_PROMPT = """请根据这张单页渲染图片，重
 1. 以页面图片为准修正乱码、错字、漏字、错误换行和明显 OCR 错误。
 2. 保留表格、公式、图示的可读结构；无法可靠结构化时保留占位说明，不要编造数据。
 3. 保留 Markdown、LaTeX、placeholder 这类人读校对格式。
-4. 只输出修订后的页面 Markdown，不要输出解释、代码围栏或额外标题。"""
+4. 删除页眉、页脚、页码、标准号页眉等重复版面元素；不要保留，也不要用注释输出。
+5. 只输出修订后的页面 Markdown，不要输出解释、代码围栏或额外标题。"""
 
 
 @dataclass
@@ -515,6 +516,7 @@ def _extract_tables(
                 if recovered:
                     items = [_table_item("glm_ocr", recovered, ctx.page_text, describe, table_rows_format=table_rows_format, source_text=source_text)]
             if items:
+                _enrich_table_metadata_with_vlm(ctx, vlm, items, describe, model_calls, warnings)
                 return items
             warnings.append("glm_ocr_returned_no_tables")
         except Exception as exc:
@@ -540,6 +542,57 @@ def _extract_tables(
     else:
         warnings.append("vlm_ocr_unavailable")
     return []
+
+
+def _enrich_table_metadata_with_vlm(
+    ctx: SinglePageContext,
+    vlm: DynamicVLMClient,
+    items: List[Dict[str, Any]],
+    describe: bool,
+    model_calls: Dict[str, int],
+    warnings: List[str],
+) -> None:
+    if not items or not describe:
+        return
+    _fill_local_table_descriptions(items)
+    if not _tables_need_vlm_metadata(items):
+        return
+    if not vlm.enabled:
+        warnings.append("vlm_ocr_unavailable_for_table_metadata")
+        return
+    try:
+        model_calls["vlm_ocr"] += 1
+        raw = vlm._call_image_prompt(
+            ctx.image_path,
+            _prompt_table_metadata(items, ctx.page_text),
+            max_tokens=min(vlm.max_tokens, 2048),
+        )
+        metadata = _parse_table_metadata_response(raw)
+        if metadata:
+            _merge_table_metadata(items, metadata)
+        else:
+            warnings.append("vlm_ocr_returned_no_table_metadata")
+    except Exception as exc:
+        warnings.append(f"vlm_ocr_table_metadata_failed: {exc}")
+
+
+def _fill_local_table_descriptions(items: List[Dict[str, Any]]) -> None:
+    for item in items:
+        title = _cell_to_text(item.get("title"))
+        if not title or not _is_reliable_table_title(title, item):
+            continue
+        columns = item.get("columns") if isinstance(item.get("columns"), list) else []
+        headers = [_cell_to_text(col) for col in columns if _cell_to_text(col)]
+        if headers:
+            desc = f"{title}。字段包括：{', '.join(headers[:8])}。"
+        else:
+            desc = title
+        item["description"] = desc
+        item["semanticDesc"] = desc
+
+
+def _tables_need_vlm_metadata(items: List[Dict[str, Any]]) -> bool:
+    return any(not _is_reliable_table_title(_cell_to_text(item.get("title")), item) for item in items)
 
 
 def _extract_formulas(
@@ -1415,6 +1468,32 @@ def _prompt_tables(page_text: str, describe: bool) -> str:
     )
 
 
+def _prompt_table_metadata(items: List[Dict[str, Any]], page_text: str) -> str:
+    summaries = []
+    for idx, item in enumerate(items):
+        columns = item.get("columns") if isinstance(item.get("columns"), list) else []
+        rows = item.get("normalized_rows") if isinstance(item.get("normalized_rows"), list) else []
+        summaries.append(
+            {
+                "index": idx,
+                "existing_title": str(item.get("title") or "")[:120],
+                "columns": [str(col) for col in columns[:12]],
+                "sample_rows": rows[:3],
+                "markdown_preview": str(item.get("markdown") or "")[:600],
+                "context": str(item.get("context") or "")[:240],
+            }
+        )
+    return (
+        "请根据这张页面图片，为已抽取的表格补全表名和语义描述，只输出严格 JSON。\n"
+        "不要重新抽取或改写表格数据；不要输出 Markdown、代码围栏或解释。\n"
+        "表名必须来自图片中可见的表题/表注原文，例如“表 7-35 ...”；看不到可靠表名时返回空字符串。\n"
+        "semanticDesc 用图片/表题同语种简要说明该表含义，不要编造数据。\n"
+        "返回 schema：{\"tables\":[{\"index\":0,\"title\":\"\",\"semanticDesc\":\"\"}]}。\n"
+        f"已抽取表格摘要：\n{json.dumps(summaries, ensure_ascii=False)}\n"
+        f"可用页面文本上下文（可能含 OCR 噪声，仅供定位，不要当正文）：\n{_trim_context(page_text)}"
+    )
+
+
 def _prompt_formulas(page_text: str, describe: bool) -> str:
     return (
         "Extract formulas only from this single page image. Ignore tables and figures. "
@@ -1716,6 +1795,84 @@ def _model_orientation_warnings(raw: Dict[str, Any], warnings: List[str]) -> Lis
     if raw.get("orientation") in {0, 90, 180, 270, "0", "90", "180", "270"}:
         return [warning for warning in warnings if warning != "orientation_defaulted_to_0"]
     return warnings
+
+
+def _parse_table_metadata_response(text: str) -> List[Dict[str, Any]]:
+    payload = _extract_json_payload(text)
+    if not isinstance(payload, dict):
+        return []
+    value = payload.get("tables") or payload.get("items") or payload.get("table_metadata")
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _extract_json_payload(text: str) -> Any:
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    raw = re.sub(r"(?m)^\s*```(?:json)?\s*$", "", raw)
+    raw = re.sub(r"(?m)^\s*```\s*$", "", raw).strip()
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+    match = re.search(r"\{[\s\S]*\}", raw)
+    if not match:
+        return None
+    try:
+        return json.loads(match.group(0))
+    except Exception:
+        return None
+
+
+def _merge_table_metadata(items: List[Dict[str, Any]], metadata: List[Dict[str, Any]]) -> None:
+    for entry in metadata:
+        idx = _metadata_index(entry)
+        if idx is None or idx < 0 or idx >= len(items):
+            continue
+        item = items[idx]
+        title = _cell_to_text(
+            entry.get("title")
+            or entry.get("table_title")
+            or entry.get("tableName")
+            or entry.get("table_name")
+            or entry.get("表名")
+        )
+        desc = _cell_to_text(entry.get("semanticDesc") or entry.get("description") or entry.get("summary"))
+        if title and _should_replace_table_title(item):
+            item["title"] = title[:120]
+        if desc:
+            item["description"] = desc
+            item["semanticDesc"] = desc
+
+
+def _metadata_index(entry: Dict[str, Any]) -> Optional[int]:
+    value = entry.get("index")
+    if value is None:
+        value = entry.get("table_index")
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _should_replace_table_title(item: Dict[str, Any]) -> bool:
+    existing = _cell_to_text(item.get("title"))
+    if not existing:
+        return True
+    inferred = _table_title_from_markdown(str(item.get("markdown") or ""))
+    return bool(inferred and existing == inferred)
+
+
+def _is_reliable_table_title(title: str, item: Dict[str, Any]) -> bool:
+    value = _cell_to_text(title)
+    if not value:
+        return False
+    inferred = _table_title_from_markdown(str(item.get("markdown") or ""))
+    if inferred and value == inferred:
+        return False
+    return bool(re.match(r"^(表|Table)\s*[\dA-Za-z一二三四五六七八九十附录.-]*", value, flags=re.IGNORECASE))
 
 
 def _cell_to_text(value: Any) -> str:

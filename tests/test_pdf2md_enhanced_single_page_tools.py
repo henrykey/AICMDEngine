@@ -144,6 +144,16 @@ class FakeVLMClient:
         self.__class__.prompts.append(prompt)
         if self.__class__.result_text is not None:
             return self.__class__.result_text
+        if "补全表名和语义描述" in prompt:
+            return json.dumps(
+                {
+                    "tables": [
+                        {"index": 0, "title": "表 1 参数", "semanticDesc": "表 1 参数，包含 A 和 B 两列。"},
+                        {"index": 1, "title": "表 2 指标", "semanticDesc": "表 2 指标，包含 C 和 D 两列。"},
+                    ]
+                },
+                ensure_ascii=False,
+            )
         if "image blocks" in prompt:
             return json.dumps(
                 {
@@ -284,7 +294,7 @@ def test_extract_page_tables_only_uses_table_items(monkeypatch):
     assert result["tableRowsFormat"] == "structured_json"
     assert isinstance(result["tableRowsContent"], str)
     assert json.loads(result["tableRowsContent"])["normalized_rows"] == result["normalized_rows"]
-    assert result["model_calls"] == {"glm_ocr": 1, "vlm_ocr": 0}
+    assert result["model_calls"] == {"glm_ocr": 1, "vlm_ocr": 1}
     assert "目标是可查询的标准矩阵" in FakeGLMOcrClient.prompts[0]
 
 
@@ -348,7 +358,7 @@ def test_extract_page_tables_recovers_html_table_from_glm_markdown(monkeypatch):
     assert "<table" not in result["items"][0]["tableRowsContent"].lower()
     assert json.loads(result["items"][0]["tableRowsContent"])["normalized_rows"] == [["2.50", "", "", "", "0.946"]]
     assert result["items"][0]["sourceHtml"].startswith("<table>")
-    assert result["model_calls"] == {"glm_ocr": 1, "vlm_ocr": 0}
+    assert result["model_calls"] == {"glm_ocr": 1, "vlm_ocr": 1}
 
 
 def test_extract_page_tables_recovers_html_table_from_raw_text(monkeypatch):
@@ -527,6 +537,67 @@ def test_extract_page_tables_accepts_model_normalized_json_schema(monkeypatch):
     assert item["normalized_rows"] == [["20", "正火", "≤M22"], ["20", "正火", "M24~M48"]]
     assert item["source_cells"][0]["rowspan"] == 2
     assert json.loads(item["tableRowsContent"])["normalized_rows"] == item["normalized_rows"]
+
+
+def test_extract_page_tables_enriches_glm_rows_with_vlm_metadata(monkeypatch):
+    _patch_clients(monkeypatch)
+    FakeGLMOcrClient.result = OcrResult(
+        tables=[
+            OcrElement(kind="table", source="glm_ocr", markdown="| A | B |\n| --- | --- |\n| 1 | 2 |"),
+            OcrElement(kind="table", source="glm_ocr", markdown="| C | D |\n| --- | --- |\n| 3 | 4 |"),
+        ]
+    )
+
+    result = json.loads(
+        single_page_tools.extract_page_tables_direct(
+            file_data=PNG_DATA,
+            input_type="image",
+            table_rows_format="structured_json",
+            ocr_config={"glm_ocr": {"enabled": True, "model": "glm", "api_key": "x", "base_url": "http://x"}},
+            vlm_config={"model": "vlm", "api_key": "x", "base_url": "http://x"},
+        )
+    )
+
+    assert result["model_calls"] == {"glm_ocr": 1, "vlm_ocr": 1}
+    assert result["items"][0]["title"] == "表 1 参数"
+    assert result["items"][0]["semanticDesc"] == "表 1 参数，包含 A 和 B 两列。"
+    assert result["items"][0]["columns"] == ["A", "B"]
+    assert result["items"][0]["normalized_rows"] == [["1", "2"]]
+    assert result["items"][1]["title"] == "表 2 指标"
+    assert result["items"][1]["semanticDesc"] == "表 2 指标，包含 C 和 D 两列。"
+    assert result["items"][1]["columns"] == ["C", "D"]
+    assert result["items"][1]["normalized_rows"] == [["3", "4"]]
+    assert any("补全表名和语义描述" in prompt for prompt in FakeVLMClient.prompts)
+
+
+def test_extract_page_tables_skips_vlm_metadata_when_glm_title_is_reliable(monkeypatch):
+    _patch_clients(monkeypatch)
+    FakeGLMOcrClient.result = OcrResult(
+        tables=[
+            OcrElement(
+                kind="table",
+                source="glm_ocr",
+                title="表 7-35 铜换热管的折流板和支撑板管孔直径及允许偏差",
+                markdown="| 换热管外径 | 10 | 12 |\n| --- | --- | --- |\n| 管孔直径 | 10,30 | 12,30 |",
+            )
+        ]
+    )
+
+    result = json.loads(
+        single_page_tools.extract_page_tables_direct(
+            file_data=PNG_DATA,
+            input_type="image",
+            table_rows_format="structured_json",
+            ocr_config={"glm_ocr": {"enabled": True, "model": "glm", "api_key": "x", "base_url": "http://x"}},
+            vlm_config={"model": "vlm", "api_key": "x", "base_url": "http://x"},
+        )
+    )
+
+    assert result["model_calls"] == {"glm_ocr": 1, "vlm_ocr": 0}
+    assert result["items"][0]["title"] == "表 7-35 铜换热管的折流板和支撑板管孔直径及允许偏差"
+    assert result["items"][0]["semanticDesc"].startswith("表 7-35 铜换热管")
+    assert "字段包括：换热管外径, 10, 12" in result["items"][0]["semanticDesc"]
+    assert not FakeVLMClient.prompts
 
 
 def test_extract_page_tables_model_rows_wider_than_columns_degraded(monkeypatch):
@@ -1333,6 +1404,7 @@ def test_revise_page_markdown_empty_prompt_uses_default_prompt(monkeypatch):
 
     assert result["pageText"] == "修订后的正文"
     assert "请根据这张单页渲染图片" in FakeVLMClient.prompts[0]
+    assert "删除页眉、页脚、页码" in FakeVLMClient.prompts[0]
     assert "只输出修订后的页面 Markdown" in FakeVLMClient.prompts[0]
 
 
