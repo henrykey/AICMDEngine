@@ -15,6 +15,7 @@ PLAN2_HOST_PORT_DEFAULT="5122"
 OFFICE_WORD_PROXY_PORT_DEFAULT="9002"
 PDF2MD_ENHANCED_HOST_PORT_DEFAULT="9010"
 PAGEINDEX_HOST_PORT_DEFAULT="9011"
+BASIN_COMPARATOR_MCP_HOST_PORT_DEFAULT="8139"
 MCP_TRANSPORT_DEFAULT="stdio"
 FASTMCP_LOG_LEVEL_DEFAULT="INFO"
 REMOTE_PIP_INDEX_URL_DEFAULT="https://pypi.tuna.tsinghua.edu.cn/simple"
@@ -48,6 +49,7 @@ readonly IMAGE_NAMES=(
   aiplanner-office-word:latest
   aiplanner-pdf2md-enhanced:latest
   aiplanner-pageindex:latest
+  aiplanner-basin-comparator-mcp:latest
 )
 readonly DEFAULT_DEPLOY_SERVICES=(
   mcp-router
@@ -55,6 +57,7 @@ readonly DEFAULT_DEPLOY_SERVICES=(
   office-word
   pdf2md-enhanced
   pageindex
+  basin-comparator-mcp
 )
 
 SELECTED_SERVICES=()
@@ -93,7 +96,7 @@ Notes:
   - `upload` syncs deploy/out to ${APP_HOST}:${REMOTE_DIR}.
   - `deploy` executes the remote install/start sequence on ${APP_HOST}.
   - `--mirror cn` enables China-friendly pip/npm/apt/apk mirrors and mirrored base images.
-  - `--service` supports `all`, `mcp`, `mcp-router`, `plan2`, `office-word`, `pdf2md-enhanced`, `pageindex`.
+  - `--service` supports `all`, `mcp`, `mcp-router`, `plan2`, `office-word`, `pdf2md-enhanced`, `pageindex`, `basin-comparator-mcp`.
 EOF
 }
 
@@ -190,6 +193,7 @@ resolve_services() {
         append_unique "office-word"
         append_unique "pdf2md-enhanced"
         append_unique "pageindex"
+        append_unique "basin-comparator-mcp"
         ;;
       router|mcp-router)
         append_unique "mcp-router"
@@ -206,8 +210,11 @@ resolve_services() {
       pageindex)
         append_unique "pageindex"
         ;;
+      basin|basin-mcp|basin-comparator|basin-comparator-mcp)
+        append_unique "basin-comparator-mcp"
+        ;;
       *)
-        fail "Unsupported service: ${token} (expected: all|mcp|mcp-router|plan2|office-word|pdf2md-enhanced|pageindex)"
+        fail "Unsupported service: ${token} (expected: all|mcp|mcp-router|plan2|office-word|pdf2md-enhanced|pageindex|basin-comparator-mcp)"
         ;;
     esac
   done
@@ -241,6 +248,9 @@ selected_images_for_services() {
   fi
   if service_enabled "pageindex"; then
     SELECTED_IMAGES+=("aiplanner-pageindex:latest")
+  fi
+  if service_enabled "basin-comparator-mcp"; then
+    SELECTED_IMAGES+=("aiplanner-basin-comparator-mcp:latest")
   fi
 }
 
@@ -713,6 +723,7 @@ Fixed design ports:
 - office-word: 9002
 - pdf2md-enhanced: 9010
 - pageindex: 9011
+- basin-comparator-mcp: 8139
 
 Membership role:
 - login/auth host
@@ -815,6 +826,15 @@ build_images() {
       -t aiplanner-pageindex:latest \
       "${ROOT_DIR}/mcp/servers/PageIndex"
   fi
+  if service_enabled "basin-comparator-mcp"; then
+    docker build --platform "${BUILD_PLATFORM}" \
+      --build-arg PYTHON_BASE_IMAGE="${CACHE_PYTHON_312_IMAGE}" \
+      --build-arg PIP_INDEX_URL="${LOCAL_PIP_INDEX_URL}" \
+      --build-arg APT_MIRROR="${APT_MIRROR}" \
+      -f "${ROOT_DIR}/../basin-comparator/backend/Dockerfile.mcp" \
+      -t aiplanner-basin-comparator-mcp:latest \
+      "${ROOT_DIR}/../basin-comparator/backend"
+  fi
 
   if [[ "${#SELECTED_IMAGES[@]}" -gt 0 ]]; then
     log "Exporting image archive ${IMAGE_ARCHIVE_NAME}"
@@ -886,7 +906,7 @@ command_exists() {
 REMOTE_DIR="${REMOTE_DIR:?REMOTE_DIR is required}"
 REMOTE_PIP_INDEX_URL="${REMOTE_PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 WITH_PROXY="${WITH_PROXY:-false}"
-SERVICES="${SERVICES:-mcp-router plan2 office-word pdf2md-enhanced pageindex}"
+SERVICES="${SERVICES:-mcp-router plan2 office-word pdf2md-enhanced pageindex basin-comparator-mcp}"
 cd "${REMOTE_DIR}"
 
 [[ -f ".env" ]] || fail ".env not found in ${REMOTE_DIR}"

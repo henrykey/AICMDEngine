@@ -37,6 +37,7 @@ PLAN2_IMAGE="aiplanner-plan2:latest"
 OFFICE_WORD_IMAGE="aiplanner-office-word:latest"
 PDF2MD_ENH_IMAGE="aiplanner-pdf2md-enhanced:latest"
 PAGEINDEX_IMAGE="aiplanner-pageindex:latest"
+BASIN_MCP_IMAGE="aiplanner-basin-comparator-mcp:latest"
 
 PLAN2_HOST_PORT_DEFAULT="5122"
 ROUTER_HOST_PORT_DEFAULT="8000"
@@ -76,7 +77,7 @@ Options:
   --remote-dir DIR
   --remote-src-base DIR
   --source-package PATH
-  --scope router|plan2|mcp|all|mcp-router|office-word|pdf2md-enhanced|pageindex
+  --scope router|plan2|mcp|all|mcp-router|office-word|pdf2md-enhanced|pageindex|basin-comparator-mcp
   --platform linux/amd64|linux/arm64
   --mirror cn|PREFIX
   --upload-method auto|scp|rsync  (default: auto)
@@ -122,10 +123,10 @@ resolve_env_file() {
 
 validate_scope() {
   case "$1" in
-    router|plan2|mcp|all|mcp-router|office-word|pdf2md-enhanced|pageindex)
+    router|plan2|mcp|all|mcp-router|office-word|pdf2md-enhanced|pageindex|basin|basin-mcp|basin-comparator|basin-comparator-mcp)
       ;;
     *)
-      fail "Invalid scope: $1 (expected: router|plan2|mcp|all|mcp-router|office-word|pdf2md-enhanced|pageindex)"
+      fail "Invalid scope: $1 (expected: router|plan2|mcp|all|mcp-router|office-word|pdf2md-enhanced|pageindex|basin-comparator-mcp)"
       ;;
   esac
 }
@@ -139,13 +140,16 @@ scope_to_services() {
       printf '%s\n' "plan2"
       ;;
     mcp)
-      printf '%s\n' "office-word" "pdf2md-enhanced" "pageindex"
+      printf '%s\n' "office-word" "pdf2md-enhanced" "pageindex" "basin-comparator-mcp"
       ;;
     all)
-      printf '%s\n' "mcp-router" "plan2" "office-word" "pdf2md-enhanced" "pageindex"
+      printf '%s\n' "mcp-router" "plan2" "office-word" "pdf2md-enhanced" "pageindex" "basin-comparator-mcp"
       ;;
     office-word|pdf2md-enhanced|pageindex)
       printf '%s\n' "$DEPLOY_SCOPE"
+      ;;
+    basin|basin-mcp|basin-comparator|basin-comparator-mcp)
+      printf '%s\n' "basin-comparator-mcp"
       ;;
   esac
 }
@@ -503,13 +507,27 @@ prepare_source_package() {
         AIPlanner/mcp/servers/PageIndex \
         AIPlanner/deploy/docker-compose.mcp.yml
       ;;
+    basin|basin-mcp|basin-comparator|basin-comparator-mcp)
+      log "Using slim source package profile for scope=basin-comparator-mcp"
+      COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar -czf "$SOURCE_PACKAGE" \
+        --exclude='basin-comparator/backend/.venv' \
+        --exclude='basin-comparator/backend/__pycache__' \
+        --exclude='basin-comparator/backend/**/*.pyc' \
+        -C "$PROJECT_ROOT" \
+        basin-comparator/backend \
+        AIPlanner/deploy/docker-compose.mcp.yml
+      ;;
     mcp)
       log "Using slim source package profile for scope=mcp"
       COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar -czf "$SOURCE_PACKAGE" \
+        --exclude='basin-comparator/backend/.venv' \
+        --exclude='basin-comparator/backend/__pycache__' \
+        --exclude='basin-comparator/backend/**/*.pyc' \
         -C "$PROJECT_ROOT" \
         AIPlanner/mcp/servers/office-word \
         AIPlanner/mcp/servers/PDF2MDEnhanced \
         AIPlanner/mcp/servers/PageIndex \
+        basin-comparator/backend \
         AIPlanner/deploy/docker-compose.mcp.yml
       ;;
     all)
@@ -532,6 +550,9 @@ prepare_source_package() {
         --exclude='AIPlanner/mcp/servers/PageIndex/pageindex/__pycache__' \
         --exclude='AIPlanner/mcp/servers/**/__pycache__' \
         --exclude='AIPlanner/mcp/servers/**/*.pyc' \
+        --exclude='basin-comparator/backend/.venv' \
+        --exclude='basin-comparator/backend/__pycache__' \
+        --exclude='basin-comparator/backend/**/*.pyc' \
         -C "$PROJECT_ROOT" \
         AIPlanner/Dockerfile.mcp-router \
         AIPlanner/requirements.txt \
@@ -541,6 +562,7 @@ prepare_source_package() {
         AIPlanner/mcp/servers/office-word \
         AIPlanner/mcp/servers/PDF2MDEnhanced \
         AIPlanner/mcp/servers/PageIndex \
+        basin-comparator/backend \
         AIPlanner/deploy/docker-compose.mcp.yml \
         AIPlanner/deploy/plan2.config.aliyun.json
       ;;
@@ -577,17 +599,22 @@ source_package_matches_scope() {
     pageindex)
       archive_has_entry "$archive" "AIPlanner/mcp/servers/PageIndex/Dockerfile"
       ;;
+    basin|basin-mcp|basin-comparator|basin-comparator-mcp)
+      archive_has_entry "$archive" "basin-comparator/backend/Dockerfile.mcp"
+      ;;
     mcp)
       archive_has_entry "$archive" "AIPlanner/mcp/servers/office-word/Dockerfile" &&
         archive_has_entry "$archive" "AIPlanner/mcp/servers/PDF2MDEnhanced/Dockerfile" &&
-        archive_has_entry "$archive" "AIPlanner/mcp/servers/PageIndex/Dockerfile"
+        archive_has_entry "$archive" "AIPlanner/mcp/servers/PageIndex/Dockerfile" &&
+        archive_has_entry "$archive" "basin-comparator/backend/Dockerfile.mcp"
       ;;
     all)
       archive_has_entry "$archive" "AIPlanner/Dockerfile.mcp-router" &&
         archive_has_entry "$archive" "AIPlanner/plan2/Dockerfile" &&
         archive_has_entry "$archive" "AIPlanner/mcp/servers/office-word/Dockerfile" &&
         archive_has_entry "$archive" "AIPlanner/mcp/servers/PDF2MDEnhanced/Dockerfile" &&
-        archive_has_entry "$archive" "AIPlanner/mcp/servers/PageIndex/Dockerfile"
+        archive_has_entry "$archive" "AIPlanner/mcp/servers/PageIndex/Dockerfile" &&
+        archive_has_entry "$archive" "basin-comparator/backend/Dockerfile.mcp"
       ;;
   esac
 }
@@ -619,10 +646,14 @@ validate_source_package() {
     pageindex)
       archive_has_entry "$archive" "AIPlanner/mcp/servers/PageIndex/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/PageIndex/Dockerfile"
       ;;
+    basin|basin-mcp|basin-comparator|basin-comparator-mcp)
+      archive_has_entry "$archive" "basin-comparator/backend/Dockerfile.mcp" || fail "source package missing basin-comparator/backend/Dockerfile.mcp"
+      ;;
     mcp)
       archive_has_entry "$archive" "AIPlanner/mcp/servers/office-word/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/office-word/Dockerfile"
       archive_has_entry "$archive" "AIPlanner/mcp/servers/PDF2MDEnhanced/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/PDF2MDEnhanced/Dockerfile"
       archive_has_entry "$archive" "AIPlanner/mcp/servers/PageIndex/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/PageIndex/Dockerfile"
+      archive_has_entry "$archive" "basin-comparator/backend/Dockerfile.mcp" || fail "source package missing basin-comparator/backend/Dockerfile.mcp"
       ;;
     all)
       archive_has_entry "$archive" "AIPlanner/Dockerfile.mcp-router" || fail "source package missing AIPlanner/Dockerfile.mcp-router"
@@ -630,6 +661,7 @@ validate_source_package() {
       archive_has_entry "$archive" "AIPlanner/mcp/servers/office-word/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/office-word/Dockerfile"
       archive_has_entry "$archive" "AIPlanner/mcp/servers/PDF2MDEnhanced/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/PDF2MDEnhanced/Dockerfile"
       archive_has_entry "$archive" "AIPlanner/mcp/servers/PageIndex/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/PageIndex/Dockerfile"
+      archive_has_entry "$archive" "basin-comparator/backend/Dockerfile.mcp" || fail "source package missing basin-comparator/backend/Dockerfile.mcp"
       ;;
   esac
 
@@ -798,6 +830,18 @@ if [[ '$DEPLOY_SCOPE' == 'all' || '$DEPLOY_SCOPE' == 'mcp' || '$DEPLOY_SCOPE' ==
     -f mcp/servers/PageIndex/Dockerfile \
     -t '$PAGEINDEX_IMAGE' \
     mcp/servers/PageIndex
+fi
+
+if [[ '$DEPLOY_SCOPE' == 'all' || '$DEPLOY_SCOPE' == 'mcp' || '$DEPLOY_SCOPE' == 'basin' || '$DEPLOY_SCOPE' == 'basin-mcp' || '$DEPLOY_SCOPE' == 'basin-comparator' || '$DEPLOY_SCOPE' == 'basin-comparator-mcp' ]]; then
+  docker build \
+    --platform '$BUILD_PLATFORM' \
+    --pull=false \
+    --build-arg PYTHON_BASE_IMAGE='$python312_base_image' \
+    ${pip_index_url:+--build-arg PIP_INDEX_URL='$pip_index_url'} \
+    ${apt_mirror:+--build-arg APT_MIRROR='$apt_mirror'} \
+    -f ../basin-comparator/backend/Dockerfile.mcp \
+    -t '$BASIN_MCP_IMAGE' \
+    ../basin-comparator/backend
 fi
 
 cd '$REMOTE_DIR'

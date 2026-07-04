@@ -37,6 +37,10 @@ services:
           url: http://pageindex:9011
           timeout: 1300
           llm_provider: multmode
+        basin-comparator:
+          transport: http
+          url: http://basin-comparator-mcp:8139
+          timeout: 300
     ports:
       - "8000:8000"
     networks:
@@ -145,6 +149,29 @@ services:
       - membership_default
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1', 9011), 2); s.close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  basin-comparator-mcp:
+    build:
+      context: ../../basin-comparator/backend
+      dockerfile: Dockerfile.mcp
+    image: aiplanner-basin-comparator-mcp:latest
+    container_name: aiplanner-basin-comparator-mcp
+    platform: ${BUILD_PLATFORM}
+    restart: unless-stopped
+    environment:
+      PYTHONUNBUFFERED: "1"
+      MEMBERSHIP_BASE_URL: ${MEMBERSHIP_SERVICE_URL:-http://membership-api:8080}
+      DOCINTEL_BASE_URL: ${DOCINTEL_BASE_URL:-http://membership-api:8080}
+    ports:
+      - "8139:8139"
+    networks:
+      - membership_default
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1', 8139), 2); s.close()"]
       interval: 30s
       timeout: 10s
       retries: 3
