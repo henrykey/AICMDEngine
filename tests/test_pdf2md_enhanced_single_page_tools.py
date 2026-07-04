@@ -103,7 +103,7 @@ class FakeGLMOcrClient:
         return OcrResult(
             tables=[OcrElement(kind="table", source="glm_ocr", markdown="| A | B |\n| --- | --- |\n| 1 | 2 |")],
             formulas=[OcrElement(kind="formula", source="glm_ocr", latex="x=y+z")],
-            figures=[OcrElement(kind="figure", source="glm_ocr", description="ignored figure")],
+            figures=[OcrElement(kind="figure", source="glm_ocr", caption="图 1", description="ignored figure")],
         )
 
     def parse_layout(self, image_path, return_crop_images=False, need_layout_visualization=False):
@@ -1179,7 +1179,7 @@ def test_extract_page_formulas_returns_formula_page_markdown(monkeypatch):
     assert "$A$" in result["items"][0]["variables"]
 
 
-def test_extract_page_figures_requires_vlm_and_ignores_other_items(monkeypatch):
+def test_extract_page_figures_uses_glm_ocr_when_configured(monkeypatch):
     _patch_clients(monkeypatch)
 
     result = json.loads(
@@ -1187,6 +1187,25 @@ def test_extract_page_figures_requires_vlm_and_ignores_other_items(monkeypatch):
             file_data=PNG_DATA,
             input_type="image",
             ocr_config={"glm_ocr": {"enabled": True, "model": "glm", "api_key": "x", "base_url": "http://x"}},
+            vlm_config={"model": "vlm", "api_key": "x", "base_url": "http://x"},
+        )
+    )
+
+    assert result["tool"] == "extract_page_figures"
+    assert len(result["items"]) == 1
+    assert result["items"][0]["description"] == "ignored figure"
+    assert result["items"][0]["semanticDesc"] == "ignored figure"
+    assert result["items"][0]["source"] == "glm_ocr"
+    assert result["model_calls"] == {"glm_ocr": 1, "vlm_ocr": 0}
+
+
+def test_extract_page_figures_falls_back_to_vlm_without_glm_ocr(monkeypatch):
+    _patch_clients(monkeypatch)
+
+    result = json.loads(
+        single_page_tools.extract_page_figures_direct(
+            file_data=PNG_DATA,
+            input_type="image",
             vlm_config={"model": "vlm", "api_key": "x", "base_url": "http://x"},
         )
     )
@@ -1322,11 +1341,12 @@ def test_extract_page_structured_returns_separate_arrays(monkeypatch):
     assert len(result["tables"]) == 1
     assert len(result["formulas"]) == 1
     assert len(result["figures"]) == 1
+    assert result["figures"][0]["source"] == "glm_ocr"
     assert result["figures"][0]["capture"] == "图 1"
     assert result["figures"][0]["name"] == "图 1"
     assert result["figures"][0]["figureName"] == "图 1"
-    assert result["figures"][0]["description"] == "带有 D 和 R 标注的技术示意图。"
-    assert result["figures"][0]["semanticDesc"] == "带有 D 和 R 标注的技术示意图。"
+    assert result["figures"][0]["description"] == "ignored figure"
+    assert result["figures"][0]["semanticDesc"] == "ignored figure"
     assert result["semantic_status"]["complete"] is True
 
 
@@ -1465,8 +1485,9 @@ def test_revise_page_markdown_requires_exactly_one_source(monkeypatch):
 
 
 def test_revise_page_markdown_tool_schema_exposed():
-    tools = asyncio.run(server.mcp.get_tools())
-    tool = tools["revise_page_markdown"]
+    tool = server.mcp.get_tool("revise_page_markdown")
+    if asyncio.iscoroutine(tool):
+        tool = asyncio.run(tool)
     schema = tool.parameters
     properties = schema["properties"]
 

@@ -305,11 +305,11 @@ def _extract_single_page(
         if target == "formulas":
             return _extract_formula_page_result(ctx, glm, vlm, describe, model_calls, warnings)
         if target == "figures":
-            return _extract_figure_page_result(ctx, vlm, model_calls, warnings)
+            return _extract_figure_page_result(ctx, glm, vlm, model_calls, warnings)
 
         tables = _extract_tables(ctx, glm, vlm, describe, model_calls, warnings, allow_native=True, table_rows_format=table_rows_format)
         formulas = _extract_formulas(ctx, glm, vlm, describe, model_calls, warnings)
-        figures = _extract_figures(ctx, vlm, model_calls, warnings)
+        figures = _extract_figures(ctx, glm, vlm, model_calls, warnings)
         figure_semantics_missing = any(
             item.startswith("vlm_ocr_unavailable_for_figure_description") or item.startswith("vlm_ocr_failed")
             for item in warnings
@@ -678,17 +678,29 @@ def _extract_formula_page_result(
 
 def _extract_figures(
     ctx: SinglePageContext,
+    glm: OpenAICompatibleOcrClient,
     vlm: DynamicVLMClient,
     model_calls: Dict[str, int],
     warnings: List[str],
 ) -> List[Dict[str, Any]]:
+    if glm.enabled:
+        try:
+            model_calls["glm_ocr"] += 1
+            result = glm.extract_page(ctx.image_path, prompt=_prompt_figures(ctx.page_text))
+            items = [_figure_item(item, ctx.page_text, "glm_ocr") for item in result.figures]
+            if items:
+                return items
+            warnings.append("glm_ocr_returned_no_figures")
+        except Exception as exc:
+            warnings.append(f"glm_ocr_failed: {exc}")
+
     if not vlm.enabled:
         warnings.append("vlm_ocr_unavailable_for_figure_description")
         return []
     try:
         model_calls["vlm_ocr"] += 1
         result = _call_vlm_structured(vlm, ctx.image_path, _prompt_figures(ctx.page_text))
-        items = [_figure_item(item, ctx.page_text) for item in result.figures]
+        items = [_figure_item(item, ctx.page_text, "vlm_ocr") for item in result.figures]
         if items:
             return items
         warnings.append("vlm_ocr_returned_no_figures")
@@ -699,12 +711,27 @@ def _extract_figures(
 
 def _extract_figure_page_result(
     ctx: SinglePageContext,
+    glm: OpenAICompatibleOcrClient,
     vlm: DynamicVLMClient,
     model_calls: Dict[str, int],
     warnings: List[str],
 ) -> Dict[str, Any]:
     page_markdown = ""
     items: List[Dict[str, Any]] = []
+    if glm.enabled:
+        try:
+            model_calls["glm_ocr"] += 1
+            result = glm.extract_page(ctx.image_path, prompt=_prompt_figure_page(ctx.page_text))
+            page_markdown = _normalize_page_markdown(result.markdown or result.page_text)
+            items = [_figure_item(item, ctx.page_text or page_markdown, "glm_ocr") for item in result.figures]
+            if not page_markdown and items:
+                page_markdown = _figure_page_markdown_from_items(items)
+            if page_markdown or items:
+                return _figure_page_result(ctx, model_calls, warnings, page_markdown, items)
+            warnings.append("glm_ocr_returned_no_figure_markdown")
+        except Exception as exc:
+            warnings.append(f"glm_ocr_failed: {exc}")
+
     if not vlm.enabled:
         warnings.append("vlm_ocr_unavailable_for_figure_description")
         return _figure_page_result(ctx, model_calls, warnings, page_markdown, items)
@@ -712,7 +739,7 @@ def _extract_figure_page_result(
         model_calls["vlm_ocr"] += 1
         result = _call_vlm_structured(vlm, ctx.image_path, _prompt_figure_page(ctx.page_text))
         page_markdown = _normalize_page_markdown(result.markdown or result.page_text)
-        items = [_figure_item(item, ctx.page_text or page_markdown) for item in result.figures]
+        items = [_figure_item(item, ctx.page_text or page_markdown, "vlm_ocr") for item in result.figures]
         if not page_markdown and items:
             page_markdown = _figure_page_markdown_from_items(items)
         if page_markdown or items:
@@ -935,7 +962,7 @@ def _normalize_page_markdown(markdown: str) -> str:
     return value.strip()
 
 
-def _figure_item(item: OcrElement, page_text: str) -> Dict[str, Any]:
+def _figure_item(item: OcrElement, page_text: str, source: str = "vlm_ocr") -> Dict[str, Any]:
     desc = str(item.description or item.text or item.caption or item.title or "").strip()
     caption = item.caption or item.title or _figure_caption(desc) or _figure_caption(page_text)
     labels = item.raw.get("labels", []) if isinstance(item.raw, dict) else []
@@ -943,7 +970,7 @@ def _figure_item(item: OcrElement, page_text: str) -> Dict[str, Any]:
         labels = []
     labels = [str(x).strip() for x in labels if str(x).strip()] or _figure_labels(desc)
     return {
-        "source": "vlm_ocr",
+        "source": source,
         "caption": caption,
         "capture": caption,
         "name": caption,
