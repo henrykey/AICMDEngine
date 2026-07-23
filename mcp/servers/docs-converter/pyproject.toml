@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "docs-converter-mcp"
+version = "0.1.0"
+description = "MCP server for converting legacy document formats"
+requires-python = ">=3.11"
+dependencies = [
+  "fastmcp>=2.8.1",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+docs-converter = "docs_converter.main:run_server"
+
+[tool.hatch.build.targets.wheel]
+packages = ["docs_converter"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
