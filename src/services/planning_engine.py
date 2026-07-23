@@ -801,11 +801,12 @@ class PlanningEngine:
                 commands = retrieval_result.get("prompt_candidates", [])
                 retrieval_diagnostics.update(retrieval_result.get("diagnostics", {}))
             except Exception as e:
-                logger.warning(f"Command retrieval failed; falling back to full inventory: {e}")
-                retrieval_diagnostics["retrieval_backend"] = "full_inventory"
-                retrieval_diagnostics["local_fallback_reason"] = str(e)
+                logger.error("DocIntel command retrieval failed: %s", e)
+                raise RuntimeError(f"Unable to plan because DocIntel is unavailable: {e}") from e
 
         if not commands:
+            if self.command_retriever:
+                raise RuntimeError("Unable to plan because DocIntel returned no command candidates")
             commands = await self.get_available_commands(tenant_id, command_set_names)
             if retrieval_diagnostics.get("retrieval_backend") is None:
                 retrieval_diagnostics["retrieval_backend"] = "full_inventory"
@@ -1233,11 +1234,12 @@ Each command is either an API endpoint or an MCP tool.
                 commands = retrieval_result.get("prompt_candidates", [])
                 retrieval_diagnostics.update(retrieval_result.get("diagnostics", {}))
             except Exception as e:
-                logger.warning(f"Command retrieval failed; falling back to full inventory: {e}")
-                retrieval_diagnostics["retrieval_backend"] = "full_inventory"
-                retrieval_diagnostics["local_fallback_reason"] = str(e)
+                logger.error("DocIntel command retrieval failed: %s", e)
+                raise RuntimeError(f"Unable to plan because DocIntel is unavailable: {e}") from e
 
         if not commands:
+            if self.command_retriever:
+                raise RuntimeError("Unable to plan because DocIntel returned no command candidates")
             commands = await self.get_available_commands(tenant_id, command_set_names)
             if retrieval_diagnostics.get("retrieval_backend") is None:
                 retrieval_diagnostics["retrieval_backend"] = "full_inventory"

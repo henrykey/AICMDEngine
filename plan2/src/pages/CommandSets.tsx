@@ -22,32 +22,10 @@ interface Command {
 }
 
 interface CommandIndexStatus {
-    exists: boolean;
-    index_name: string;
-    command_docs: number;
-    mcp_tool_docs: number;
-    total_docs: number;
-    index_version: string;
-    enabled?: boolean;
-    reason?: string;
     docintel_enabled?: boolean;
     docintel?: {
         enabled?: boolean;
         base_url?: string;
-    };
-    local_retrieval?: {
-        enabled?: boolean;
-        backend?: string;
-        reason?: string;
-        exists?: boolean;
-        total_docs?: number;
-        command_docs?: number;
-        mcp_tool_docs?: number;
-        vector_docs?: number;
-        vector_enabled?: boolean;
-        embedding_model?: string;
-        embedding_base_url?: string;
-        embedding_healthy?: boolean;
     };
 }
 
@@ -97,28 +75,6 @@ const CommandSets = () => {
             setIndexStatus(res.data);
         } catch (err) {
             setIndexStatus(null);
-        }
-    };
-
-    const handleRebuildIndex = async () => {
-        setAdminStatus('Rebuilding command index...');
-        try {
-            const res = await api.post('/command-index/rebuild');
-            setAdminStatus(`✅ Rebuilt index. Deleted ${res.data.deleted_command_docs}, rebuilt ${res.data.rebuilt_command_docs}.`);
-            await loadIndexStatus();
-        } catch (err: any) {
-            setAdminStatus(`❌ Rebuild failed: ${err.response?.data?.detail || err.message}`);
-        }
-    };
-
-    const handleRefreshMcpIndex = async () => {
-        setAdminStatus('Refreshing MCP index...');
-        try {
-            const res = await api.post('/command-index/refresh-mcp');
-            setAdminStatus(`✅ Refreshed MCP index. Deleted ${res.data.deleted_mcp_docs}, indexed ${res.data.indexed_mcp_docs}.`);
-            await loadIndexStatus();
-        } catch (err: any) {
-            setAdminStatus(`❌ Refresh failed: ${err.response?.data?.detail || err.message}`);
         }
     };
 
@@ -253,18 +209,6 @@ const CommandSets = () => {
                         Refresh Status
                     </button>
                     <button
-                        onClick={handleRebuildIndex}
-                        className="rounded bg-amber-500 px-4 py-2 text-sm text-white transition hover:bg-amber-600"
-                    >
-                        Rebuild Index
-                    </button>
-                    <button
-                        onClick={handleRefreshMcpIndex}
-                        className="rounded bg-purple-600 px-4 py-2 text-sm text-white transition hover:bg-purple-700"
-                    >
-                        Refresh MCP Index
-                    </button>
-                    <button
                         onClick={handleSyncMcpDocIntel}
                         className="rounded bg-emerald-600 px-4 py-2 text-sm text-white transition hover:bg-emerald-700"
                     >
@@ -305,26 +249,9 @@ const CommandSets = () => {
                             </div>
                         </div>
 
-                        <div className="rounded border border-slate-200 bg-white p-3">
-                            <div className="mb-2 flex items-center justify-between">
-                                <div className="font-semibold text-slate-800">Full Inventory Fallback</div>
-                                <span className="rounded bg-slate-100 px-2 py-1 font-mono text-xs text-slate-600">
-                                    mongo commands
-                                </span>
-                            </div>
-                            <div className="grid gap-2 md:grid-cols-4">
-                                <div>DocIntel enabled: {indexStatus.docintel_enabled ? 'yes' : 'no'}</div>
-                                <div>Local retrieval: disabled for now</div>
-                                <div>Local ES: {indexStatus.enabled === false ? 'disabled' : 'enabled'}</div>
-                                <div>Inventory fallback: always available</div>
-                            </div>
-                            {indexStatus.reason && (
-                                <div className="mt-2 text-amber-700">{indexStatus.reason}</div>
-                            )}
-                        </div>
                     </div>
                 ) : (
-                    <div className="text-sm text-slate-500">Index status unavailable.</div>
+                    <div className="text-sm text-slate-500">DocIntel status unavailable.</div>
                 )}
                 {adminStatus && (
                     <div className="mt-3 text-sm text-slate-700">{adminStatus}</div>

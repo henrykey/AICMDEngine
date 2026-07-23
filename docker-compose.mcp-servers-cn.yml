@@ -11,10 +11,6 @@ services:
       args:
         PYTHON_BASE_IMAGE: ${CN_PYTHON_311_IMAGE:-docker.1ms.run/python:3.11-slim}
 
-  local-retrieval:
-    build:
-      dockerfile: Dockerfile.cn
-
   office-word-mcp:
     build:
       dockerfile: Dockerfile.cn

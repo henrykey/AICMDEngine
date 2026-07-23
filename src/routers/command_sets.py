@@ -17,16 +17,8 @@ def get_db(request: Request) -> AsyncIOMotorDatabase:
     return request.app.mongodb
 
 
-def get_command_indexer(request: Request):
-    return getattr(request.app, "command_indexer", None)
-
-
 def get_docintel_command_sync(request: Request):
     return getattr(request.app, "docintel_command_sync", None)
-
-
-def get_local_command_sync(request: Request):
-    return getattr(request.app, "local_command_sync", None)
 
 
 def get_request_user_context(request: Request):
@@ -36,10 +28,7 @@ def get_request_user_context(request: Request):
 
 
 def get_command_sync_targets(request: Request):
-    return [
-        ("DocIntel", get_docintel_command_sync(request)),
-        ("local retrieval", get_local_command_sync(request)),
-    ]
+    return [("DocIntel", get_docintel_command_sync(request))]
 
 # --- Helper Functions ---
 
@@ -305,7 +294,6 @@ async def list_command_sets(
     auth_token = extract_bearer_token(request)
     user_id = extract_user_id(request, auth_token)
     docintel_client = getattr(request.app, "docintel_client", None)
-    local_retrieval_client = getattr(request.app, "local_retrieval_client", None)
 
     async def detect_storage_status(command_set_doc: Dict) -> Dict[str, bool]:
         source_name = command_set_doc.get("name", "")
@@ -316,10 +304,6 @@ async def list_command_sets(
         if docintel_client:
             tasks.append(docintel_client.has_command_source(tenant_id, source_name, user_id=user_id, auth_token=auth_token))
             labels.append("docintel")
-        if local_retrieval_client:
-            tasks.append(local_retrieval_client.has_command_source(tenant_id, source_name, user_id=user_id, auth_token=auth_token))
-            labels.append("local")
-
         if not tasks:
             return status
 
@@ -393,13 +377,6 @@ async def create_command(
     result = await db["commands"].insert_one(command_dict)
 
     stored_cmd = await db["commands"].find_one({"_id": result.inserted_id})
-    command_indexer = get_command_indexer(request)
-    if command_indexer:
-        try:
-            await command_indexer.upsert_command(stored_cmd, parent_set.get("name", "manual"))
-        except Exception as e:
-            # Mongo remains source of truth; index sync failure is logged only.
-            logger.warning("Failed to index command '%s': %s", stored_cmd.get("command"), e)
     user_id, auth_token = get_request_user_context(request)
     for label, sync_service in get_command_sync_targets(request):
         if not sync_service:
@@ -554,12 +531,6 @@ Return format:
                 inserted_docs.append(inserted_doc)
             inserted_count += 1
 
-        command_indexer = get_command_indexer(request)
-        if command_indexer and inserted_docs:
-            try:
-                await command_indexer.bulk_upsert_commands(inserted_docs, parent_set.get("name", "manual"))
-            except Exception as e:
-                logger.warning("Failed to bulk index imported commands for set %s: %s", set_id, e)
         user_id, auth_token = get_request_user_context(request)
         for label, sync_service in get_command_sync_targets(request):
             if not sync_service or not inserted_docs:

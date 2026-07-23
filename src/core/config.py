@@ -76,16 +76,8 @@ class Settings(BaseSettings):
     kb_base_url: str = Field(default="http://localhost:8001", env="KB_BASE_URL")
     kb_api_key: str = Field(default="", env="KB_API_KEY")
 
-    # Elasticsearch / Command Retrieval
-    elasticsearch_url: str = Field(default="", env="ELASTICSEARCH_URL")
-    elasticsearch_api_key: str = Field(default="", env="ELASTICSEARCH_API_KEY")
-    command_search_index: str = Field(default="cmdengine_commands_v1", env="COMMAND_SEARCH_INDEX")
-    command_search_index_alias: str = Field(default="cmdengine_commands", env="COMMAND_SEARCH_INDEX_ALIAS")
+    # DocIntel Command Retrieval
     command_retrieval_enabled: bool = Field(default=False, env="COMMAND_RETRIEVAL_ENABLED")
-    command_retrieval_fallback_to_full_inventory: bool = Field(
-        default=True,
-        env="COMMAND_RETRIEVAL_FALLBACK_TO_FULL_INVENTORY"
-    )
     command_retrieval_top_k: int = Field(default=30, env="COMMAND_RETRIEVAL_TOP_K")
     command_prompt_top_k: int = Field(default=15, env="COMMAND_PROMPT_TOP_K")
     docintel_enabled: bool = Field(default=False, env="DOCINTEL_ENABLED")
@@ -105,30 +97,10 @@ class Settings(BaseSettings):
         default="cmdengine.command",
         env="DOCINTEL_COMMAND_CATEGORY_PREFIX"
     )
-    docintel_prefer_remote_retrieval: bool = Field(
-        default=True,
-        env="DOCINTEL_PREFER_REMOTE_RETRIEVAL"
-    )
     docintel_remote_min_results: int = Field(default=1, env="DOCINTEL_REMOTE_MIN_RESULTS")
     docintel_remote_min_top_score: float = Field(default=0.0, env="DOCINTEL_REMOTE_MIN_TOP_SCORE")
     docintel_sync_enabled: bool = Field(default=False, env="DOCINTEL_SYNC_ENABLED")
     docintel_default_user_id: str = Field(default="system", env="DOCINTEL_DEFAULT_USER_ID")
-    local_retrieval_enabled: bool = Field(default=False, env="LOCAL_RETRIEVAL_ENABLED")
-    local_retrieval_base_url: str = Field(default="", env="LOCAL_RETRIEVAL_BASE_URL")
-    local_retrieval_timeout_ms: int = Field(default=10000, env="LOCAL_RETRIEVAL_TIMEOUT_MS")
-    local_retrieval_search_path: str = Field(
-        default="/v2/documents/search/commands",
-        env="LOCAL_RETRIEVAL_SEARCH_PATH"
-    )
-    local_retrieval_command_sync_path: str = Field(
-        default="/v2/documents/commands/sync/batch",
-        env="LOCAL_RETRIEVAL_COMMAND_SYNC_PATH"
-    )
-    local_retrieval_command_delete_path: str = Field(
-        default="/v2/documents/commands/delete",
-        env="LOCAL_RETRIEVAL_COMMAND_DELETE_PATH"
-    )
-
     # Logging Configuration
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
 

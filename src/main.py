@@ -15,8 +15,6 @@ from src.mcp_servers.test_mcp import TestMCPServer
 from src.mcp_servers.kb_mcp import KBMCP
 from src.mcp_servers.bpmn_mcp import BPMN_MCP
 from src.mcp_servers.form_mcp import FORM_MCP
-from src.services.embedding_service import EmbeddingService
-from src.services.command_indexer import CommandIndexer
 from src.services.command_retriever import CommandRetriever
 from src.services.direct_mcp_executor import DirectMCPExecutor
 from src.services.docintel_client import DocIntelClient
@@ -153,14 +151,9 @@ async def startup_db_client():
         if not provider_manager:
             error = ValueError("Provider manager is required for command retrieval")
             logger.error(f"Failed to initialize command retrieval services: {error}")
-            if not settings.command_retrieval_fallback_to_full_inventory:
-                raise error
+            raise error
         else:
-            embedding_service = EmbeddingService(provider_manager=provider_manager)
-            app.embedding_service = embedding_service
-
             docintel_client = None
-            local_retrieval_client = None
             if settings.docintel_enabled and settings.docintel_base_url:
                 try:
                     docintel_client = DocIntelClient(
@@ -194,61 +187,11 @@ async def startup_db_client():
                 except Exception as e:
                     logger.error("Failed to initialize DocIntel client: %s", e)
 
-            if settings.local_retrieval_enabled and settings.local_retrieval_base_url:
-                try:
-                    local_retrieval_client = DocIntelClient(
-                        base_url=settings.local_retrieval_base_url,
-                        search_path=settings.local_retrieval_search_path,
-                        command_sync_path=settings.local_retrieval_command_sync_path,
-                        command_delete_path=settings.local_retrieval_command_delete_path,
-                        timeout_ms=settings.local_retrieval_timeout_ms,
-                        category_prefix=settings.docintel_command_category_prefix,
-                    )
-                    app.local_retrieval_client = local_retrieval_client
-                    app.local_command_sync = DocIntelCommandSyncService(
-                        client=local_retrieval_client,
-                        db=app.mongodb,
-                        category_prefix=settings.docintel_command_category_prefix,
-                        default_user_id=settings.docintel_default_user_id,
-                    )
-                    logger.info("Initialized local retrieval command sync client: %s", settings.local_retrieval_base_url)
-                except Exception as e:
-                    logger.error("Failed to initialize local retrieval client: %s", e)
-
-            command_indexer = None
-            if settings.elasticsearch_url:
-                try:
-                    command_indexer = CommandIndexer(
-                        es_url=settings.elasticsearch_url,
-                        index_name=settings.command_search_index,
-                        embedding_service=embedding_service,
-                        db=app.mongodb,
-                        api_key=settings.elasticsearch_api_key,
-                    )
-                    await command_indexer.ensure_index()
-                    indexed_commands = await command_indexer.rebuild_from_mongo()
-                    logger.info("Indexed %s Mongo commands into '%s'", indexed_commands, settings.command_search_index)
-
-                    if hasattr(app, "mcp_registry"):
-                        await command_indexer.upsert_mcp_tools(app.mcp_registry)
-
-                    app.command_indexer = command_indexer
-                except Exception as e:
-                    logger.error("Failed to initialize local ES command indexer: %s", e)
-            else:
-                logger.info("Skipping local ES command indexer because ELASTICSEARCH_URL is not configured")
-
             try:
                 app.command_retriever = CommandRetriever(
-                    es_url=settings.elasticsearch_url,
-                    index_name=settings.command_search_index,
-                    embedding_service=embedding_service,
                     docintel_client=docintel_client,
-                    local_retrieval_client=local_retrieval_client,
-                    api_key=settings.elasticsearch_api_key,
                     retrieval_top_k=settings.command_retrieval_top_k,
                     prompt_top_k=settings.command_prompt_top_k,
-                    prefer_remote=settings.docintel_prefer_remote_retrieval,
                     remote_min_results=settings.docintel_remote_min_results,
                     remote_min_top_score=settings.docintel_remote_min_top_score,
                 )
@@ -257,11 +200,10 @@ async def startup_db_client():
                         command_retriever=app.command_retriever,
                         mcp_registry=app.mcp_registry
                     )
-                logger.info("Initialized command retrieval services with index '%s'", settings.command_search_index)
+                logger.info("Initialized DocIntel command retrieval services")
             except Exception as e:
                 logger.error(f"Failed to initialize command retrieval services: {e}")
-                if not settings.command_retrieval_fallback_to_full_inventory:
-                    raise
+                raise
 
 @app.on_event("shutdown")
 async def shutdown_db_client():

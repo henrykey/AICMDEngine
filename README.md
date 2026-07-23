@@ -172,10 +172,10 @@ npm run build
 
 ### 功能说明
 
-AICMDEngine 现在支持两层命令候选检索：
+AICMDEngine 使用 DocIntel 提供命令候选检索：
 
-- **DocIntel 远端检索**：优先使用 Membership DocIntel 的 command corpus 做 Top-N 语义检索
-- **本地 ES 回退**：当 DocIntel 不可用、结果不足或配置未启用时，回退到本地 Elasticsearch 命令索引
+- **DocIntel 远端检索**：使用 Membership DocIntel 的 command corpus 做 Top-N 语义检索
+- **失败行为**：DocIntel 未配置、不可用或没有返回候选命令时，规划请求直接报错，不使用本地检索或全量命令降级
 
 这项能力只负责：
 
@@ -200,7 +200,6 @@ DOCINTEL_BASE_URL=http://host.docker.internal:8080
 DOCINTEL_SEARCH_PATH=/v2/documents/search/commands
 DOCINTEL_COMMAND_SYNC_PATH=/v2/documents/commands/sync/batch
 DOCINTEL_COMMAND_DELETE_PATH=/v2/documents/commands/delete
-DOCINTEL_PREFER_REMOTE_RETRIEVAL=true
 ```
 
 常用可选项：
