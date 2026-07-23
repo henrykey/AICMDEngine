@@ -2,17 +2,32 @@
 MCP (Model Context Protocol) API endpoints.
 """
 
-from fastapi import APIRouter, Request, HTTPException, Depends
+from fastapi import APIRouter, Request, HTTPException, Depends, Header
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+import hmac
 import logging
 
+from src.core.config import settings
 from src.mcp.registry import MCPRegistry, ToolResult
 from src.mcp.protocol_handler import choose_vlm_injection_key, get_tool_schema_properties
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _require_mcp_admin_token(x_mcp_admin_token: Optional[str]) -> None:
+    expected = settings.mcp_admin_token
+    if not expected:
+        if settings.environment.lower() in {"development", "test"}:
+            return
+        raise HTTPException(
+            status_code=503,
+            detail="MCP_ADMIN_TOKEN must be configured before runtime refresh is enabled",
+        )
+    if not x_mcp_admin_token or not hmac.compare_digest(x_mcp_admin_token, expected):
+        raise HTTPException(status_code=403, detail="Invalid MCP admin token")
 
 
 async def _load_mcp_provider_settings(request: Request) -> Dict[str, Dict[str, str]]:
@@ -476,6 +491,41 @@ async def mcp_health_check(request: Request) -> Dict[str, Any]:
     }
 
 # Server Management Endpoints
+
+@router.post("/servers/refresh-config")
+async def refresh_external_mcp_config(
+    request: Request,
+    x_mcp_admin_token: Optional[str] = Header(default=None, alias="X-MCP-Admin-Token"),
+) -> Dict[str, Any]:
+    """Reload external MCP configuration and apply its diff at runtime."""
+    _require_mcp_admin_token(x_mcp_admin_token)
+
+    manager = getattr(request.app, "external_mcp_manager", None)
+    if manager is None:
+        raise HTTPException(status_code=503, detail="External MCP manager not initialized")
+
+    result = await manager.refresh()
+    changed = bool(result["added"] or result["updated"] or result["removed"])
+    if changed and hasattr(request.app, "docintel_command_sync"):
+        try:
+            stale_external_ids = result.get("stale_external_ids", [])
+            if stale_external_ids:
+                result["docintel_deleted"] = (
+                    await request.app.docintel_command_sync.delete_commands(
+                        0,
+                        stale_external_ids,
+                    )
+                )
+            result["docintel_synced"] = await request.app.docintel_command_sync.sync_mcp_tools(
+                request.app.mcp_registry
+            )
+        except Exception as exc:
+            logger.warning("DocIntel MCP sync after refresh failed: %s", exc)
+            result["docintel_sync_error"] = str(exc)
+
+    if not result["success"] and result.get("error"):
+        raise HTTPException(status_code=400, detail=result)
+    return result
 
 @router.post("/servers/{server_name}/refresh")
 async def refresh_server_status(server_name: str, request: Request) -> Dict[str, Any]:

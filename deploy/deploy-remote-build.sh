@@ -35,6 +35,7 @@ REMOTE_RSYNC_AVAILABLE="false"
 ROUTER_IMAGE="aiplanner-mcp-router:latest"
 PLAN2_IMAGE="aiplanner-plan2:latest"
 OFFICE_WORD_IMAGE="aiplanner-office-word:latest"
+DOCS_CONVERTER_IMAGE="aiplanner-docs-converter:latest"
 PDF2MD_ENH_IMAGE="aiplanner-pdf2md-enhanced:latest"
 PAGEINDEX_IMAGE="aiplanner-pageindex:latest"
 BASIN_MCP_IMAGE="aiplanner-basin-comparator-mcp:latest"
@@ -42,6 +43,7 @@ BASIN_MCP_IMAGE="aiplanner-basin-comparator-mcp:latest"
 PLAN2_HOST_PORT_DEFAULT="5122"
 ROUTER_HOST_PORT_DEFAULT="8000"
 OFFICE_WORD_HOST_PORT_DEFAULT="9002"
+DOCS_CONVERTER_HOST_PORT_DEFAULT="9012"
 PDF2MD_ENHANCED_HOST_PORT_DEFAULT="9010"
 PAGEINDEX_HOST_PORT_DEFAULT="9011"
 
@@ -77,7 +79,7 @@ Options:
   --remote-dir DIR
   --remote-src-base DIR
   --source-package PATH
-  --scope router|plan2|mcp|all|mcp-router|office-word|pdf2md-enhanced|pageindex|basin-comparator-mcp
+  --scope router|plan2|mcp|all|mcp-router|office-word|docs-converter|pdf2md-enhanced|pageindex|basin-comparator-mcp
   --platform linux/amd64|linux/arm64
   --mirror cn|PREFIX
   --upload-method auto|scp|rsync  (default: auto)
@@ -123,10 +125,10 @@ resolve_env_file() {
 
 validate_scope() {
   case "$1" in
-    router|plan2|mcp|all|mcp-router|office-word|pdf2md-enhanced|pageindex|basin|basin-mcp|basin-comparator|basin-comparator-mcp)
+    router|plan2|mcp|all|mcp-router|office-word|docs-converter|pdf2md-enhanced|pageindex|basin|basin-mcp|basin-comparator|basin-comparator-mcp)
       ;;
     *)
-      fail "Invalid scope: $1 (expected: router|plan2|mcp|all|mcp-router|office-word|pdf2md-enhanced|pageindex|basin-comparator-mcp)"
+      fail "Invalid scope: $1 (expected: router|plan2|mcp|all|mcp-router|office-word|docs-converter|pdf2md-enhanced|pageindex|basin-comparator-mcp)"
       ;;
   esac
 }
@@ -140,12 +142,12 @@ scope_to_services() {
       printf '%s\n' "plan2"
       ;;
     mcp)
-      printf '%s\n' "office-word" "pdf2md-enhanced" "pageindex" "basin-comparator-mcp"
+      printf '%s\n' "office-word" "docs-converter" "pdf2md-enhanced" "pageindex" "basin-comparator-mcp"
       ;;
     all)
-      printf '%s\n' "mcp-router" "plan2" "office-word" "pdf2md-enhanced" "pageindex" "basin-comparator-mcp"
+      printf '%s\n' "mcp-router" "plan2" "office-word" "docs-converter" "pdf2md-enhanced" "pageindex" "basin-comparator-mcp"
       ;;
-    office-word|pdf2md-enhanced|pageindex)
+    office-word|docs-converter|pdf2md-enhanced|pageindex)
       printf '%s\n' "$DEPLOY_SCOPE"
       ;;
     basin|basin-mcp|basin-comparator|basin-comparator-mcp)
@@ -270,6 +272,7 @@ esac
 PLAN2_HOST_PORT="${PLAN2_HOST_PORT:-$PLAN2_HOST_PORT_DEFAULT}"
 ROUTER_HOST_PORT="${ROUTER_HOST_PORT:-$ROUTER_HOST_PORT_DEFAULT}"
 OFFICE_WORD_HOST_PORT="${OFFICE_WORD_HOST_PORT:-$OFFICE_WORD_HOST_PORT_DEFAULT}"
+DOCS_CONVERTER_HOST_PORT="${DOCS_CONVERTER_HOST_PORT:-$DOCS_CONVERTER_HOST_PORT_DEFAULT}"
 PDF2MD_ENHANCED_HOST_PORT="${PDF2MD_ENHANCED_HOST_PORT:-$PDF2MD_ENHANCED_HOST_PORT_DEFAULT}"
 PAGEINDEX_HOST_PORT="${PAGEINDEX_HOST_PORT:-$PAGEINDEX_HOST_PORT_DEFAULT}"
 
@@ -484,6 +487,13 @@ prepare_source_package() {
         AIPlanner/mcp/servers/office-word \
         AIPlanner/deploy/docker-compose.mcp.yml
       ;;
+    docs-converter)
+      log "Using slim source package profile for scope=docs-converter"
+      COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar -czf "$SOURCE_PACKAGE" \
+        -C "$PROJECT_ROOT" \
+        AIPlanner/mcp/servers/docs-converter \
+        AIPlanner/deploy/docker-compose.mcp.yml
+      ;;
     pdf2md-enhanced)
       log "Using slim source package profile for scope=pdf2md-enhanced"
       COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar -czf "$SOURCE_PACKAGE" \
@@ -525,6 +535,7 @@ prepare_source_package() {
         --exclude='basin-comparator/backend/**/*.pyc' \
         -C "$PROJECT_ROOT" \
         AIPlanner/mcp/servers/office-word \
+        AIPlanner/mcp/servers/docs-converter \
         AIPlanner/mcp/servers/PDF2MDEnhanced \
         AIPlanner/mcp/servers/PageIndex \
         basin-comparator/backend \
@@ -560,6 +571,7 @@ prepare_source_package() {
         AIPlanner/.wheelhouse \
         AIPlanner/plan2 \
         AIPlanner/mcp/servers/office-word \
+        AIPlanner/mcp/servers/docs-converter \
         AIPlanner/mcp/servers/PDF2MDEnhanced \
         AIPlanner/mcp/servers/PageIndex \
         basin-comparator/backend \
@@ -593,6 +605,9 @@ source_package_matches_scope() {
     office-word)
       archive_has_entry "$archive" "AIPlanner/mcp/servers/office-word/Dockerfile"
       ;;
+    docs-converter)
+      archive_has_entry "$archive" "AIPlanner/mcp/servers/docs-converter/Dockerfile"
+      ;;
     pdf2md-enhanced)
       archive_has_entry "$archive" "AIPlanner/mcp/servers/PDF2MDEnhanced/Dockerfile"
       ;;
@@ -604,6 +619,7 @@ source_package_matches_scope() {
       ;;
     mcp)
       archive_has_entry "$archive" "AIPlanner/mcp/servers/office-word/Dockerfile" &&
+        archive_has_entry "$archive" "AIPlanner/mcp/servers/docs-converter/Dockerfile" &&
         archive_has_entry "$archive" "AIPlanner/mcp/servers/PDF2MDEnhanced/Dockerfile" &&
         archive_has_entry "$archive" "AIPlanner/mcp/servers/PageIndex/Dockerfile" &&
         archive_has_entry "$archive" "basin-comparator/backend/Dockerfile.mcp"
@@ -612,6 +628,7 @@ source_package_matches_scope() {
       archive_has_entry "$archive" "AIPlanner/Dockerfile.mcp-router" &&
         archive_has_entry "$archive" "AIPlanner/plan2/Dockerfile" &&
         archive_has_entry "$archive" "AIPlanner/mcp/servers/office-word/Dockerfile" &&
+        archive_has_entry "$archive" "AIPlanner/mcp/servers/docs-converter/Dockerfile" &&
         archive_has_entry "$archive" "AIPlanner/mcp/servers/PDF2MDEnhanced/Dockerfile" &&
         archive_has_entry "$archive" "AIPlanner/mcp/servers/PageIndex/Dockerfile" &&
         archive_has_entry "$archive" "basin-comparator/backend/Dockerfile.mcp"
@@ -640,6 +657,9 @@ validate_source_package() {
     office-word)
       archive_has_entry "$archive" "AIPlanner/mcp/servers/office-word/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/office-word/Dockerfile"
       ;;
+    docs-converter)
+      archive_has_entry "$archive" "AIPlanner/mcp/servers/docs-converter/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/docs-converter/Dockerfile"
+      ;;
     pdf2md-enhanced)
       archive_has_entry "$archive" "AIPlanner/mcp/servers/PDF2MDEnhanced/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/PDF2MDEnhanced/Dockerfile"
       ;;
@@ -651,6 +671,7 @@ validate_source_package() {
       ;;
     mcp)
       archive_has_entry "$archive" "AIPlanner/mcp/servers/office-word/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/office-word/Dockerfile"
+      archive_has_entry "$archive" "AIPlanner/mcp/servers/docs-converter/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/docs-converter/Dockerfile"
       archive_has_entry "$archive" "AIPlanner/mcp/servers/PDF2MDEnhanced/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/PDF2MDEnhanced/Dockerfile"
       archive_has_entry "$archive" "AIPlanner/mcp/servers/PageIndex/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/PageIndex/Dockerfile"
       archive_has_entry "$archive" "basin-comparator/backend/Dockerfile.mcp" || fail "source package missing basin-comparator/backend/Dockerfile.mcp"
@@ -659,6 +680,7 @@ validate_source_package() {
       archive_has_entry "$archive" "AIPlanner/Dockerfile.mcp-router" || fail "source package missing AIPlanner/Dockerfile.mcp-router"
       archive_has_entry "$archive" "AIPlanner/plan2/Dockerfile" || fail "source package missing AIPlanner/plan2/Dockerfile"
       archive_has_entry "$archive" "AIPlanner/mcp/servers/office-word/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/office-word/Dockerfile"
+      archive_has_entry "$archive" "AIPlanner/mcp/servers/docs-converter/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/docs-converter/Dockerfile"
       archive_has_entry "$archive" "AIPlanner/mcp/servers/PDF2MDEnhanced/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/PDF2MDEnhanced/Dockerfile"
       archive_has_entry "$archive" "AIPlanner/mcp/servers/PageIndex/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/PageIndex/Dockerfile"
       archive_has_entry "$archive" "basin-comparator/backend/Dockerfile.mcp" || fail "source package missing basin-comparator/backend/Dockerfile.mcp"
@@ -678,7 +700,7 @@ upload_source_and_files() {
   [[ -f "$SOURCE_PACKAGE" ]] || fail "source package not found: $SOURCE_PACKAGE"
 
   log "Creating remote directory on App"
-  ssh_app "mkdir -p '$REMOTE_DIR/plan2' '$REMOTE_DIR/data/pdf2md-enhanced/input' '$REMOTE_DIR/data/pdf2md-enhanced/output'"
+  ssh_app "mkdir -p '$REMOTE_DIR/config' '$REMOTE_DIR/plan2' '$REMOTE_DIR/data/documents' '$REMOTE_DIR/data/pdf2md-enhanced/input' '$REMOTE_DIR/data/pdf2md-enhanced/output'"
 
   log "Uploading source package"
   ssh_app "rm -f '$REMOTE_DIR/aiplanner-source.tar.gz'"
@@ -697,6 +719,7 @@ upload_source_and_files() {
   rm -f "$rendered_env"
 
   upload_file_to_app "$SCRIPT_DIR/docker-compose.mcp.yml" "$(remote_login_target):$REMOTE_DIR/docker-compose.mcp.yml"
+  upload_file_to_app "$SCRIPT_DIR/config/external_mcps.yml" "$(remote_login_target):$REMOTE_DIR/config/external_mcps.yml"
 
   log "Rendering and uploading plan2 config"
   rendered_plan2_config="$(mktemp)"
@@ -806,6 +829,18 @@ if [[ '$DEPLOY_SCOPE' == 'all' || '$DEPLOY_SCOPE' == 'mcp' || '$DEPLOY_SCOPE' ==
     -f mcp/servers/office-word/Dockerfile \
     -t '$OFFICE_WORD_IMAGE' \
     mcp/servers/office-word
+fi
+
+if [[ '$DEPLOY_SCOPE' == 'all' || '$DEPLOY_SCOPE' == 'mcp' || '$DEPLOY_SCOPE' == 'docs-converter' ]]; then
+  docker build \
+    --platform '$BUILD_PLATFORM' \
+    --pull=false \
+    --build-arg PYTHON_BASE_IMAGE='$python312_base_image' \
+    ${pip_index_url:+--build-arg PIP_INDEX_URL='$pip_index_url'} \
+    ${apt_mirror:+--build-arg APT_MIRROR='$apt_mirror'} \
+    -f mcp/servers/docs-converter/Dockerfile \
+    -t '$DOCS_CONVERTER_IMAGE' \
+    mcp/servers/docs-converter
 fi
 
 if [[ '$DEPLOY_SCOPE' == 'all' || '$DEPLOY_SCOPE' == 'mcp' || '$DEPLOY_SCOPE' == 'pdf2md-enhanced' ]]; then

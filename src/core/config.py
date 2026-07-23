@@ -153,6 +153,8 @@ class Settings(BaseSettings):
 
     # External MCPs Configuration
     external_mcps: Any = Field(default={}, env="EXTERNAL_MCPS")
+    external_mcps_file: Optional[str] = Field(default=None, env="EXTERNAL_MCPS_FILE")
+    mcp_admin_token: str = Field(default="", env="MCP_ADMIN_TOKEN")
 
     # Environment
     environment: str = Field(default="development", env="ENVIRONMENT")

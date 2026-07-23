@@ -60,32 +60,8 @@ services:
       WS_MAX_SIZE: 20971520
       LOCAL_RETRIEVAL_ENABLED: ${LOCAL_RETRIEVAL_ENABLED:-false}
       LOCAL_RETRIEVAL_BASE_URL: ${LOCAL_RETRIEVAL_BASE_URL:-http://local-retrieval:8088}
-      EXTERNAL_MCPS: |
-        paddleocr:
-          transport: http
-          url: http://host.docker.internal:9001
-          timeout: 300
-        office-word:
-          transport: http
-          url: http://host.docker.internal:9002
-          timeout: 60
-        pdf2md:
-          transport: http
-          url: http://host.docker.internal:9003
-          timeout: 300
-        pdf2md-enhanced:
-          transport: http
-          url: http://host.docker.internal:9010
-          timeout: 600
-        pageindex:
-          transport: http
-          url: http://host.docker.internal:9011
-          timeout: 1300
-          llm_provider: multmode
-        basin-comparator:
-          transport: http
-          url: http://basin-comparator-mcp:8139
-          timeout: 300
+      EXTERNAL_MCPS_FILE: /app/config/external_mcps.yml
+      MCP_ADMIN_TOKEN: ${MCP_ADMIN_TOKEN:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # LLM_BASE_URL: ${LLM_BASE_URL}
       # LLM_API_KEY: ${LLM_API_KEY}
@@ -94,6 +70,8 @@ services:
       LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-3}
       LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.8}
       MEMBERSHIP_SERVICE_URL: http://host.docker.internal:8080
+    volumes:
+      - ./config:/app/config:ro
     networks:
       - mcp-servers-network
     restart: unless-stopped
@@ -158,6 +136,8 @@ services:
       - MCP_TRANSPORT=sse
       - MCP_HOST=0.0.0.0
       - MCP_PORT=9002
+    volumes:
+      - ${DOCUMENTS_HOST_DIR:-./data/documents}:/documents
     # 资源限制
     deploy:
       resources:
@@ -176,6 +156,33 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+
+  # Legacy document conversion MCP Server
+  docs-converter-mcp:
+    build:
+      context: ./mcp/servers/docs-converter
+      dockerfile: Dockerfile
+    image: aiplanner-docs-converter:latest
+    profiles: ["optional"]
+    container_name: docs-converter-mcp
+    restart: unless-stopped
+    ports:
+      - "9012:9012"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - MCP_TRANSPORT=sse
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=9012
+    volumes:
+      - ${DOCUMENTS_HOST_DIR:-./data/documents}:/documents
+    networks:
+      - mcp-servers-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1', 9012), 2); s.close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   # PDF2MD MCP Server - HTTP/SSE 模式（可选容器部署）
   # 优先使用本地代理（mcp/proxy）运行，此服务用于独立容器部署

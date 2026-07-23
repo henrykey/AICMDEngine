@@ -21,6 +21,13 @@ services:
       args:
         PYTHON_BASE_IMAGE: ${CN_PYTHON_311_IMAGE:-docker.1ms.run/python:3.11-slim}
 
+  docs-converter-mcp:
+    build:
+      args:
+        PYTHON_BASE_IMAGE: ${CN_PYTHON_311_IMAGE:-docker.1ms.run/python:3.11-slim}
+        PIP_INDEX_URL: ${CN_PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}
+        APT_MIRROR: ${CN_APT_MIRROR:-http://mirrors.aliyun.com/debian}
+
   pdf2md-enhanced-mcp:
     build:
       dockerfile: Dockerfile.cn

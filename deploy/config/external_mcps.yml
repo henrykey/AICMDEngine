@@ -1,0 +1,23 @@
+servers:
+  office-word:
+    transport: http
+    url: http://office-word:9002
+    timeout: 120
+  docs-converter:
+    transport: http
+    url: http://docs-converter:9012
+    timeout: 180
+  pdf2md-enhanced:
+    transport: http
+    url: http://pdf2md-enhanced:9010
+    timeout: 600
+    llm_provider: multmode
+  pageindex:
+    transport: http
+    url: http://pageindex:9011
+    timeout: 1300
+    llm_provider: multmode
+  basin-comparator:
+    transport: http
+    url: http://basin-comparator-mcp:8139
+    timeout: 300

@@ -1,0 +1,30 @@
+servers:
+  paddleocr:
+    transport: http
+    url: http://host.docker.internal:9001
+    timeout: 300
+  office-word:
+    transport: http
+    url: http://host.docker.internal:9002
+    timeout: 60
+  docs-converter:
+    transport: http
+    url: http://host.docker.internal:9012
+    timeout: 180
+  pdf2md:
+    transport: http
+    url: http://host.docker.internal:9003
+    timeout: 300
+  pdf2md-enhanced:
+    transport: http
+    url: http://host.docker.internal:9010
+    timeout: 600
+  pageindex:
+    transport: http
+    url: http://host.docker.internal:9011
+    timeout: 1300
+    llm_provider: multmode
+  basin-comparator:
+    transport: http
+    url: http://basin-comparator-mcp:8139
+    timeout: 300

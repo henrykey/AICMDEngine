@@ -15,6 +15,7 @@ PLAN2_HOST_PORT_DEFAULT="5122"
 OFFICE_WORD_PROXY_PORT_DEFAULT="9002"
 PDF2MD_ENHANCED_HOST_PORT_DEFAULT="9010"
 PAGEINDEX_HOST_PORT_DEFAULT="9011"
+DOCS_CONVERTER_HOST_PORT_DEFAULT="9012"
 BASIN_COMPARATOR_MCP_HOST_PORT_DEFAULT="8139"
 MCP_TRANSPORT_DEFAULT="stdio"
 FASTMCP_LOG_LEVEL_DEFAULT="INFO"
@@ -47,6 +48,7 @@ readonly IMAGE_NAMES=(
   aiplanner-mcp-router:latest
   aiplanner-plan2:latest
   aiplanner-office-word:latest
+  aiplanner-docs-converter:latest
   aiplanner-pdf2md-enhanced:latest
   aiplanner-pageindex:latest
   aiplanner-basin-comparator-mcp:latest
@@ -55,6 +57,7 @@ readonly DEFAULT_DEPLOY_SERVICES=(
   mcp-router
   plan2
   office-word
+  docs-converter
   pdf2md-enhanced
   pageindex
   basin-comparator-mcp
@@ -96,7 +99,7 @@ Notes:
   - `upload` syncs deploy/out to ${APP_HOST}:${REMOTE_DIR}.
   - `deploy` executes the remote install/start sequence on ${APP_HOST}.
   - `--mirror cn` enables China-friendly pip/npm/apt/apk mirrors and mirrored base images.
-  - `--service` supports `all`, `mcp`, `mcp-router`, `plan2`, `office-word`, `pdf2md-enhanced`, `pageindex`, `basin-comparator-mcp`.
+  - `--service` supports `all`, `mcp`, `mcp-router`, `plan2`, `office-word`, `docs-converter`, `pdf2md-enhanced`, `pageindex`, `basin-comparator-mcp`.
 EOF
 }
 
@@ -191,6 +194,7 @@ resolve_services() {
         ;;
       mcp)
         append_unique "office-word"
+        append_unique "docs-converter"
         append_unique "pdf2md-enhanced"
         append_unique "pageindex"
         append_unique "basin-comparator-mcp"
@@ -204,6 +208,9 @@ resolve_services() {
       office|office-word)
         append_unique "office-word"
         ;;
+      docs|docs-converter|doc-converter)
+        append_unique "docs-converter"
+        ;;
       pdf2md|pdf2md-enhanced)
         append_unique "pdf2md-enhanced"
         ;;
@@ -214,7 +221,7 @@ resolve_services() {
         append_unique "basin-comparator-mcp"
         ;;
       *)
-        fail "Unsupported service: ${token} (expected: all|mcp|mcp-router|plan2|office-word|pdf2md-enhanced|pageindex|basin-comparator-mcp)"
+        fail "Unsupported service: ${token} (expected: all|mcp|mcp-router|plan2|office-word|docs-converter|pdf2md-enhanced|pageindex|basin-comparator-mcp)"
         ;;
     esac
   done
@@ -242,6 +249,9 @@ selected_images_for_services() {
   fi
   if service_enabled "office-word"; then
     SELECTED_IMAGES+=("aiplanner-office-word:latest")
+  fi
+  if service_enabled "docs-converter"; then
+    SELECTED_IMAGES+=("aiplanner-docs-converter:latest")
   fi
   if service_enabled "pdf2md-enhanced"; then
     SELECTED_IMAGES+=("aiplanner-pdf2md-enhanced:latest")
@@ -275,6 +285,7 @@ apply_env_defaults() {
   ROUTER_HOST_PORT="${ROUTER_HOST_PORT:-${ROUTER_HOST_PORT_DEFAULT}}"
   PLAN2_HOST_PORT="${PLAN2_HOST_PORT:-${PLAN2_HOST_PORT_DEFAULT}}"
   OFFICE_WORD_PROXY_PORT="${OFFICE_WORD_PROXY_PORT:-${OFFICE_WORD_PROXY_PORT_DEFAULT}}"
+  DOCS_CONVERTER_HOST_PORT="${DOCS_CONVERTER_HOST_PORT:-${DOCS_CONVERTER_HOST_PORT_DEFAULT}}"
   PDF2MD_ENHANCED_HOST_PORT="${PDF2MD_ENHANCED_HOST_PORT:-${PDF2MD_ENHANCED_HOST_PORT_DEFAULT}}"
   PAGEINDEX_HOST_PORT="${PAGEINDEX_HOST_PORT:-${PAGEINDEX_HOST_PORT_DEFAULT}}"
   MCP_TRANSPORT="${MCP_TRANSPORT:-${MCP_TRANSPORT_DEFAULT}}"
@@ -342,7 +353,7 @@ load_env_file() {
   [[ -n "${APP_HOST}" ]] || fail "--app-host is required"
   PLAN2_PUBLIC_BASE_URL="http://${APP_HOST}:${PLAN2_HOST_PORT}"
   export REMOTE_DIR
-  export ROUTER_HOST_PORT PLAN2_HOST_PORT OFFICE_WORD_PROXY_PORT
+  export ROUTER_HOST_PORT PLAN2_HOST_PORT OFFICE_WORD_PROXY_PORT DOCS_CONVERTER_HOST_PORT
   export PDF2MD_ENHANCED_HOST_PORT PAGEINDEX_HOST_PORT PLAN2_PUBLIC_BASE_URL
   export MCP_TRANSPORT FASTMCP_LOG_LEVEL
   export REMOTE_PIP_INDEX_URL LOCAL_PIP_INDEX_URL
@@ -391,8 +402,10 @@ proxy_env_args() {
 ensure_out_layout() {
   mkdir -p \
     "${OUT_DIR}" \
+    "${OUT_DIR}/data/documents" \
     "${OUT_DIR}/data/pdf2md-enhanced/input" \
     "${OUT_DIR}/data/pdf2md-enhanced/output" \
+    "${OUT_DIR}/config" \
     "${OUT_DIR}/plan2" \
     "${OUT_DIR}/images"
 
@@ -691,6 +704,7 @@ copy_static_artifacts() {
   fi
 
   write_remote_compose
+  cp "${SCRIPT_DIR}/config/external_mcps.yml" "${OUT_DIR}/config/external_mcps.yml"
   render_template "${SCRIPT_DIR}/plan2.config.aliyun.json" "${OUT_DIR}/plan2/config.json"
 
   if [[ "${WITH_PROXY}" == "true" ]]; then
@@ -721,6 +735,7 @@ Fixed design ports:
 - mcp-router: 8000
 - plan2: 5122
 - office-word: 9002
+- docs-converter: 9012
 - pdf2md-enhanced: 9010
 - pageindex: 9011
 - basin-comparator-mcp: 8139
@@ -807,6 +822,15 @@ build_images() {
       -f "${ROOT_DIR}/mcp/servers/office-word/Dockerfile" \
       -t aiplanner-office-word:latest \
       "${ROOT_DIR}/mcp/servers/office-word"
+  fi
+  if service_enabled "docs-converter"; then
+    docker build --platform "${BUILD_PLATFORM}" \
+      --build-arg PYTHON_BASE_IMAGE="${CACHE_PYTHON_311_IMAGE}" \
+      --build-arg PIP_INDEX_URL="${LOCAL_PIP_INDEX_URL}" \
+      --build-arg APT_MIRROR="${APT_MIRROR}" \
+      -f "${ROOT_DIR}/mcp/servers/docs-converter/Dockerfile" \
+      -t aiplanner-docs-converter:latest \
+      "${ROOT_DIR}/mcp/servers/docs-converter"
   fi
   if service_enabled "pdf2md-enhanced"; then
     docker build --platform "${BUILD_PLATFORM}" \
@@ -906,7 +930,7 @@ command_exists() {
 REMOTE_DIR="${REMOTE_DIR:?REMOTE_DIR is required}"
 REMOTE_PIP_INDEX_URL="${REMOTE_PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 WITH_PROXY="${WITH_PROXY:-false}"
-SERVICES="${SERVICES:-mcp-router plan2 office-word pdf2md-enhanced pageindex basin-comparator-mcp}"
+SERVICES="${SERVICES:-mcp-router plan2 office-word docs-converter pdf2md-enhanced pageindex basin-comparator-mcp}"
 cd "${REMOTE_DIR}"
 
 [[ -f ".env" ]] || fail ".env not found in ${REMOTE_DIR}"

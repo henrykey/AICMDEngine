@@ -8,7 +8,8 @@
 mcp/
 ├── servers/              # MCP 服务器实现
 │   ├── paddleocr/       # PaddleOCR MCP (OCR 识别)
-│   └── office-word/     # Office Word MCP (Word 文档操作)
+│   ├── office-word/     # Office Word MCP (Word 文档操作)
+│   └── docs-converter/  # 旧版文档格式转换
 │
 ├── proxy/               # HTTP/SSE 代理服务（Legacy SSE 协议）
 │   ├── src/             # 代理源码
@@ -30,6 +31,7 @@ cd /Users/kehongwei/workspace/AICMDEngine/mcp
 这会启动以下 HTTP/SSE 服务：
 - **PaddleOCR**: `http://localhost:9001`（`GET /sse` + `POST /messages`）
 - **Office Word**: `http://localhost:9002`（`GET /sse` + `POST /messages`）
+- **Docs Converter**: `http://localhost:9012`（`GET /sse` + `POST /messages`）
 
 ### 2. 配置 MCP Router 连接
 
@@ -83,6 +85,11 @@ mcp-router:
 - **项目**: https://github.com/GongRzhe/Office-Word-MCP-Server
 - **使用**: 创建、编辑 Word 文档
 
+### Docs Converter MCP
+- **功能**: 将旧版二进制 `.doc` 转换为 `.docx`
+- **端口**: 9012
+- **使用**: 为 Office Word MCP 或 MarkItDown 规范化输入格式
+
 ### PDF Extraction MCP
 - **功能**: PDF 内容提取
 - **端口**: 9003
@@ -103,6 +110,27 @@ servers:
     env:
       KEY: "value"
 ```
+
+### Router 运行时刷新
+
+Router 的外部 MCP 列表来自项目根目录的
+`config/external_mcps.yml`。修改该文件后无需重建或重启 Router，调用：
+
+```bash
+curl -X POST http://localhost:8000/v1/mcp/servers/refresh-config \
+  -H "X-MCP-Admin-Token: ${MCP_ADMIN_TOKEN}"
+```
+
+刷新会计算配置差异：
+
+- 新增服务会连接、发现工具并注册。
+- 修改服务会先验证新连接，成功后替换旧连接。
+- 删除服务会关闭连接并从 Registry 移除。
+- 新连接失败时保留原有可用服务。
+
+生产环境必须设置 `MCP_ADMIN_TOKEN`。开发环境未设置 token 时允许本地刷新。
+没有配置 `EXTERNAL_MCPS_FILE` 的旧部署仍可继续使用 `EXTERNAL_MCPS` 环境变量，
+但环境变量本身无法在容器运行期间修改。
 
 ## 优势
 

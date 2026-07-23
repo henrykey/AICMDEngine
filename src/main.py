@@ -9,6 +9,7 @@ from src.llm.provider_manager import LLMProviderManager
 from src.llm.config_loader import LLMConfigLoader
 from src.mcp.registry import MCPRegistry
 from src.mcp.external_mcp import ExternalMCPServer
+from src.mcp.external_mcp_manager import ExternalMCPManager, load_external_mcp_config
 from src.mcp_servers.membership_mcp import MembershipMCPServer
 from src.mcp_servers.test_mcp import TestMCPServer
 from src.mcp_servers.kb_mcp import KBMCP
@@ -116,33 +117,22 @@ async def startup_db_client():
         mcp_registry.register_mcp(bpmn_mcp)
         mcp_registry.register_mcp(form_mcp)
 
-        # Register external MCP servers from configuration
-        external_mcps_config = getattr(settings, 'external_mcps', {})
-        if external_mcps_config:
-            logger.info(f"Loading {len(external_mcps_config)} external MCP servers from configuration")
-            for mcp_name, mcp_config in external_mcps_config.items():
-                try:
-                    external_mcp = ExternalMCPServer(
-                        name=mcp_name,
-                        command=mcp_config.get("command"),
-                        args=mcp_config.get("args", []),
-                        transport=mcp_config.get("transport", "stdio"),
-                        url=mcp_config.get("url"),
-                        env=mcp_config.get("env"),
-                        timeout=mcp_config.get("timeout", 30)
-                    )
-                    # Keep full config for runtime metadata/query/injection usage.
-                    external_mcp.external_config = mcp_config
+        # Register external MCP servers from a reloadable file when configured.
+        if settings.external_mcps_file:
+            config_loader = lambda: load_external_mcp_config(settings.external_mcps_file)
+            logger.info("Loading external MCP servers from %s", settings.external_mcps_file)
+        else:
+            config_loader = lambda: dict(getattr(settings, "external_mcps", {}) or {})
+            logger.info("Loading external MCP servers from EXTERNAL_MCPS")
 
-                    # Initialize the external MCP (connects and discovers tools)
-                    await external_mcp.initialize()
-
-                    mcp_registry.register_mcp(external_mcp)
-                    logger.info(f"Successfully registered external MCP '{mcp_name}'")
-
-                except Exception as e:
-                    logger.error(f"Failed to register external MCP '{mcp_name}': {e}")
-                    # Continue with other MCPs
+        external_mcp_manager = ExternalMCPManager(
+            registry=mcp_registry,
+            config_loader=config_loader,
+        )
+        app.external_mcp_manager = external_mcp_manager
+        refresh_result = await external_mcp_manager.refresh()
+        if not refresh_result["success"]:
+            logger.error("External MCP startup refresh had failures: %s", refresh_result)
 
         # Set global MCP registry for dependency injection
         app.mcp_registry = mcp_registry
@@ -276,7 +266,9 @@ async def startup_db_client():
 @app.on_event("shutdown")
 async def shutdown_db_client():
     # Close external MCP servers
-    if hasattr(app, 'mcp_registry'):
+    if hasattr(app, "external_mcp_manager"):
+        await app.external_mcp_manager.close()
+    elif hasattr(app, 'mcp_registry'):
         mcp_registry = app.mcp_registry
         for mcp in mcp_registry.get_all_mcps():
             if isinstance(mcp, ExternalMCPServer):

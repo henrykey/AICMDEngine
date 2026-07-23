@@ -8,7 +8,7 @@
 
 - `docker-compose.mcp.yml`
   - AIPlanner 应用侧 Compose 骨架
-  - 包含 `mcp-router`、`plan2`、`office-word`、`pdf2md-enhanced`、`pageindex`
+  - 包含 `mcp-router`、`plan2`、`office-word`、`docs-converter`、`pdf2md-enhanced`、`pageindex`
 - `env.aliyun.example`
   - 阿里云部署环境变量模板
   - 同时服务于 Compose、systemd 和配置模板渲染
@@ -45,7 +45,7 @@ AIPlanner 内部访问：
 
 - `plan2 -> mcp-router:8000`
 - `mcp-router -> aliapp(172.18.157.7) 上的 mcp-proxy:9002`（仅在启用 proxy 时）
-- `mcp-router -> docker MCPs:9002/9010/9011`
+- `mcp-router -> docker MCPs:9002/9010/9011/9012`
 - `mcp-router -> membership-api:8080`
 - `mcp-router -> MongoDB@172.18.157.8:27017`
 
@@ -60,10 +60,14 @@ AIPlanner 内部访问：
 - `mcp-router` 不直接暴露公网
 - `mcp-proxy` 为可选能力，启用时以 host + `systemd` 方式运行
 - 默认不部署 `mcp-proxy`
-- `office-word` / `pdf2md-enhanced` / `pageindex` 通过 Docker Compose 部署
+- `office-word` / `docs-converter` / `pdf2md-enhanced` / `pageindex` 通过 Docker Compose 部署
 - AIPlanner 容器复用已存在的 `membership_default` Docker network，不新建独立 bridge
 - 端口是设计常量，不允许改动：
-  - `8000` `5122` `9002` `9010` `9011`
+  - `8000` `5122` `9002` `9010` `9011` `9012`
+
+外部 MCP 的 Router 注册配置位于 `deploy/config/external_mcps.yml`。修改并上传该文件后，
+调用 `POST /v1/mcp/servers/refresh-config` 即可动态刷新；生产环境请求必须携带
+`X-MCP-Admin-Token`，其值来自 `MCP_ADMIN_TOKEN`。
 - `membership` 负责登录鉴权托管，并作为 MCP 的主要客户端/消费者
 - 不在模板里硬编码 API key
 - LLM 配置优先读 MongoDB，环境变量仅作为 fallback
@@ -109,8 +113,8 @@ AIPlanner 内部访问：
 - `--app-host` 为必传
 - `--remote-dir` 默认固定为 `/opt/AICMDEngine`
 - `--mirror cn` 会为 Docker base image、`pip`、`npm`、`apt`、`apk` 启用国内镜像，默认优先使用清华源
-- `--service` 支持 `all`、`mcp`、`mcp-router`、`plan2`、`office-word`、`pdf2md-enhanced`、`pageindex`
-- `mcp` 会展开为 `office-word` + `pdf2md-enhanced` + `pageindex`
+- `--service` 支持 `all`、`mcp`、`mcp-router`、`plan2`、`office-word`、`docs-converter`、`pdf2md-enhanced`、`pageindex`
+- `mcp` 会展开为 `office-word` + `docs-converter` + `pdf2md-enhanced` + `pageindex`
 - `office-word` 与 `--with-proxy` 不能同时使用，因为两者都占用宿主机 `9002`
 - `plan2` 的运行时入口地址自动按 `http://<APP_HOST>:<PLAN2_HOST_PORT>` 生成
 
