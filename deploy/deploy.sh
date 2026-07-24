@@ -51,6 +51,7 @@ readonly IMAGE_NAMES=(
   aiplanner-docs-converter:latest
   aiplanner-pdf2md-enhanced:latest
   aiplanner-pageindex:latest
+  aiplanner-k-graph-mcp:latest
   aiplanner-basin-comparator-mcp:latest
 )
 readonly DEFAULT_DEPLOY_SERVICES=(
@@ -60,6 +61,7 @@ readonly DEFAULT_DEPLOY_SERVICES=(
   docs-converter
   pdf2md-enhanced
   pageindex
+  k-graph-mcp
   basin-comparator-mcp
 )
 
@@ -99,7 +101,7 @@ Notes:
   - `upload` syncs deploy/out to ${APP_HOST}:${REMOTE_DIR}.
   - `deploy` executes the remote install/start sequence on ${APP_HOST}.
   - `--mirror cn` enables China-friendly pip/npm/apt/apk mirrors and mirrored base images.
-  - `--service` supports `all`, `mcp`, `mcp-router`, `plan2`, `office-word`, `docs-converter`, `pdf2md-enhanced`, `pageindex`, `basin-comparator-mcp`.
+  - `--service` supports `all`, `mcp`, `mcp-router`, `plan2`, `office-word`, `docs-converter`, `pdf2md-enhanced`, `pageindex`, `k-graph-mcp`, `basin-comparator-mcp`.
 EOF
 }
 
@@ -197,6 +199,7 @@ resolve_services() {
         append_unique "docs-converter"
         append_unique "pdf2md-enhanced"
         append_unique "pageindex"
+        append_unique "k-graph-mcp"
         append_unique "basin-comparator-mcp"
         ;;
       router|mcp-router)
@@ -217,11 +220,14 @@ resolve_services() {
       pageindex)
         append_unique "pageindex"
         ;;
+      k-graph-mcp)
+        append_unique "k-graph-mcp"
+        ;;
       basin|basin-mcp|basin-comparator|basin-comparator-mcp)
         append_unique "basin-comparator-mcp"
         ;;
       *)
-        fail "Unsupported service: ${token} (expected: all|mcp|mcp-router|plan2|office-word|docs-converter|pdf2md-enhanced|pageindex|basin-comparator-mcp)"
+        fail "Unsupported service: ${token} (expected: all|mcp|mcp-router|plan2|office-word|docs-converter|pdf2md-enhanced|pageindex|k-graph-mcp|basin-comparator-mcp)"
         ;;
     esac
   done
@@ -258,6 +264,9 @@ selected_images_for_services() {
   fi
   if service_enabled "pageindex"; then
     SELECTED_IMAGES+=("aiplanner-pageindex:latest")
+  fi
+  if service_enabled "k-graph-mcp"; then
+    SELECTED_IMAGES+=("aiplanner-k-graph-mcp:latest")
   fi
   if service_enabled "basin-comparator-mcp"; then
     SELECTED_IMAGES+=("aiplanner-basin-comparator-mcp:latest")
@@ -738,6 +747,7 @@ Fixed design ports:
 - docs-converter: 9012
 - pdf2md-enhanced: 9010
 - pageindex: 9011
+- k-graph-mcp: 9013
 - basin-comparator-mcp: 8139
 
 Membership role:
@@ -850,6 +860,14 @@ build_images() {
       -t aiplanner-pageindex:latest \
       "${ROOT_DIR}/mcp/servers/PageIndex"
   fi
+  if service_enabled "k-graph-mcp"; then
+    docker build --platform "${BUILD_PLATFORM}" \
+      --build-arg PYTHON_BASE_IMAGE="${CACHE_PYTHON_312_IMAGE}" \
+      --build-arg PIP_INDEX_URL="${LOCAL_PIP_INDEX_URL}" \
+      -f "${ROOT_DIR}/mcp/servers/k-graph-mcp/Dockerfile" \
+      -t aiplanner-k-graph-mcp:latest \
+      "${ROOT_DIR}/mcp/servers/k-graph-mcp"
+  fi
   if service_enabled "basin-comparator-mcp"; then
     docker build --platform "${BUILD_PLATFORM}" \
       --build-arg PYTHON_BASE_IMAGE="${CACHE_PYTHON_312_IMAGE}" \
@@ -930,7 +948,7 @@ command_exists() {
 REMOTE_DIR="${REMOTE_DIR:?REMOTE_DIR is required}"
 REMOTE_PIP_INDEX_URL="${REMOTE_PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 WITH_PROXY="${WITH_PROXY:-false}"
-SERVICES="${SERVICES:-mcp-router plan2 office-word docs-converter pdf2md-enhanced pageindex basin-comparator-mcp}"
+SERVICES="${SERVICES:-mcp-router plan2 office-word docs-converter pdf2md-enhanced pageindex k-graph-mcp basin-comparator-mcp}"
 cd "${REMOTE_DIR}"
 
 [[ -f ".env" ]] || fail ".env not found in ${REMOTE_DIR}"

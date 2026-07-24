@@ -24,6 +24,10 @@ servers:
     url: http://host.docker.internal:9011
     timeout: 1300
     llm_provider: multmode
+  k-graph-mcp:
+    transport: http
+    url: http://k-graph-mcp:9013
+    timeout: 60
   basin-comparator:
     transport: http
     url: http://basin-comparator-mcp:8139

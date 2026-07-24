@@ -1,0 +1,91 @@
+{
+  "schema_version": "g29.0",
+  "scenarios": [
+    {
+      "id": "positive_basin_child_relation",
+      "tenant_id": "tenant-a",
+      "source_text": "红河盆地由北部甲凹陷和南部乙凹陷组成。",
+      "expected": {
+        "entities": [
+          {"name": "红河盆地", "type": "BASIN"},
+          {"name": "甲凹陷", "type": "SAG"},
+          {"name": "乙凹陷", "type": "SAG"}
+        ],
+        "relations": [
+          {"source": "红河盆地", "type": "HAS_PART", "target": "甲凹陷"},
+          {"source": "红河盆地", "type": "HAS_PART", "target": "乙凹陷"}
+        ],
+        "gaps": []
+      }
+    },
+    {
+      "id": "unsupported_cooccurrence",
+      "tenant_id": "tenant-a",
+      "source_text": "红河盆地是研究区。邻区资料另提到远山凹陷。",
+      "expected": {
+        "entities": [
+          {"name": "红河盆地", "type": "BASIN"},
+          {"name": "远山凹陷", "type": "SAG"}
+        ],
+        "relations": [],
+        "gaps": ["RELATION_UNSUPPORTED"]
+      }
+    },
+    {
+      "id": "ambiguous_parent_relation",
+      "tenant_id": "tenant-a",
+      "source_text": "甲凹陷位于红河盆地与蓝海盆地接合部，其归属尚有争议。",
+      "expected": {
+        "entities": [
+          {"name": "红河盆地", "type": "BASIN"},
+          {"name": "蓝海盆地", "type": "BASIN"},
+          {"name": "甲凹陷", "type": "SAG"}
+        ],
+        "relations": [],
+        "gaps": ["PARENT_AMBIGUOUS"]
+      }
+    },
+    {
+      "id": "no_child_in_selected_sources",
+      "tenant_id": "tenant-a",
+      "source_text": "本报告概述青山盆地的区域位置，未列出次级构造单元。",
+      "expected": {
+        "entities": [
+          {"name": "青山盆地", "type": "BASIN"}
+        ],
+        "relations": [],
+        "gaps": ["NO_CHILD_IN_SELECTED_SOURCES"]
+      }
+    },
+    {
+      "id": "overlapping_name_tenant_a",
+      "tenant_id": "tenant-a",
+      "source_text": "同名盆地包含东部凹陷。",
+      "expected": {
+        "entities": [
+          {"name": "同名盆地", "type": "BASIN"},
+          {"name": "东部凹陷", "type": "DEPRESSION"}
+        ],
+        "relations": [
+          {"source": "同名盆地", "type": "HAS_PART", "target": "东部凹陷"}
+        ],
+        "gaps": []
+      }
+    },
+    {
+      "id": "overlapping_name_tenant_b",
+      "tenant_id": "tenant-b",
+      "source_text": "同名盆地包含西部凹陷。",
+      "expected": {
+        "entities": [
+          {"name": "同名盆地", "type": "BASIN"},
+          {"name": "西部凹陷", "type": "DEPRESSION"}
+        ],
+        "relations": [
+          {"source": "同名盆地", "type": "HAS_PART", "target": "西部凹陷"}
+        ],
+        "gaps": []
+      }
+    }
+  ]
+}

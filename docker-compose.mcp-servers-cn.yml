@@ -35,6 +35,11 @@ services:
       args:
         PYTHON_BASE_IMAGE: ${CN_PYTHON_312_IMAGE:-docker.1ms.run/python:3.12-slim}
 
+  k-graph-mcp:
+    build:
+      args:
+        PYTHON_BASE_IMAGE: ${CN_PYTHON_312_IMAGE:-docker.1ms.run/python:3.12-slim}
+
   basin-comparator-mcp:
     build:
       args:

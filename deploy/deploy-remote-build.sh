@@ -39,6 +39,7 @@ DOCS_CONVERTER_IMAGE="aiplanner-docs-converter:latest"
 PDF2MD_ENH_IMAGE="aiplanner-pdf2md-enhanced:latest"
 PAGEINDEX_IMAGE="aiplanner-pageindex:latest"
 BASIN_MCP_IMAGE="aiplanner-basin-comparator-mcp:latest"
+K_GRAPH_MCP_IMAGE="aiplanner-k-graph-mcp:latest"
 
 PLAN2_HOST_PORT_DEFAULT="5122"
 ROUTER_HOST_PORT_DEFAULT="8000"
@@ -79,7 +80,7 @@ Options:
   --remote-dir DIR
   --remote-src-base DIR
   --source-package PATH
-  --scope router|plan2|mcp|all|mcp-router|office-word|docs-converter|pdf2md-enhanced|pageindex|basin-comparator-mcp
+  --scope router|plan2|mcp|all|mcp-router|office-word|docs-converter|pdf2md-enhanced|pageindex|k-graph-mcp|basin-comparator-mcp
   --platform linux/amd64|linux/arm64
   --mirror cn|PREFIX
   --upload-method auto|scp|rsync  (default: auto)
@@ -125,10 +126,10 @@ resolve_env_file() {
 
 validate_scope() {
   case "$1" in
-    router|plan2|mcp|all|mcp-router|office-word|docs-converter|pdf2md-enhanced|pageindex|basin|basin-mcp|basin-comparator|basin-comparator-mcp)
+    router|plan2|mcp|all|mcp-router|office-word|docs-converter|pdf2md-enhanced|pageindex|k-graph-mcp|basin|basin-mcp|basin-comparator|basin-comparator-mcp)
       ;;
     *)
-      fail "Invalid scope: $1 (expected: router|plan2|mcp|all|mcp-router|office-word|docs-converter|pdf2md-enhanced|pageindex|basin-comparator-mcp)"
+      fail "Invalid scope: $1 (expected: router|plan2|mcp|all|mcp-router|office-word|docs-converter|pdf2md-enhanced|pageindex|k-graph-mcp|basin-comparator-mcp)"
       ;;
   esac
 }
@@ -142,13 +143,16 @@ scope_to_services() {
       printf '%s\n' "plan2"
       ;;
     mcp)
-      printf '%s\n' "office-word" "docs-converter" "pdf2md-enhanced" "pageindex" "basin-comparator-mcp"
+      printf '%s\n' "office-word" "docs-converter" "pdf2md-enhanced" "pageindex" "k-graph-mcp" "basin-comparator-mcp"
       ;;
     all)
-      printf '%s\n' "mcp-router" "plan2" "office-word" "docs-converter" "pdf2md-enhanced" "pageindex" "basin-comparator-mcp"
+      printf '%s\n' "mcp-router" "plan2" "office-word" "docs-converter" "pdf2md-enhanced" "pageindex" "k-graph-mcp" "basin-comparator-mcp"
       ;;
     office-word|docs-converter|pdf2md-enhanced|pageindex)
       printf '%s\n' "$DEPLOY_SCOPE"
+      ;;
+    k-graph-mcp)
+      printf '%s\n' "k-graph-mcp"
       ;;
     basin|basin-mcp|basin-comparator|basin-comparator-mcp)
       printf '%s\n' "basin-comparator-mcp"
@@ -517,6 +521,18 @@ prepare_source_package() {
         AIPlanner/mcp/servers/PageIndex \
         AIPlanner/deploy/docker-compose.mcp.yml
       ;;
+    k-graph-mcp)
+      log "Using slim source package profile for scope=k-graph-mcp"
+      COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar -czf "$SOURCE_PACKAGE" \
+        --exclude='AIPlanner/mcp/servers/k-graph-mcp/.pytest_cache' \
+        --exclude='AIPlanner/mcp/servers/k-graph-mcp/**/__pycache__' \
+        --exclude='AIPlanner/mcp/servers/k-graph-mcp/**/*.pyc' \
+        --exclude='AIPlanner/mcp/servers/k-graph-mcp/build' \
+        --exclude='AIPlanner/mcp/servers/k-graph-mcp/*.egg-info' \
+        -C "$PROJECT_ROOT" \
+        AIPlanner/mcp/servers/k-graph-mcp \
+        AIPlanner/deploy/docker-compose.mcp.yml
+      ;;
     basin|basin-mcp|basin-comparator|basin-comparator-mcp)
       log "Using slim source package profile for scope=basin-comparator-mcp"
       COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar -czf "$SOURCE_PACKAGE" \
@@ -538,6 +554,7 @@ prepare_source_package() {
         AIPlanner/mcp/servers/docs-converter \
         AIPlanner/mcp/servers/PDF2MDEnhanced \
         AIPlanner/mcp/servers/PageIndex \
+        AIPlanner/mcp/servers/k-graph-mcp \
         basin-comparator/backend \
         AIPlanner/deploy/docker-compose.mcp.yml
       ;;
@@ -574,6 +591,7 @@ prepare_source_package() {
         AIPlanner/mcp/servers/docs-converter \
         AIPlanner/mcp/servers/PDF2MDEnhanced \
         AIPlanner/mcp/servers/PageIndex \
+        AIPlanner/mcp/servers/k-graph-mcp \
         basin-comparator/backend \
         AIPlanner/deploy/docker-compose.mcp.yml \
         AIPlanner/deploy/plan2.config.aliyun.json
@@ -614,6 +632,11 @@ source_package_matches_scope() {
     pageindex)
       archive_has_entry "$archive" "AIPlanner/mcp/servers/PageIndex/Dockerfile"
       ;;
+    k-graph-mcp)
+      archive_has_entry "$archive" "AIPlanner/mcp/servers/k-graph-mcp/Dockerfile" &&
+        archive_has_entry "$archive" "AIPlanner/mcp/servers/k-graph-mcp/pyproject.toml" &&
+        archive_has_entry "$archive" "AIPlanner/mcp/servers/k-graph-mcp/k_graph_mcp/__main__.py"
+      ;;
     basin|basin-mcp|basin-comparator|basin-comparator-mcp)
       archive_has_entry "$archive" "basin-comparator/backend/Dockerfile.mcp"
       ;;
@@ -622,6 +645,7 @@ source_package_matches_scope() {
         archive_has_entry "$archive" "AIPlanner/mcp/servers/docs-converter/Dockerfile" &&
         archive_has_entry "$archive" "AIPlanner/mcp/servers/PDF2MDEnhanced/Dockerfile" &&
         archive_has_entry "$archive" "AIPlanner/mcp/servers/PageIndex/Dockerfile" &&
+        archive_has_entry "$archive" "AIPlanner/mcp/servers/k-graph-mcp/Dockerfile" &&
         archive_has_entry "$archive" "basin-comparator/backend/Dockerfile.mcp"
       ;;
     all)
@@ -631,6 +655,7 @@ source_package_matches_scope() {
         archive_has_entry "$archive" "AIPlanner/mcp/servers/docs-converter/Dockerfile" &&
         archive_has_entry "$archive" "AIPlanner/mcp/servers/PDF2MDEnhanced/Dockerfile" &&
         archive_has_entry "$archive" "AIPlanner/mcp/servers/PageIndex/Dockerfile" &&
+        archive_has_entry "$archive" "AIPlanner/mcp/servers/k-graph-mcp/Dockerfile" &&
         archive_has_entry "$archive" "basin-comparator/backend/Dockerfile.mcp"
       ;;
   esac
@@ -666,6 +691,11 @@ validate_source_package() {
     pageindex)
       archive_has_entry "$archive" "AIPlanner/mcp/servers/PageIndex/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/PageIndex/Dockerfile"
       ;;
+    k-graph-mcp)
+      archive_has_entry "$archive" "AIPlanner/mcp/servers/k-graph-mcp/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/k-graph-mcp/Dockerfile"
+      archive_has_entry "$archive" "AIPlanner/mcp/servers/k-graph-mcp/pyproject.toml" || fail "source package missing AIPlanner/mcp/servers/k-graph-mcp/pyproject.toml"
+      archive_has_entry "$archive" "AIPlanner/mcp/servers/k-graph-mcp/k_graph_mcp/__main__.py" || fail "source package missing canonical K-Graph entrypoint"
+      ;;
     basin|basin-mcp|basin-comparator|basin-comparator-mcp)
       archive_has_entry "$archive" "basin-comparator/backend/Dockerfile.mcp" || fail "source package missing basin-comparator/backend/Dockerfile.mcp"
       ;;
@@ -674,6 +704,7 @@ validate_source_package() {
       archive_has_entry "$archive" "AIPlanner/mcp/servers/docs-converter/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/docs-converter/Dockerfile"
       archive_has_entry "$archive" "AIPlanner/mcp/servers/PDF2MDEnhanced/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/PDF2MDEnhanced/Dockerfile"
       archive_has_entry "$archive" "AIPlanner/mcp/servers/PageIndex/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/PageIndex/Dockerfile"
+      archive_has_entry "$archive" "AIPlanner/mcp/servers/k-graph-mcp/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/k-graph-mcp/Dockerfile"
       archive_has_entry "$archive" "basin-comparator/backend/Dockerfile.mcp" || fail "source package missing basin-comparator/backend/Dockerfile.mcp"
       ;;
     all)
@@ -683,6 +714,7 @@ validate_source_package() {
       archive_has_entry "$archive" "AIPlanner/mcp/servers/docs-converter/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/docs-converter/Dockerfile"
       archive_has_entry "$archive" "AIPlanner/mcp/servers/PDF2MDEnhanced/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/PDF2MDEnhanced/Dockerfile"
       archive_has_entry "$archive" "AIPlanner/mcp/servers/PageIndex/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/PageIndex/Dockerfile"
+      archive_has_entry "$archive" "AIPlanner/mcp/servers/k-graph-mcp/Dockerfile" || fail "source package missing AIPlanner/mcp/servers/k-graph-mcp/Dockerfile"
       archive_has_entry "$archive" "basin-comparator/backend/Dockerfile.mcp" || fail "source package missing basin-comparator/backend/Dockerfile.mcp"
       ;;
   esac
@@ -865,6 +897,17 @@ if [[ '$DEPLOY_SCOPE' == 'all' || '$DEPLOY_SCOPE' == 'mcp' || '$DEPLOY_SCOPE' ==
     -f mcp/servers/PageIndex/Dockerfile \
     -t '$PAGEINDEX_IMAGE' \
     mcp/servers/PageIndex
+fi
+
+if [[ '$DEPLOY_SCOPE' == 'all' || '$DEPLOY_SCOPE' == 'mcp' || '$DEPLOY_SCOPE' == 'k-graph-mcp' ]]; then
+  docker build \
+    --platform '$BUILD_PLATFORM' \
+    --pull=false \
+    --build-arg PYTHON_BASE_IMAGE='$python312_base_image' \
+    ${pip_index_url:+--build-arg PIP_INDEX_URL='$pip_index_url'} \
+    -f mcp/servers/k-graph-mcp/Dockerfile \
+    -t '$K_GRAPH_MCP_IMAGE' \
+    mcp/servers/k-graph-mcp
 fi
 
 if [[ '$DEPLOY_SCOPE' == 'all' || '$DEPLOY_SCOPE' == 'mcp' || '$DEPLOY_SCOPE' == 'basin' || '$DEPLOY_SCOPE' == 'basin-mcp' || '$DEPLOY_SCOPE' == 'basin-comparator' || '$DEPLOY_SCOPE' == 'basin-comparator-mcp' ]]; then

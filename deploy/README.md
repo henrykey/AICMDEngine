@@ -8,7 +8,7 @@
 
 - `docker-compose.mcp.yml`
   - AIPlanner 应用侧 Compose 骨架
-  - 包含 `mcp-router`、`plan2`、`office-word`、`docs-converter`、`pdf2md-enhanced`、`pageindex`
+  - 包含 `mcp-router`、`plan2`、`office-word`、`docs-converter`、`pdf2md-enhanced`、`pageindex`、`k-graph-mcp`
 - `env.aliyun.example`
   - 阿里云部署环境变量模板
   - 同时服务于 Compose、systemd 和配置模板渲染
@@ -45,7 +45,7 @@ AIPlanner 内部访问：
 
 - `plan2 -> mcp-router:8000`
 - `mcp-router -> aliapp(172.18.157.7) 上的 mcp-proxy:9002`（仅在启用 proxy 时）
-- `mcp-router -> docker MCPs:9002/9010/9011/9012`
+- `mcp-router -> docker MCPs:9002/9010/9011/9012/9013`
 - `mcp-router -> membership-api:8080`
 - `mcp-router -> MongoDB@172.18.157.8:27017`
 
@@ -60,10 +60,10 @@ AIPlanner 内部访问：
 - `mcp-router` 不直接暴露公网
 - `mcp-proxy` 为可选能力，启用时以 host + `systemd` 方式运行
 - 默认不部署 `mcp-proxy`
-- `office-word` / `docs-converter` / `pdf2md-enhanced` / `pageindex` 通过 Docker Compose 部署
+- `office-word` / `docs-converter` / `pdf2md-enhanced` / `pageindex` / `k-graph-mcp` 通过 Docker Compose 部署
 - AIPlanner 容器复用已存在的 `membership_default` Docker network，不新建独立 bridge
 - 端口是设计常量，不允许改动：
-  - `8000` `5122` `9002` `9010` `9011` `9012`
+  - `8000` `5122` `9002` `9010` `9011` `9012` `9013`
 
 外部 MCP 的 Router 注册配置位于 `deploy/config/external_mcps.yml`。修改并上传该文件后，
 调用 `POST /v1/mcp/servers/refresh-config` 即可动态刷新；生产环境请求必须携带
@@ -113,8 +113,8 @@ AIPlanner 内部访问：
 - `--app-host` 为必传
 - `--remote-dir` 默认固定为 `/opt/AICMDEngine`
 - `--mirror cn` 会为 Docker base image、`pip`、`npm`、`apt`、`apk` 启用国内镜像，默认优先使用清华源
-- `--service` 支持 `all`、`mcp`、`mcp-router`、`plan2`、`office-word`、`docs-converter`、`pdf2md-enhanced`、`pageindex`
-- `mcp` 会展开为 `office-word` + `docs-converter` + `pdf2md-enhanced` + `pageindex`
+- `--service` 支持 `all`、`mcp`、`mcp-router`、`plan2`、`office-word`、`docs-converter`、`pdf2md-enhanced`、`pageindex`、`k-graph-mcp`
+- `mcp` 会展开为 `office-word` + `docs-converter` + `pdf2md-enhanced` + `pageindex` + `k-graph-mcp`
 - `office-word` 与 `--with-proxy` 不能同时使用，因为两者都占用宿主机 `9002`
 - `plan2` 的运行时入口地址自动按 `http://<APP_HOST>:<PLAN2_HOST_PORT>` 生成
 
@@ -318,6 +318,12 @@ cp AIPlanner/deploy/env.aliyun.example AIPlanner/deploy/.env
 
 - `MEMBERSHIP_SERVICE_URL=http://membership-api:8080`
 - `MONGODB_URI=mongodb://172.18.157.8:27017/nl_tps?authSource=admin`
+
+部署 `k-graph-mcp` 时还必须设置：
+
+- `K_GRAPH_MCP_MONGODB_URI`：现有 MongoDB 中用于 G29 独立集合的数据库
+- `K_GRAPH_MCP_LLM_MODEL`：后台抽取使用的结构化输出模型
+- `OPENAI_API_KEY`，以及兼容服务需要时的 `OPENAI_BASE_URL`
 
 ### 2. 本地预检
 
