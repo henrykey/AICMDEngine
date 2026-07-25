@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Protocol
+import re
+import unicodedata
+from enum import StrEnum
+from typing import Any, Callable, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -13,8 +16,48 @@ from .docintel import HttpDocIntelProvider, ScopedPage, SourceInvariantError
 from .lifecycle import BuildContext, BuildOutcome
 
 
+class ExtractionFailureCategory(StrEnum):
+  PARSE = "PARSE"
+  SCHEMA = "SCHEMA"
+  GROUNDING = "GROUNDING"
+
+
+class ExtractionResponseParseError(ValueError):
+  """Provider content was not a JSON object; response text is never retained."""
+
+  def __init__(self, issue: str):
+    self.issue = issue
+    super().__init__(issue)
+
+
+class GroundingValidationError(ValueError):
+  def __init__(
+    self,
+    *,
+    field: str,
+    issue: str,
+    candidate: str | None = None,
+  ):
+    self.field = field
+    self.issue = issue
+    self.candidate = candidate
+    super().__init__(f"{field}: {issue}")
+
+
 class ExtractionValidationError(RuntimeError):
   """Structured output remained invalid after the single repair attempt."""
+
+  def __init__(
+    self,
+    category: ExtractionFailureCategory,
+    diagnostic: dict[str, Any] | None = None,
+  ):
+    self.category = category
+    self.diagnostic = diagnostic or {"category": category.value}
+    super().__init__(
+      "structured extraction failed validation after one repair attempt "
+      f"(category={category.value})"
+    )
 
 
 class ExtractionModel(BaseModel):
@@ -83,6 +126,7 @@ class ExtractedGap(ExtractionModel):
   code: str
   description: str
   evidence_quote: str | None = None
+  diagnostic: dict[str, Any] | None = None
 
 
 class ExtractedUnitResult(ExtractionModel):
@@ -148,19 +192,59 @@ class PageFactExtractor:
   ) -> ExtractedUnitResult:
     unit = source if isinstance(source, SourceUnit) else source_units(source)[0]
     previous_error: str | None = None
+    failure_category = ExtractionFailureCategory.SCHEMA
+    failure_detail: dict[str, Any] = {
+      "field": "response",
+      "issue": "invalid_schema",
+    }
     for repair in (False, True):
-      raw_value = self._client.extract(
-        unit,
-        repair=repair,
-        previous_error=previous_error,
-      )
       try:
+        raw_value = self._client.extract(
+          unit,
+          repair=repair,
+          previous_error=previous_error,
+        )
         raw = RawExtraction.model_validate(raw_value)
         return self._validate_and_transform(unit, raw)
-      except (ValidationError, ValueError) as exception:
-        previous_error = str(exception)
+      except ExtractionResponseParseError as exception:
+        failure_category = ExtractionFailureCategory.PARSE
+        failure_detail = {"field": "response", "issue": exception.issue}
+      except ValidationError as exception:
+        failure_category = ExtractionFailureCategory.SCHEMA
+        error = exception.errors(include_input=False)[0]
+        failure_detail = {
+          "field": ".".join(str(part) for part in error["loc"]),
+          "issue": str(error["type"]),
+        }
+      except GroundingValidationError as exception:
+        failure_category = ExtractionFailureCategory.GROUNDING
+        failure_detail = {
+          "field": exception.field,
+          "issue": exception.issue,
+        }
+        if exception.candidate is not None:
+          failure_detail["candidate"] = exception.candidate
+      except ValueError:
+        failure_category = ExtractionFailureCategory.GROUNDING
+        failure_detail = {
+          "field": "extraction",
+          "issue": "provenance_invariant",
+        }
+      previous_error = (
+        f"category={failure_category.value}; "
+        f"field={failure_detail['field']}; "
+        f"issue={failure_detail['issue']}"
+      )
     raise ExtractionValidationError(
-      "structured extraction failed validation after one repair attempt"
+      failure_category,
+      {
+        "category": failure_category.value,
+        **failure_detail,
+        "document_id": unit.document_id,
+        "document_version": unit.version,
+        "page_no": unit.page_no,
+        "unit_id": unit.unit_id,
+      },
     )
 
   def _validate_and_transform(
@@ -171,16 +255,47 @@ class PageFactExtractor:
     entity_by_ref: dict[str, RawEntity] = {}
     entities: list[ExtractedEntity] = []
     evidence: list[ExtractedEvidence] = []
+    gaps: list[ExtractedGap] = []
     for item in raw.entities:
-      if item.ref in entity_by_ref:
-        raise ValueError("entity refs must be unique")
-      _require_grounded(unit.text, item.original_mention, "entity mention")
-      _require_grounded(unit.text, item.display_name, "entity display name")
-      _require_grounded(unit.text, item.evidence_quote, "entity evidence")
-      if item.original_mention not in item.evidence_quote:
-        raise ValueError("entity evidence must contain the original mention")
-      for alias in item.aliases:
-        _require_grounded(unit.text, alias, "entity alias")
+      try:
+        if item.ref in entity_by_ref:
+          raise GroundingValidationError(
+            field="entities.ref",
+            issue="duplicate_ref",
+            candidate=_safe_candidate(item.ref),
+          )
+        _require_grounded(
+          unit.text,
+          item.original_mention,
+          field="entities.original_mention",
+          expose_candidate=True,
+        )
+        _require_grounded(
+          unit.text,
+          item.display_name,
+          field="entities.display_name",
+          expose_candidate=True,
+        )
+        _require_grounded(
+          unit.text,
+          item.evidence_quote,
+          field="entities.evidence_quote",
+        )
+        if item.original_mention not in item.evidence_quote:
+          raise GroundingValidationError(
+            field="entities.evidence_quote",
+            issue="missing_original_mention",
+          )
+        for alias in item.aliases:
+          _require_grounded(
+            unit.text,
+            alias,
+            field="entities.aliases",
+            expose_candidate=True,
+          )
+      except GroundingValidationError as exception:
+        gaps.append(_rejected_candidate_gap(unit, exception))
+        continue
       entity_by_ref[item.ref] = item
       entity_key = _stable_key(
         "entity",
@@ -206,26 +321,39 @@ class PageFactExtractor:
     for item in raw.relations:
       source = entity_by_ref.get(item.source_ref)
       target = entity_by_ref.get(item.target_ref)
-      if source is None or target is None:
-        raise ValueError("relation refs must resolve to entities in the unit")
-      if (
-        source.entity_type != GraphEntityType.BASIN
-        or target.entity_type not in {
-          GraphEntityType.SAG,
-          GraphEntityType.DEPRESSION,
-        }
-      ):
-        raise ValueError(
-          "HAS_PART must point from BASIN to SAG or DEPRESSION"
+      try:
+        if source is None or target is None:
+          raise GroundingValidationError(
+            field="relations.refs",
+            issue="rejected_or_missing_entity_ref",
+          )
+        if (
+          source.entity_type != GraphEntityType.BASIN
+          or target.entity_type not in {
+            GraphEntityType.SAG,
+            GraphEntityType.DEPRESSION,
+          }
+        ):
+          raise GroundingValidationError(
+            field="relations.relation_type",
+            issue="unsupported_direction",
+          )
+        _require_grounded(
+          unit.text,
+          item.evidence_quote,
+          field="relations.evidence_quote",
         )
-      _require_grounded(unit.text, item.evidence_quote, "relation evidence")
-      if (
-        source.original_mention not in item.evidence_quote
-        or target.original_mention not in item.evidence_quote
-      ):
-        raise ValueError(
-          "relation evidence must contain both original entity mentions"
-        )
+        if (
+          source.original_mention not in item.evidence_quote
+          or target.original_mention not in item.evidence_quote
+        ):
+          raise GroundingValidationError(
+            field="relations.evidence_quote",
+            issue="missing_relation_mentions",
+          )
+      except GroundingValidationError as exception:
+        gaps.append(_rejected_candidate_gap(unit, exception))
+        continue
       source_key = _stable_key(
         "entity",
         unit.tenant_id,
@@ -259,17 +387,21 @@ class PageFactExtractor:
         quote=item.evidence_quote,
       ))
 
-    gaps = [
+    gaps.extend(
       ExtractedGap(
         code=item.code,
         description=item.description,
         evidence_quote=item.evidence_quote,
       )
       for item in raw.gaps
-    ]
+    )
     for gap in gaps:
       if gap.evidence_quote is not None:
-        _require_grounded(unit.text, gap.evidence_quote, "gap evidence")
+        _require_grounded(
+          unit.text,
+          gap.evidence_quote,
+          field="gaps.evidence_quote",
+        )
     if not relations and not gaps:
       gaps.append(ExtractedGap(
         code="NO_SUPPORTED_CHILD_RELATION",
@@ -291,25 +423,38 @@ class ScopedExtractionRunner:
     self,
     *,
     provider: HttpDocIntelProvider,
-    extractor: PageFactExtractor,
+    extractor: PageFactExtractor | None = None,
+    extractor_factory: Callable[[Any], PageFactExtractor] | None = None,
     max_source_chars: int = 24_000,
     overlap_chars: int = 500,
     publisher: GraphPublisherProtocol | None = None,
   ):
+    if extractor is None and extractor_factory is None:
+      raise ValueError("extractor or extractor_factory is required")
     if max_source_chars < 1:
       raise ValueError("max_source_chars must be positive")
     if overlap_chars < 0 or overlap_chars >= max_source_chars:
       raise ValueError("overlap_chars must be smaller than max_source_chars")
     self._provider = provider
     self._extractor = extractor
+    self._extractor_factory = extractor_factory
     self._max_source_chars = max_source_chars
     self._overlap_chars = overlap_chars
     self._publisher = publisher
 
   def run(self, context: BuildContext) -> BuildOutcome:
+    extractor = (
+      self._extractor_factory(context.record)
+      if self._extractor_factory is not None
+      else self._extractor
+    )
+    if extractor is None:
+      raise RuntimeError("extractor is not configured")
     page_count = 0
     relation_count = 0
     gap_count = 0
+    valid_unit_count = 0
+    last_extraction_diagnostic: dict[str, Any] | None = None
     for page in self._provider.iter_pages(context.record):
       page_count += 1
       for unit in source_units(
@@ -320,14 +465,47 @@ class ScopedExtractionRunner:
         context.raise_if_cancelled()
         saved = context.checkpoint_result(unit.unit_id)
         if saved is None:
-          result = self._extractor.extract(unit)
+          try:
+            result = extractor.extract(unit)
+            valid_unit_count += 1
+          except ExtractionValidationError as exception:
+            last_extraction_diagnostic = exception.diagnostic
+            result = ExtractedUnitResult(
+              entities=(),
+              relations=(),
+              evidence=(),
+              gaps=(ExtractedGap(
+                code="UNIT_EXTRACTION_REJECTED",
+                description=(
+                  f"{exception.diagnostic.get('field', 'response')}: "
+                  f"{exception.diagnostic.get('issue', 'invalid_output')}"
+                ),
+                diagnostic=exception.diagnostic,
+              ),),
+            )
           context.checkpoint(unit.unit_id, result.model_dump(mode="json"))
         else:
           result = ExtractedUnitResult.model_validate(saved)
+          rejected_gap = next((
+            gap
+            for gap in result.gaps
+            if gap.code == "UNIT_EXTRACTION_REJECTED"
+          ), None)
+          if rejected_gap is None:
+            valid_unit_count += 1
+          else:
+            last_extraction_diagnostic = rejected_gap.diagnostic
         relation_count += len(result.relations)
         gap_count += len(result.gaps)
     if page_count == 0:
       raise SourceInvariantError("DocIntel returned no normalized pages")
+    if valid_unit_count == 0 and last_extraction_diagnostic is not None:
+      raise ExtractionValidationError(
+        ExtractionFailureCategory(
+          last_extraction_diagnostic.get("category", "SCHEMA")
+        ),
+        last_extraction_diagnostic,
+      )
     outcome = (
       BuildOutcome.COMPLETED_WITH_GAPS
       if relation_count == 0 or gap_count > 0
@@ -344,13 +522,22 @@ class ScopedExtractionRunner:
 
 
 class OpenAIStructuredExtractionClient:
-  """OpenAI-compatible JSON-schema adapter; tests inject a fake client."""
+  """Provider-aware structured-output adapter; tests inject a fake client."""
 
-  def __init__(self, *, client: Any, model: str):
+  def __init__(
+    self,
+    *,
+    client: Any,
+    model: str,
+    provider: str | None = None,
+    base_url: str | None = None,
+  ):
     if not model or not model.strip():
       raise ValueError("model is required")
     self._client = client
     self._model = model
+    self._provider = provider
+    self._base_url = base_url
 
   def extract(
     self,
@@ -359,21 +546,30 @@ class OpenAIStructuredExtractionClient:
     repair: bool,
     previous_error: str | None,
   ) -> dict[str, Any]:
+    schema = json.dumps(
+      RawExtraction.model_json_schema(),
+      ensure_ascii=False,
+      separators=(",", ":"),
+    )
     system = (
       "Extract only source-grounded BasinComparator facts. Allowed entities: "
       "BASIN, SAG, DEPRESSION. Allowed directed relation: BASIN HAS_PART "
-      "SAG/DEPRESSION. Co-occurrence is not relation evidence. Copy exact "
-      "bounded source quotes and never infer beyond the supplied text."
+      "SAG/DEPRESSION. Co-occurrence is not relation evidence. Return only one "
+      "JSON object matching the JSON Schema below, without Markdown or prose. "
+      "Every original_mention, display_name, alias, and evidence_quote must be "
+      "an exact substring of the supplied source text. Every evidence_quote "
+      "must contain its referenced exact mentions. Never infer beyond the "
+      f"supplied text.\nJSON Schema:\n{schema}"
     )
     if repair:
       system += (
         " Repair the prior invalid JSON result using the schema and grounding "
         f"rules. Validation error: {previous_error}"
       )
-    response = self._client.chat.completions.create(
-      model=self._model,
-      temperature=0,
-      messages=[
+    request: dict[str, Any] = {
+      "model": self._model,
+      "temperature": 0,
+      "messages": [
         {"role": "system", "content": system},
         {
           "role": "user",
@@ -383,21 +579,46 @@ class OpenAIStructuredExtractionClient:
           ),
         },
       ],
-      response_format={
+    }
+    if _uses_portable_json_object(self._provider, self._base_url):
+      request["response_format"] = {"type": "json_object"}
+      if _is_qwen(self._provider, self._base_url):
+        request["extra_body"] = {"enable_thinking": False}
+    else:
+      request["response_format"] = {
         "type": "json_schema",
         "json_schema": {
           "name": "basin_graph_extraction",
           "strict": True,
           "schema": RawExtraction.model_json_schema(),
         },
-      },
-    )
+      }
+    response = self._client.chat.completions.create(**request)
     content = response.choices[0].message.content
     try:
       value = json.loads(content)
     except (json.JSONDecodeError, TypeError):
-      return {"invalid_structured_response": content}
+      raise ExtractionResponseParseError(
+        "invalid_json"
+      ) from None
+    if not isinstance(value, dict):
+      raise ExtractionResponseParseError(
+        "not_json_object"
+      )
     return value
+
+
+def _uses_portable_json_object(
+  provider: str | None,
+  base_url: str | None,
+) -> bool:
+  identity = f"{provider or ''} {base_url or ''}".lower()
+  return "deepseek" in identity or "dashscope" in identity
+
+
+def _is_qwen(provider: str | None, base_url: str | None) -> bool:
+  identity = f"{provider or ''} {base_url or ''}".lower()
+  return "qwen" in identity or "dashscope" in identity
 
 
 def source_units(
@@ -447,9 +668,51 @@ def _segments(
   )
 
 
-def _require_grounded(source: str, value: str, label: str) -> None:
+def _require_grounded(
+  source: str,
+  value: str,
+  *,
+  field: str,
+  expose_candidate: bool = False,
+) -> None:
   if value not in source:
-    raise ValueError(f"{label} is not an exact substring of the source unit")
+    raise GroundingValidationError(
+      field=field,
+      issue="not_exact_source_substring",
+      candidate=_safe_candidate(value) if expose_candidate else None,
+    )
+
+
+def _safe_candidate(value: str) -> str | None:
+  normalized = unicodedata.normalize("NFKC", value)
+  normalized = re.sub(r"\s+", " ", normalized).strip()
+  if not normalized:
+    return None
+  return normalized[:48]
+
+
+def _rejected_candidate_gap(
+  unit: SourceUnit,
+  exception: GroundingValidationError,
+) -> ExtractedGap:
+  diagnostic: dict[str, Any] = {
+    "category": ExtractionFailureCategory.GROUNDING.value,
+    "field": exception.field,
+    "issue": exception.issue,
+    "document_id": unit.document_id,
+    "document_version": unit.version,
+    "page_no": unit.page_no,
+    "unit_id": unit.unit_id,
+  }
+  if exception.candidate is not None:
+    diagnostic["candidate"] = exception.candidate
+  return ExtractedGap(
+    code="REJECTED_EXTRACTION_CANDIDATE",
+    description=(
+      f"{exception.field}: {exception.issue}"
+    ),
+    diagnostic=diagnostic,
+  )
 
 
 def _stable_key(*parts: str) -> str:

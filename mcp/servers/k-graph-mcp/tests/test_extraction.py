@@ -1,4 +1,6 @@
+import json
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -6,8 +8,11 @@ from k_graph_mcp.contracts import BuildStatus
 from k_graph_mcp.docintel import ScopedChunk, ScopedPage
 from k_graph_mcp.extraction import (
   ExtractionValidationError,
+  ExtractionResponseParseError,
+  OpenAIStructuredExtractionClient,
   PageFactExtractor,
   ScopedExtractionRunner,
+  source_units,
 )
 from k_graph_mcp.graph_store import GraphPublisher, InMemoryGraphStore
 from k_graph_mcp.lifecycle import (
@@ -37,7 +42,7 @@ def test_extracts_only_supported_directed_relation_with_evidence() -> None:
   assert "page:1/chunk:chunk-1" in result.evidence[0].source_locator
 
 
-def test_invalid_structured_result_gets_exactly_one_repair_attempt() -> None:
+def test_invalid_relation_is_isolated_without_discarding_valid_entities() -> None:
   invalid = valid_extraction()
   invalid["relations"][0]["evidence_quote"] = "红河盆地"
   client = SequenceExtractionClient([invalid, valid_extraction()])
@@ -45,19 +50,122 @@ def test_invalid_structured_result_gets_exactly_one_repair_attempt() -> None:
 
   result = extractor.extract(page())
 
-  assert len(result.relations) == 1
-  assert client.repair_flags == [False, True]
+  assert result.relations == ()
+  assert len(result.entities) == 2
+  assert result.gaps[0].diagnostic["field"] == "relations.evidence_quote"
+  assert client.repair_flags == [False]
 
 
-def test_repeated_invalid_result_is_non_retryable_validation_failure() -> None:
+def test_invalid_entity_candidate_does_not_fail_the_unit() -> None:
   invalid = valid_extraction()
   invalid["entities"][0]["original_mention"] = "不存在的盆地"
   client = SequenceExtractionClient([invalid, invalid])
 
-  with pytest.raises(ExtractionValidationError):
+  result = PageFactExtractor(client=client).extract(page())
+
+  assert len(result.entities) == 1
+  assert result.gaps[0].diagnostic["field"] == "entities.original_mention"
+  assert client.repair_flags == [False]
+
+
+def test_exact_source_grounding_remains_required() -> None:
+  invalid = valid_extraction()
+  invalid["entities"][0]["display_name"] = "规范化红河盆地"
+  result = PageFactExtractor(
+    client=SequenceExtractionClient([invalid])
+  ).extract(page())
+
+  assert [item.display_name for item in result.entities] == ["北部凹陷"]
+  assert result.relations == ()
+  assert result.gaps[0].diagnostic == {
+    "category": "GROUNDING",
+    "field": "entities.display_name",
+    "issue": "not_exact_source_substring",
+    "candidate": "规范化红河盆地",
+    "document_id": "doc-1",
+    "document_version": 3,
+    "page_no": 1,
+    "unit_id": "doc-1/v3/p1/chunk-1/s0",
+  }
+  assert all(
+    item.display_name != "规范化红河盆地"
+    for item in result.entities
+  )
+
+
+def test_terminal_schema_failure_is_sanitized() -> None:
+  marker = "sensitive-provider-output"
+  client = SequenceExtractionClient([
+    {"unexpected": marker},
+    {"unexpected": marker},
+  ])
+
+  with pytest.raises(ExtractionValidationError) as caught:
     PageFactExtractor(client=client).extract(page())
 
-  assert client.repair_flags == [False, True]
+  assert caught.value.category == "SCHEMA"
+  assert marker not in str(caught.value)
+
+
+def test_terminal_parse_failure_is_sanitized() -> None:
+  client = RaisingExtractionClient(
+    ExtractionResponseParseError("provider response is not valid JSON")
+  )
+
+  with pytest.raises(ExtractionValidationError) as caught:
+    PageFactExtractor(client=client).extract(page())
+
+  assert caught.value.category == "PARSE"
+  assert str(caught.value).endswith("(category=PARSE)")
+
+
+@pytest.mark.parametrize(
+  ("provider", "base_url", "disable_thinking"),
+  [
+    ("Qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1", True),
+    ("DeepSeek", "https://api.deepseek.com/v1", False),
+  ],
+)
+def test_json_object_providers_receive_portable_structured_request(
+  provider,
+  base_url,
+  disable_thinking,
+) -> None:
+  client = CapturingOpenAIClient(valid_extraction())
+  adapter = OpenAIStructuredExtractionClient(
+    client=client,
+    model="provider-model",
+    provider=provider,
+    base_url=base_url,
+  )
+
+  adapter.extract(source_units(page())[0], repair=False, previous_error=None)
+
+  request = client.requests[0]
+  assert request["response_format"] == {"type": "json_object"}
+  assert ("extra_body" in request) is disable_thinking
+  if disable_thinking:
+    assert request["extra_body"] == {"enable_thinking": False}
+  system = request["messages"][0]["content"]
+  assert "JSON" in system
+  assert '"entities"' in system
+  assert "exact substring" in system
+
+
+def test_native_openai_retains_strict_json_schema_request() -> None:
+  client = CapturingOpenAIClient(valid_extraction())
+  adapter = OpenAIStructuredExtractionClient(
+    client=client,
+    model="gpt-test",
+    provider="OpenAI",
+    base_url="https://api.openai.com/v1",
+  )
+
+  adapter.extract(source_units(page())[0], repair=False, previous_error=None)
+
+  response_format = client.requests[0]["response_format"]
+  assert response_format["type"] == "json_schema"
+  assert response_format["json_schema"]["strict"] is True
 
 
 def test_runner_checkpoints_validated_result_and_reuses_it_after_restart() -> None:
@@ -91,6 +199,53 @@ def test_runner_checkpoints_validated_result_and_reuses_it_after_restart() -> No
   assert len(client.repair_flags) == 1
   saved = context.checkpoint_result("doc-1/v3/p1/chunk-1/s0")
   assert saved["relations"][0]["relation_type"] == "HAS_PART"
+
+
+def test_runner_resolves_extractor_for_the_current_build() -> None:
+  build_context = context()
+  client = SequenceExtractionClient([valid_extraction()])
+  resolved_build_ids = []
+  runner = ScopedExtractionRunner(
+    provider=FakeDocIntelProvider([page()]),
+    extractor_factory=lambda record: (
+      resolved_build_ids.append(record.build_id)
+      or PageFactExtractor(client=client)
+    ),
+  )
+
+  assert runner.run(build_context) == BuildOutcome.COMPLETED
+  assert resolved_build_ids == [build_context.record.build_id]
+
+
+def test_runner_isolates_one_invalid_unit_and_publishes_partial_result() -> None:
+  build_context = context()
+  second_page = page().model_copy(update={
+    "page_no": 2,
+    "chunks": (
+      ScopedChunk(
+        chunk_id="chunk-2",
+        page_no=2,
+        chunk_text="红河盆地包括北部凹陷。",
+      ),
+    ),
+  })
+  runner = ScopedExtractionRunner(
+    provider=FakeDocIntelProvider([page(), second_page]),
+    extractor=PageFactExtractor(client=UnitSelectiveExtractionClient()),
+  )
+
+  outcome = runner.run(build_context)
+
+  assert outcome == BuildOutcome.COMPLETED_WITH_GAPS
+  rejected = build_context.checkpoint_result(
+    "doc-1/v3/p1/chunk-1/s0"
+  )
+  valid = build_context.checkpoint_result(
+    "doc-1/v3/p2/chunk-2/s0"
+  )
+  assert rejected["gaps"][0]["code"] == "UNIT_EXTRACTION_REJECTED"
+  assert rejected["gaps"][0]["diagnostic"]["category"] == "PARSE"
+  assert valid["relations"][0]["relation_type"] == "HAS_PART"
 
 
 def test_no_supported_relation_is_a_semantic_gap_not_failure() -> None:
@@ -138,6 +293,38 @@ class SequenceExtractionClient:
   def extract(self, unit, *, repair, previous_error):
     self.repair_flags.append(repair)
     return self.responses.pop(0)
+
+
+class RaisingExtractionClient:
+  def __init__(self, exception):
+    self.exception = exception
+
+  def extract(self, unit, *, repair, previous_error):
+    raise self.exception
+
+
+class UnitSelectiveExtractionClient:
+  def extract(self, unit, *, repair, previous_error):
+    if unit.page_no == 1:
+      raise ExtractionResponseParseError("invalid_json")
+    return valid_extraction()
+
+
+class CapturingOpenAIClient:
+  def __init__(self, response):
+    self.requests = []
+    self.chat = SimpleNamespace(
+      completions=SimpleNamespace(create=self._create),
+    )
+    self._content = json.dumps(response, ensure_ascii=False)
+
+  def _create(self, **kwargs):
+    self.requests.append(kwargs)
+    return SimpleNamespace(
+      choices=[
+        SimpleNamespace(message=SimpleNamespace(content=self._content))
+      ],
+    )
 
 
 class FakeDocIntelProvider:

@@ -18,12 +18,12 @@ class RecordingBackend:
   def __init__(self):
     self.calls: list[tuple[str, object]] = []
 
-  def start(self, scope, service_token=None):
-    self.calls.append(("start", scope))
+  def start(self, scope, service_token=None, vlm_config=None):
+    self.calls.append(("start", (scope, vlm_config)))
     return {"build_id": "build-1", "status": "QUEUED"}
 
-  def status(self, build_id, scope, service_token=None):
-    self.calls.append(("status", (build_id, scope)))
+  def status(self, build_id, scope, service_token=None, vlm_config=None):
+    self.calls.append(("status", (build_id, scope, vlm_config)))
     return {"build_id": build_id, "status": "RUNNING"}
 
   def query(self, scope, *, graph_version_id, basin, target):
@@ -42,7 +42,28 @@ def test_start_validates_scope_before_calling_backend() -> None:
   result = tools.start_basin_graph_build(scope, "service-token")
 
   assert result["build_id"] == "build-1"
-  assert backend.calls == [("start", scope)]
+  assert backend.calls == [("start", (scope, None))]
+
+
+def test_start_forwards_runtime_provider_without_persisting_it_in_scope() -> None:
+  backend = RecordingBackend()
+  tools = BasinGraphTools(backend=backend)
+  scope = selected_scope()
+  runtime_provider = {
+    "provider": "Qwen",
+    "model": "qwen-plus",
+    "base_url": "https://dashscope.example/v1",
+    "api_key": "runtime-secret",
+  }
+
+  tools.start_basin_graph_build(
+    scope,
+    "service-token",
+    vlm_config=runtime_provider,
+  )
+
+  assert backend.calls == [("start", (scope, runtime_provider))]
+  assert "runtime-secret" not in scope.model_dump_json()
 
 
 def test_tampered_document_never_reaches_backend() -> None:
@@ -69,7 +90,7 @@ def test_status_and_query_use_the_same_selected_document_scope() -> None:
   tools.query_basin_graph(scope, basin="红河盆地")
 
   assert backend.calls == [
-    ("status", ("build-1", scope)),
+    ("status", ("build-1", scope, None)),
     ("query", (scope, None, "红河盆地", None)),
   ]
 
@@ -95,6 +116,15 @@ def test_mcp_uses_explicit_http_bind_settings() -> None:
 
   assert mcp.settings.host == "0.0.0.0"
   assert mcp.settings.port == 9013
+
+
+def test_start_tool_schema_accepts_router_runtime_provider_config() -> None:
+  mcp = create_mcp(backend=RecordingBackend())
+
+  tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
+
+  assert "vlm_config" in tools["start_basin_graph_build"].inputSchema["properties"]
+  assert "vlm_config" in tools["get_basin_graph_build_status"].inputSchema["properties"]
 
 
 def selected_scope() -> AuthorizedScopeEnvelope:

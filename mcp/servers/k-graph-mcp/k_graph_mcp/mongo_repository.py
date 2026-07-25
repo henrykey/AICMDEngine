@@ -443,6 +443,7 @@ class MongoBuildRepository:
     worker_id: str,
     error_code: str,
     now: datetime,
+    error_diagnostic: dict[str, Any] | None = None,
   ) -> None:
     self._finish(
       build_id,
@@ -452,6 +453,7 @@ class MongoBuildRepository:
       error_code=error_code,
       now=now,
       reusable=False,
+      error_diagnostic=error_diagnostic,
     )
 
   def request_cancel(
@@ -565,6 +567,7 @@ class MongoBuildRepository:
     error_code: str,
     now: datetime,
     reusable: bool,
+    error_diagnostic: dict[str, Any] | None = None,
   ) -> None:
     result = self._builds.update_one(
       {
@@ -580,6 +583,7 @@ class MongoBuildRepository:
           "lease_owner": None,
           "lease_expires_at": None,
           "error_code": error_code,
+          "error_diagnostic": error_diagnostic,
           "completed_at": now,
           "updated_at": now,
           "reusable": reusable,
@@ -615,6 +619,7 @@ def _record(document: dict[str, Any]) -> BuildRecord:
     started_at=_aware(document.get("started_at")),
     completed_at=_aware(document.get("completed_at")),
     error_code=document.get("error_code"),
+    error_diagnostic=document.get("error_diagnostic"),
     checkpoint_results={
       value["unit_id"]: value["result"]
       for value in document.get("checkpoint_results", {}).values()

@@ -17,6 +17,7 @@ class GraphBackend(Protocol):
     self,
     scope: AuthorizedScopeEnvelope,
     service_token: str | None = None,
+    vlm_config: dict[str, Any] | None = None,
   ) -> dict[str, Any]: ...
 
   def status(
@@ -24,6 +25,7 @@ class GraphBackend(Protocol):
     build_id: str,
     scope: AuthorizedScopeEnvelope,
     service_token: str | None = None,
+    vlm_config: dict[str, Any] | None = None,
   ) -> dict[str, Any]: ...
 
   def query(
@@ -41,6 +43,7 @@ class UnavailableGraphBackend:
     self,
     scope: AuthorizedScopeEnvelope,
     service_token: str | None = None,
+    vlm_config: dict[str, Any] | None = None,
   ) -> dict[str, Any]:
     raise RuntimeError("G29.2 asynchronous build backend is not implemented")
 
@@ -49,6 +52,7 @@ class UnavailableGraphBackend:
     build_id: str,
     scope: AuthorizedScopeEnvelope,
     service_token: str | None = None,
+    vlm_config: dict[str, Any] | None = None,
   ) -> dict[str, Any]:
     raise RuntimeError("G29.2 asynchronous build backend is not implemented")
 
@@ -71,24 +75,26 @@ class BasinGraphTools:
     self,
     scope: AuthorizedScopeEnvelope,
     service_token: str,
+    vlm_config: dict[str, Any] | None = None,
   ) -> dict[str, Any]:
     if not service_token or not service_token.strip():
       raise ValueError("service_token is required")
     self._validate_scope(scope)
-    return self._backend.start(scope, service_token)
+    return self._backend.start(scope, service_token, vlm_config)
 
   def get_basin_graph_build_status(
     self,
     build_id: str,
     scope: AuthorizedScopeEnvelope,
     service_token: str,
+    vlm_config: dict[str, Any] | None = None,
   ) -> dict[str, Any]:
     if not build_id or not build_id.strip():
       raise ValueError("build_id is required")
     if not service_token or not service_token.strip():
       raise ValueError("service_token is required")
     self._validate_scope(scope)
-    return self._backend.status(build_id, scope, service_token)
+    return self._backend.status(build_id, scope, service_token, vlm_config)
 
   def query_basin_graph(
     self,

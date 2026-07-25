@@ -106,6 +106,32 @@ def test_status_scope_mismatch_does_not_probe_by_global_build_id() -> None:
   }
 
 
+def test_failure_persists_bounded_extraction_diagnostic() -> None:
+  collection = MagicMock()
+  collection.update_one.return_value = SimpleNamespace(matched_count=1)
+  diagnostic = {
+    "category": "SCHEMA",
+    "field": "entities.0.entity_type",
+    "issue": "enum",
+    "document_id": "doc-1",
+    "document_version": 3,
+    "page_no": 1,
+    "unit_id": "doc-1/v3/p1/chunk-1/s0",
+  }
+
+  MongoBuildRepository(collection).fail(
+    "build-1",
+    tenant_id="12",
+    worker_id="worker-1",
+    error_code="EXTRACTION_VALIDATION_FAILED",
+    error_diagnostic=diagnostic,
+    now=datetime(2026, 7, 24, tzinfo=timezone.utc),
+  )
+
+  update = collection.update_one.call_args.args[1]["$set"]
+  assert update["error_diagnostic"] == diagnostic
+
+
 def scope() -> AuthorizedScopeEnvelope:
   unsigned = AuthorizedScopeEnvelope(
     request_id="request-1",

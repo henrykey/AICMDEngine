@@ -73,6 +73,7 @@ class BuildRecord:
   error_code: str | None = None
   checkpoint_results: dict[str, Any] = field(default_factory=dict)
   graph_version_id: str | None = None
+  error_diagnostic: dict[str, Any] | None = None
 
 
 class BuildRepository(Protocol):
@@ -177,6 +178,7 @@ class BuildRepository(Protocol):
     worker_id: str,
     error_code: str,
     now: datetime,
+    error_diagnostic: dict[str, Any] | None = None,
   ) -> None: ...
 
   def request_cancel(
@@ -256,6 +258,23 @@ class VolatileServiceTokenRegistry:
         "fresh Membership service authorization is required"
       )
     return token
+
+
+class VolatileModelConfigRegistry:
+  """Process-memory model settings; provider credentials are never persisted."""
+
+  def __init__(self):
+    self._configs: dict[str, dict[str, Any]] = {}
+    self._lock = threading.Lock()
+
+  def put(self, build_id: str, config: dict[str, Any]) -> None:
+    with self._lock:
+      self._configs[build_id] = dict(config)
+
+  def get(self, build_id: str) -> dict[str, Any] | None:
+    with self._lock:
+      config = self._configs.get(build_id)
+    return None if config is None else dict(config)
 
 
 class InMemoryBuildRepository:
@@ -583,6 +602,7 @@ class InMemoryBuildRepository:
     worker_id: str,
     error_code: str,
     now: datetime,
+    error_diagnostic: dict[str, Any] | None = None,
   ) -> None:
     self._finish(
       build_id,
@@ -590,6 +610,7 @@ class InMemoryBuildRepository:
       worker_id=worker_id,
       status=BuildStatus.FAILED,
       error_code=error_code,
+      error_diagnostic=error_diagnostic,
       now=now,
     )
 
@@ -673,6 +694,7 @@ class InMemoryBuildRepository:
     status: BuildStatus,
     error_code: str,
     now: datetime,
+    error_diagnostic: dict[str, Any] | None = None,
   ) -> None:
     with self._lock:
       record = self._owned_running(build_id, tenant_id, worker_id)
@@ -683,6 +705,7 @@ class InMemoryBuildRepository:
         lease_owner=None,
         lease_expires_at=None,
         error_code=error_code,
+        error_diagnostic=error_diagnostic,
         completed_at=now,
         updated_at=now,
       )
@@ -784,6 +807,7 @@ class BuildCoordinator:
     clock: Callable[[], datetime] | None = None,
     metrics: BuildMetrics | None = None,
     credential_registry: VolatileServiceTokenRegistry | None = None,
+    model_config_registry: VolatileModelConfigRegistry | None = None,
     graph_query: Any | None = None,
     autostart: bool = True,
   ):
@@ -799,6 +823,7 @@ class BuildCoordinator:
     self._clock = clock or (lambda: datetime.now(timezone.utc))
     self._metrics = metrics or NoopBuildMetrics()
     self._credential_registry = credential_registry
+    self._model_config_registry = model_config_registry
     self._graph_query = graph_query
     self._executor = ThreadPoolExecutor(
       max_workers=max_workers,
@@ -821,9 +846,11 @@ class BuildCoordinator:
     self,
     scope: AuthorizedScopeEnvelope,
     service_token: str | None = None,
+    vlm_config: dict[str, Any] | None = None,
   ) -> dict[str, Any]:
     self._refresh_service_token(scope.tenant_id, service_token)
     record = self._repository.start_or_reuse(scope, now=self._clock())
+    self._refresh_model_config(record.build_id, vlm_config)
     self._wake.set()
     return build_status_payload(record)
 
@@ -832,8 +859,10 @@ class BuildCoordinator:
     build_id: str,
     scope: AuthorizedScopeEnvelope,
     service_token: str | None = None,
+    vlm_config: dict[str, Any] | None = None,
   ) -> dict[str, Any]:
     self._refresh_service_token(scope.tenant_id, service_token)
+    self._refresh_model_config(build_id, vlm_config)
     if service_token is not None and self._credential_registry is not None:
       self._repository.resume_paused(
         build_id,
@@ -975,7 +1004,7 @@ class BuildCoordinator:
         max_retries=self._max_retries,
         next_attempt_at=next_attempt_at,
       )
-    except Exception:
+    except Exception as exception:
       LOGGER.exception(
         "basin graph build failed",
         extra=_log_fields(claimed, worker_id=worker_id),
@@ -984,7 +1013,12 @@ class BuildCoordinator:
         build_id,
         tenant_id=claimed.tenant_id,
         worker_id=worker_id,
-        error_code="NON_RETRYABLE_FAILURE",
+        error_code=(
+          "EXTRACTION_VALIDATION_FAILED"
+          if getattr(exception, "diagnostic", None) is not None
+          else "NON_RETRYABLE_FAILURE"
+        ),
+        error_diagnostic=getattr(exception, "diagnostic", None),
         now=self._clock(),
       )
     finally:
@@ -1030,6 +1064,15 @@ class BuildCoordinator:
       raise ValueError("service_token is required")
     self._credential_registry.put(tenant_id, service_token)
 
+  def _refresh_model_config(
+    self,
+    build_id: str,
+    vlm_config: dict[str, Any] | None,
+  ) -> None:
+    if self._model_config_registry is None or vlm_config is None:
+      return
+    self._model_config_registry.put(build_id, vlm_config)
+
   def _heartbeat_loop(
     self,
     record: BuildRecord,
@@ -1051,6 +1094,12 @@ class BuildCoordinator:
 
 
 def build_status_payload(record: BuildRecord) -> dict[str, Any]:
+  diagnostics = [
+    gap["diagnostic"]
+    for result in record.checkpoint_results.values()
+    for gap in result.get("gaps", [])
+    if isinstance(gap, dict) and isinstance(gap.get("diagnostic"), dict)
+  ][:10]
   return {
     "build_id": record.build_id,
     "status": record.status.value,
@@ -1060,6 +1109,8 @@ def build_status_payload(record: BuildRecord) -> dict[str, Any]:
     "retry_count": record.retry_count,
     "completed_units": len(record.completed_unit_ids),
     "error_code": record.error_code,
+    "error_diagnostic": record.error_diagnostic,
+    "diagnostics": diagnostics,
     "graph_version_id": record.graph_version_id,
     "created_at": record.created_at.isoformat(),
     "updated_at": record.updated_at.isoformat(),

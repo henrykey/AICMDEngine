@@ -143,6 +143,35 @@ def test_terminal_failure_boundaries(error, expected_status) -> None:
     coordinator.close()
 
 
+def test_extraction_diagnostic_is_persisted_in_status_payload() -> None:
+  error = RuntimeError("sanitized extraction failure")
+  error.diagnostic = {
+    "category": "GROUNDING",
+    "field": "entities.display_name",
+    "issue": "not_exact_source_substring",
+    "candidate": "红河盆地",
+    "document_id": "doc-1",
+    "document_version": 3,
+    "page_no": 2,
+    "unit_id": "doc-1/v3/p2/chunk-4/s0",
+  }
+  repository = InMemoryBuildRepository()
+  coordinator = BuildCoordinator(
+    repository=repository,
+    runner=RaisingRunner(error),
+    max_workers=1,
+    poll_interval_seconds=0.01,
+  )
+  try:
+    build = coordinator.start(scope())
+    status = wait_for_status(coordinator, build["build_id"], "FAILED")
+
+    assert status["error_code"] == "EXTRACTION_VALIDATION_FAILED"
+    assert status["error_diagnostic"] == error.diagnostic
+  finally:
+    coordinator.close()
+
+
 def test_retry_is_bounded_and_duplicate_after_failure_creates_new_attempt() -> None:
   repository = InMemoryBuildRepository()
   coordinator = BuildCoordinator(

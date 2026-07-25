@@ -107,6 +107,7 @@ class HttpDocIntelProvider:
     token = self._token_provider.get_token(build.tenant_id)
     scope = build.source_scope
     payload = {
+      "tenant_id": build.tenant_id,
       "project_id": scope.get("project_id"),
       "document_group": scope["document_group"],
       "graph_schema_version": scope["graph_schema_version"],
@@ -120,7 +121,10 @@ class HttpDocIntelProvider:
       response = self._client.post(
         self._url,
         json=payload,
-        headers={"Authorization": f"Bearer {token}"},
+        headers={
+          "Authorization": f"Bearer {token}",
+          "X-Tenant-ID": build.tenant_id,
+        },
       )
     except (httpx.TimeoutException, httpx.NetworkError) as exception:
       raise RetryableBuildError("DocIntel connection failed") from exception

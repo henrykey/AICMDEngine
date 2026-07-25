@@ -17,7 +17,12 @@ from .extraction import (
   ScopedExtractionRunner,
 )
 from .graph_store import GraphPublisher, GraphQueryService
-from .lifecycle import BuildCoordinator, VolatileServiceTokenRegistry
+from .lifecycle import (
+  BuildCoordinator,
+  BuildRecord,
+  VolatileModelConfigRegistry,
+  VolatileServiceTokenRegistry,
+)
 from .mongo_graph_store import MongoGraphStore
 from .mongo_repository import MongoBuildRepository
 from .tools import create_mcp
@@ -84,6 +89,7 @@ class BasinGraphRuntime:
       base_url=config.llm_base_url,
     )
     credentials = VolatileServiceTokenRegistry()
+    model_configs = VolatileModelConfigRegistry()
     provider = HttpDocIntelProvider(
       base_url=config.membership_api_url,
       token_provider=credentials,
@@ -93,12 +99,17 @@ class BasinGraphRuntime:
       client=OpenAIStructuredExtractionClient(
         client=self._openai,
         model=config.llm_model,
+        base_url=config.llm_base_url,
       )
     )
     publisher = GraphPublisher(store=graph_store)
     runner = ScopedExtractionRunner(
       provider=provider,
-      extractor=extractor,
+      extractor_factory=lambda record: self._extractor_for(
+        record,
+        model_configs=model_configs,
+        fallback=extractor,
+      ),
       publisher=publisher,
     )
     self._coordinator = BuildCoordinator(
@@ -106,6 +117,7 @@ class BasinGraphRuntime:
       runner=runner,
       max_workers=config.max_workers,
       credential_registry=credentials,
+      model_config_registry=model_configs,
       graph_query=GraphQueryService(
         store=graph_store,
         build_repository=build_repository,
@@ -115,6 +127,41 @@ class BasinGraphRuntime:
       backend=self._coordinator,
       host=config.mcp_host,
       port=config.mcp_port,
+    )
+
+  @staticmethod
+  def _extractor_for(
+    record: BuildRecord,
+    *,
+    model_configs: VolatileModelConfigRegistry,
+    fallback: PageFactExtractor,
+  ) -> PageFactExtractor:
+    config = model_configs.get(record.build_id)
+    if config is None:
+      return fallback
+    api_key = _required_config(config, "api_key")
+    model = _required_config(config, "model")
+    base_url = config.get("base_url")
+    client = OpenAI(
+      api_key=api_key,
+      base_url=base_url if isinstance(base_url, str) and base_url.strip() else None,
+      timeout=config.get("timeout_sec"),
+    )
+    return PageFactExtractor(
+      client=OpenAIStructuredExtractionClient(
+        client=client,
+        model=model,
+        provider=(
+          config.get("provider")
+          if isinstance(config.get("provider"), str)
+          else None
+        ),
+        base_url=(
+          base_url
+          if isinstance(base_url, str) and base_url.strip()
+          else None
+        ),
+      )
     )
 
   def close(self) -> None:
@@ -137,4 +184,11 @@ def _required_env(name: str, *, fallback: str | None = None) -> str:
   if value is None or not value.strip():
     suffix = f" or {fallback}" if fallback else ""
     raise ValueError(f"{name}{suffix} is required")
+  return value.strip()
+
+
+def _required_config(config: dict[str, object], name: str) -> str:
+  value = config.get(name)
+  if not isinstance(value, str) or not value.strip():
+    raise ValueError(f"runtime model config {name} is required")
   return value.strip()

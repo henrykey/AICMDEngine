@@ -66,7 +66,8 @@ def test_reads_all_pages_with_fresh_service_token_and_exact_scope() -> None:
     "version": 3,
     "content_hash": HASH_A,
   }]
-  assert "tenant_id" not in first_body
+  assert first_body["tenant_id"] == "12"
+  assert requests[0].headers["X-Tenant-ID"] == "12"
 
 
 def test_trusts_docintel_document_and_chunk_scope_contract() -> None:
