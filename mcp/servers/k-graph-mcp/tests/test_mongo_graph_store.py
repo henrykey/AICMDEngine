@@ -7,7 +7,9 @@ import pytest
 from k_graph_mcp.graph_store import (
   GraphNotFoundError,
   GraphPublication,
+  GraphEntityType,
   GraphVersionRecord,
+  PublishedEntity,
 )
 from k_graph_mcp.mongo_graph_store import MongoGraphStore
 
@@ -61,6 +63,54 @@ def test_empty_staging_payload_becomes_ready_only_after_targeted_writes() -> Non
     "status": "STAGING",
   }
   assert update["$set"]["staging_data_ready"] is True
+
+
+def test_graph_version_persists_self_contained_viewer_scope_and_name() -> None:
+  store, versions, *_ = fixture()
+  versions.find_one.return_value = None
+  versions.update_one.return_value = SimpleNamespace(matched_count=1)
+  build = SimpleNamespace(
+    tenant_id="12",
+    build_id="build-1",
+    project_id="project-1",
+    scope_fingerprint="sha256:" + "f" * 64,
+    source_scope={
+      "document_group": [{
+        "document_id": "doc-1",
+        "version": 3,
+        "content_hash": "sha256:" + "a" * 64,
+      }],
+      "graph_schema_version": "1",
+      "extractor_version": "g29.1",
+      "normalization_version": "docintel-normalized-v1",
+    },
+  )
+
+  created = store.begin_or_reset(build, now=now())
+  inserted = versions.insert_one.call_args.args[0]
+  assert inserted["document_group"] == build.source_scope["document_group"]
+
+  versions.find_one.return_value = {
+    "tenant_id": "12",
+    "graph_version_id": created.graph_version_id,
+    "status": "STAGING",
+  }
+  store.stage(created, GraphPublication(
+    entities=(PublishedEntity(
+      entity_id="basin-1",
+      entity_type=GraphEntityType.BASIN,
+      original_mention="红河盆地",
+      display_name="红河盆地",
+      aliases=(),
+      evidence_ids=(),
+    ),),
+    relations=(),
+    evidence=(),
+    gaps=(),
+  ), now=now())
+
+  update = versions.update_one.call_args.args[1]
+  assert update["$set"]["graph_name"] == "红河盆地"
 
 
 def test_load_never_reads_collections_for_unpublished_version() -> None:

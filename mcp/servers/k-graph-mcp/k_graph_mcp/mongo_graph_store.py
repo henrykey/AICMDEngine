@@ -134,6 +134,9 @@ class MongoGraphStore:
         {
           "$set": {
             "status": "STAGING",
+            "document_group": [
+              dict(item) for item in build.source_scope["document_group"]
+            ],
             "published_at": None,
             "error_code": None,
             "staging_data_ready": False,
@@ -154,6 +157,9 @@ class MongoGraphStore:
         item["document_id"]
         for item in build.source_scope["document_group"]
       ),
+      "document_group": [
+        dict(item) for item in build.source_scope["document_group"]
+      ],
       "graph_schema_version": build.source_scope["graph_schema_version"],
       "extractor_version": build.source_scope["extractor_version"],
       "normalization_version": build.source_scope["normalization_version"],
@@ -237,6 +243,11 @@ class MongoGraphStore:
           "relation_count": len(publication.relations),
           "evidence_count": len(publication.evidence),
           "gap_count": len(publication.gaps),
+          "graph_name": next((
+            item.display_name
+            for item in publication.entities
+            if item.entity_type.value == "BASIN"
+          ), None),
           "updated_at": now,
         }
       },
