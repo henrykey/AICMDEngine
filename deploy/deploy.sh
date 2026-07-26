@@ -72,6 +72,10 @@ log() {
   printf '[deploy] %s\n' "$*"
 }
 
+phase() {
+  printf '[deploy][%s] %s\n' "$1" "$2"
+}
+
 warn() {
   printf '[deploy][warn] %s\n' "$*" >&2
 }
@@ -375,6 +379,20 @@ load_env_file() {
 
 command_exists() {
   command -v "$1" >/dev/null 2>&1
+}
+
+remote_rsync_path() {
+  ssh "${APP_HOST}" '
+    set -e
+    RSYNC_BIN="$(command -v rsync)"
+    if [ "$(id -u)" -eq 0 ]; then
+      printf "%s" "${RSYNC_BIN}"
+    elif command -v sudo >/dev/null 2>&1; then
+      printf "sudo %s" "${RSYNC_BIN}"
+    else
+      exit 1
+    fi
+  '
 }
 
 docker_image_exists() {
@@ -887,6 +905,7 @@ build_images() {
 run_prepare() {
   load_env_file
 
+  phase "prepare 1/4" "Checking local prerequisites"
   if [[ "${SKIP_PREFLIGHT}" != "true" ]]; then
     log "Running local preflight"
     bash "${SCRIPT_DIR}/preflight-resources.sh" --env "${ENV_FILE}" --skip-ports || fail "Preflight failed"
@@ -894,8 +913,10 @@ run_prepare() {
     warn "Skipping preflight by request"
   fi
 
+  phase "prepare 2/4" "Preparing dependency cache"
   ensure_cache_ready
 
+  phase "prepare 3/4" "Generating deploy bundle in ${OUT_DIR}"
   log "Generating deploy output bundle in ${OUT_DIR}"
   rm -rf "${OUT_DIR}"
   ensure_out_layout
@@ -904,7 +925,10 @@ run_prepare() {
   write_images_readme
 
   if [[ "${BUILD_IMAGES}" == "true" ]]; then
+    phase "prepare 4/4" "Building and exporting Docker images"
     build_images
+  else
+    phase "prepare 4/4" "Docker image build not requested"
   fi
 
   log "Prepare completed"
@@ -916,9 +940,26 @@ run_upload() {
   command_exists ssh || fail "ssh is required for upload"
   command_exists tar || fail "tar is required for upload"
 
+  phase "upload 1/3" "Creating remote directory ${REMOTE_DIR}"
   log "Uploading deploy bundle to ${APP_HOST}:${REMOTE_DIR}"
   ssh "${APP_HOST}" "set -euo pipefail; if [[ \$(id -u) -eq 0 ]]; then SUDO=''; elif command -v sudo >/dev/null 2>&1; then SUDO='sudo'; else echo 'Need root or sudo on remote host' >&2; exit 1; fi; \$SUDO mkdir -p '${REMOTE_DIR}'"
-  tar -C "${OUT_DIR}" -cf - . | ssh "${APP_HOST}" "set -euo pipefail; if [[ \$(id -u) -eq 0 ]]; then SUDO=''; elif command -v sudo >/dev/null 2>&1; then SUDO='sudo'; else echo 'Need root or sudo on remote host' >&2; exit 1; fi; \$SUDO tar -xf - -C '${REMOTE_DIR}'"
+  phase "upload 2/3" "Transferring deploy bundle"
+  local remote_rsync
+  if command_exists rsync && remote_rsync="$(remote_rsync_path)"; then
+    log "Uploading with rsync progress and resumable partial data"
+    rsync \
+      -aP \
+      --partial \
+      --partial-dir=.rsync-partial \
+      --rsync-path="${remote_rsync}" \
+      "${OUT_DIR}/" \
+      "${APP_HOST}:${REMOTE_DIR}/"
+  else
+    log "rsync is unavailable locally or remotely; falling back to tar over SSH"
+    tar -C "${OUT_DIR}" -cf - . \
+      | ssh "${APP_HOST}" "set -euo pipefail; if [[ \$(id -u) -eq 0 ]]; then SUDO=''; elif command -v sudo >/dev/null 2>&1; then SUDO='sudo'; else echo 'Need root or sudo on remote host' >&2; exit 1; fi; \$SUDO tar -xf - -C '${REMOTE_DIR}'"
+  fi
+  phase "upload 3/3" "Deploy bundle transferred"
   log "Upload completed"
 }
 
@@ -949,8 +990,10 @@ REMOTE_DIR="${REMOTE_DIR:?REMOTE_DIR is required}"
 REMOTE_PIP_INDEX_URL="${REMOTE_PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 WITH_PROXY="${WITH_PROXY:-false}"
 SERVICES="${SERVICES:-mcp-router plan2 office-word docs-converter pdf2md-enhanced pageindex k-graph-mcp basin-comparator-mcp}"
+COMPOSE_PROJECT_NAME="aicmdengine"
 cd "${REMOTE_DIR}"
 
+log "[deploy 1/4] Validating remote bundle and prerequisites"
 [[ -f ".env" ]] || fail ".env not found in ${REMOTE_DIR}"
 [[ -f "docker-compose.mcp.yml" ]] || fail "docker-compose.mcp.yml not found in ${REMOTE_DIR}"
 
@@ -970,6 +1013,7 @@ else
   fail "python3 or python is required on remote host"
 fi
 
+log "[deploy 2/4] Configuring optional proxy service"
 if [[ "${WITH_PROXY}" == "true" ]]; then
   [[ -f "proxy/systemd/aiplanner-mcp-proxy.service" ]] || fail "systemd service file missing"
   [[ -f "proxy/config/mcp-proxy-config.yml" ]] || fail "proxy config file missing"
@@ -1018,6 +1062,7 @@ fi
 
 cd "${REMOTE_DIR}"
 
+log "[deploy 3/4] Loading application images"
 if command_exists docker; then
   if [[ -f "images/aiplanner-images.tar.gz" ]]; then
     log "Loading Docker images from images/aiplanner-images.tar.gz"
@@ -1029,10 +1074,54 @@ else
   fail "docker is required on remote host"
 fi
 
+expected_container_identity() {
+  case "$1" in
+    mcp-router) printf '%s|%s\n' "aiplanner-mcp-router" "aiplanner-mcp-router:latest" ;;
+    plan2) printf '%s|%s\n' "aiplanner-plan2" "aiplanner-plan2:latest" ;;
+    office-word) printf '%s|%s\n' "aiplanner-office-word" "aiplanner-office-word:latest" ;;
+    docs-converter) printf '%s|%s\n' "aiplanner-docs-converter" "aiplanner-docs-converter:latest" ;;
+    pdf2md-enhanced) printf '%s|%s\n' "aiplanner-pdf2md-enhanced" "aiplanner-pdf2md-enhanced:latest" ;;
+    pageindex) printf '%s|%s\n' "aiplanner-pageindex" "aiplanner-pageindex:latest" ;;
+    k-graph-mcp) printf '%s|%s\n' "aiplanner-k-graph-mcp" "aiplanner-k-graph-mcp:latest" ;;
+    basin-comparator-mcp) printf '%s|%s\n' "aiplanner-basin-comparator-mcp" "aiplanner-basin-comparator-mcp:latest" ;;
+    *) fail "Unsupported deployment service identity: $1" ;;
+  esac
+}
+
+remove_owned_legacy_container() {
+  local service="$1"
+  local identity container expected_image owner_service owner_project actual_image
+  identity="$(expected_container_identity "${service}")"
+  container="${identity%%|*}"
+  expected_image="${identity#*|}"
+  if ! $SUDO docker container inspect "${container}" >/dev/null 2>&1; then
+    return
+  fi
+
+  owner_service="$($SUDO docker container inspect "${container}" --format '{{index .Config.Labels "com.docker.compose.service"}}')"
+  owner_project="$($SUDO docker container inspect "${container}" --format '{{index .Config.Labels "com.docker.compose.project"}}')"
+  actual_image="$($SUDO docker container inspect "${container}" --format '{{.Config.Image}}')"
+  if [[ "${owner_service}" != "${service}" || "${actual_image}" != "${expected_image}" ]]; then
+    fail "Container name conflict is not owned by the intended service: container=${container} service=${owner_service:-unlabeled} image=${actual_image:-unknown}"
+  fi
+  if [[ "${owner_project}" == "${COMPOSE_PROJECT_NAME}" ]]; then
+    return
+  fi
+
+  log "Removing owned legacy container ${container} from Compose project ${owner_project:-unlabeled}"
+  $SUDO docker rm -f "${container}" >/dev/null
+}
+
+for service in ${SERVICES}; do
+  remove_owned_legacy_container "${service}"
+done
+
+log "[deploy 4/4] Starting application containers"
 if $SUDO docker compose version >/dev/null 2>&1; then
   log "Starting application containers: ${SERVICES}"
   # shellcheck disable=SC2086
-  $SUDO docker compose --env-file .env -f docker-compose.mcp.yml up -d ${SERVICES}
+  $SUDO docker compose --project-name "${COMPOSE_PROJECT_NAME}" \
+    --env-file .env -f docker-compose.mcp.yml up -d --force-recreate ${SERVICES}
 else
   fail "docker compose is not available on remote host"
 fi
