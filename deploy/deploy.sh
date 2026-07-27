@@ -4,6 +4,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PHYSICAL_ROOT_DIR="$(cd -P "${SCRIPT_DIR}/.." && pwd)"
+BASIN_COMPARATOR_BACKEND_DIR="${BASIN_COMPARATOR_BACKEND_DIR:-${PHYSICAL_ROOT_DIR}/../membership/basin-comparator/backend}"
 OUT_DIR="${SCRIPT_DIR}/out"
 CACHE_DIR="${SCRIPT_DIR}/cache"
 WHEEL_CACHE_DIR="${CACHE_DIR}/wheels"
@@ -247,6 +249,14 @@ service_enabled() {
     [[ "${service}" == "${target}" ]] && return 0
   done
   return 1
+}
+
+resolve_basin_comparator_backend_dir() {
+  [[ -d "${BASIN_COMPARATOR_BACKEND_DIR}" ]] || fail \
+    "Basin Comparator backend directory not found: ${BASIN_COMPARATOR_BACKEND_DIR}"
+  [[ -f "${BASIN_COMPARATOR_BACKEND_DIR}/Dockerfile.mcp" ]] || fail \
+    "Basin Comparator MCP Dockerfile not found: ${BASIN_COMPARATOR_BACKEND_DIR}/Dockerfile.mcp"
+  (cd "${BASIN_COMPARATOR_BACKEND_DIR}" && pwd -P)
 }
 
 selected_images_for_services() {
@@ -519,7 +529,48 @@ copy_tree_filtered() {
 wheelhouse_has_files() {
   local dir="$1"
   [[ -d "${dir}" ]] || return 1
-  find "${dir}" -type f ! -name '.gitkeep' | grep -q .
+  find "${dir}" -type f ! -name '.gitkeep' ! -name '.requirements.sha256' | grep -q .
+}
+
+requirements_fingerprint() {
+  local source_dir="$1"
+  local requirements_rel="$2"
+  local extra_requirements="${3:-}"
+  python - "${source_dir}/${requirements_rel}" "${extra_requirements}" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+requirements = pathlib.Path(sys.argv[1]).read_bytes()
+extra = sys.argv[2].encode()
+print(hashlib.sha256(requirements + b"\0" + extra).hexdigest())
+PY
+}
+
+wheelhouse_is_complete() {
+  local image="$1"
+  local source_dir="$2"
+  local requirements_rel="$3"
+  local wheelhouse_dir="$4"
+  local extra_requirements="${5:-}"
+  local expected actual
+
+  wheelhouse_has_files "${wheelhouse_dir}" || return 1
+  expected="$(requirements_fingerprint "${source_dir}" "${requirements_rel}" "${extra_requirements}")"
+  [[ -f "${wheelhouse_dir}/.requirements.sha256" ]] || return 1
+  actual="$(<"${wheelhouse_dir}/.requirements.sha256")"
+  [[ "${actual}" == "${expected}" ]] || return 1
+  docker_image_exists "${image}" || return 1
+
+  docker run --rm --platform "${BUILD_PLATFORM}" \
+    -v "${source_dir}:/workspace:ro" \
+    -v "${wheelhouse_dir}:/wheelhouse:ro" \
+    "${image}" \
+    sh -lc "
+      set -euo pipefail
+      python -m pip download --disable-pip-version-check --dest /tmp/wheelhouse-check \
+        --no-index --find-links=/wheelhouse -r /workspace/${requirements_rel} ${extra_requirements}
+    " >/dev/null
 }
 
 clear_dir_contents() {
@@ -563,6 +614,8 @@ download_wheelhouse() {
         python -m pip download --only-binary=:all: --dest /wheelhouse ${pip_index_arg_string} ${extra_requirements}
       fi
     "
+  requirements_fingerprint "${source_dir}" "${requirements_rel}" \
+    "${extra_requirements}" > "${output_dir}/.requirements.sha256"
 }
 
 cache_base_images() {
@@ -636,19 +689,29 @@ prepare_cache() {
 }
 
 cache_is_ready() {
-  if service_enabled "mcp-router" && ! wheelhouse_has_files "${WHEEL_CACHE_DIR}/mcp-router"; then
+  if service_enabled "mcp-router" && ! wheelhouse_is_complete \
+    "${CACHE_PYTHON_311_IMAGE}" "${ROOT_DIR}" "requirements.txt" \
+    "${WHEEL_CACHE_DIR}/mcp-router"; then
     return 1
   fi
-  if service_enabled "pageindex" && ! wheelhouse_has_files "${WHEEL_CACHE_DIR}/pageindex"; then
+  if service_enabled "pageindex" && ! wheelhouse_is_complete \
+    "${CACHE_PYTHON_312_IMAGE}" "${ROOT_DIR}/mcp/servers/PageIndex" \
+    "requirements.txt" "${WHEEL_CACHE_DIR}/pageindex"; then
     return 1
   fi
-  if service_enabled "pdf2md-enhanced" && ! wheelhouse_has_files "${WHEEL_CACHE_DIR}/pdf2md-enhanced"; then
+  if service_enabled "pdf2md-enhanced" && ! wheelhouse_is_complete \
+    "${CACHE_PYTHON_312_IMAGE}" "${ROOT_DIR}/mcp/servers/PDF2MDEnhanced" \
+    "requirements.txt" "${WHEEL_CACHE_DIR}/pdf2md-enhanced"; then
     return 1
   fi
 
   if [[ "${WITH_PROXY}" == "true" ]]; then
-    wheelhouse_has_files "${WHEEL_CACHE_DIR}/proxy-core" &&
-    wheelhouse_has_files "${WHEEL_CACHE_DIR}/office-word"
+    wheelhouse_is_complete \
+      "${CACHE_PYTHON_312_IMAGE}" "${ROOT_DIR}/mcp/proxy" "requirements.txt" \
+      "${WHEEL_CACHE_DIR}/proxy-core" "fastmcp" &&
+    wheelhouse_is_complete \
+      "${CACHE_PYTHON_312_IMAGE}" "${ROOT_DIR}/mcp/servers/office-word" \
+      "requirements.txt" "${WHEEL_CACHE_DIR}/office-word"
   else
     return 0
   fi
@@ -667,7 +730,7 @@ ensure_cache_ready() {
     return
   fi
 
-  log "${BUILD_PLATFORM} wheelhouse cache is missing; preparing automatically"
+  log "${BUILD_PLATFORM} wheelhouse cache is missing, stale, or incomplete; preparing automatically"
   prepare_cache
 }
 
@@ -887,13 +950,15 @@ build_images() {
       "${ROOT_DIR}/mcp/servers/k-graph-mcp"
   fi
   if service_enabled "basin-comparator-mcp"; then
+    local basin_backend_dir
+    basin_backend_dir="$(resolve_basin_comparator_backend_dir)"
     docker build --platform "${BUILD_PLATFORM}" \
       --build-arg PYTHON_BASE_IMAGE="${CACHE_PYTHON_312_IMAGE}" \
       --build-arg PIP_INDEX_URL="${LOCAL_PIP_INDEX_URL}" \
       --build-arg APT_MIRROR="${APT_MIRROR}" \
-      -f "${ROOT_DIR}/../basin-comparator/backend/Dockerfile.mcp" \
+      -f "${basin_backend_dir}/Dockerfile.mcp" \
       -t aiplanner-basin-comparator-mcp:latest \
-      "${ROOT_DIR}/../basin-comparator/backend"
+      "${basin_backend_dir}"
   fi
 
   if [[ "${#SELECTED_IMAGES[@]}" -gt 0 ]]; then
@@ -1165,4 +1230,6 @@ main() {
   esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

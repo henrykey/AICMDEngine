@@ -1124,7 +1124,7 @@ def _required_fingerprint(scope: AuthorizedScopeEnvelope) -> str:
 
 
 def _durable_scope(scope: AuthorizedScopeEnvelope) -> dict[str, Any]:
-  return {
+  durable = {
     "tenant_id": scope.tenant_id,
     "project_id": scope.project_id,
     "document_group": [
@@ -1134,6 +1134,9 @@ def _durable_scope(scope: AuthorizedScopeEnvelope) -> dict[str, Any]:
     "extractor_version": scope.extractor_version,
     "normalization_version": scope.normalization_version,
   }
+  if scope.graph_name:
+    durable["graph_name"] = scope.graph_name
+  return durable
 
 
 def _default_retry_delay(retry_count: int) -> float:

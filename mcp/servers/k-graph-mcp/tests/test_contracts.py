@@ -29,6 +29,7 @@ def scope(
   tenant_id: str = "tenant-a",
   documents: tuple[DocumentScopeItem, ...] | None = None,
   fingerprint: str | None = None,
+  graph_name: str | None = None,
 ) -> AuthorizedScopeEnvelope:
   document_group = documents if documents is not None else (
     DocumentScopeItem(document_id="doc-1", version=2, content_hash=HASH_A),
@@ -40,6 +41,7 @@ def scope(
     project_id="project-1",
     document_group=document_group,
     scope_fingerprint=fingerprint,
+    graph_name=graph_name,
   )
 
 
@@ -75,6 +77,12 @@ def test_scope_fingerprint_is_order_independent() -> None:
 
   assert canonical_scope_fingerprint(scope(documents=(first, second))) == (
     canonical_scope_fingerprint(scope(documents=(second, first)))
+  )
+
+
+def test_graph_display_name_is_metadata_not_fingerprint_input() -> None:
+  assert canonical_scope_fingerprint(scope(graph_name=None)) == (
+    canonical_scope_fingerprint(scope(graph_name="Test 4 — Knowledge Graph"))
   )
 
 

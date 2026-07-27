@@ -25,8 +25,9 @@ COPY .wheelhouse/mcp-router/ /opt/wheelhouse/
 
 # Install Python dependencies
 RUN --mount=type=cache,target=/root/.cache/pip \
-    if [ "${USE_WHEELHOUSE}" = "true" ] && find /opt/wheelhouse -type f ! -name '.gitkeep' | grep -q .; then \
-      pip install --no-index --find-links=/opt/wheelhouse -r requirements.txt; \
+    if [ "${USE_WHEELHOUSE}" = "true" ] && find /opt/wheelhouse -type f ! -name '.gitkeep' ! -name '.requirements.sha256' | grep -q .; then \
+      pip install --no-index --find-links=/opt/wheelhouse -r requirements.txt || \
+        pip install -r requirements.txt; \
     else \
       pip install -r requirements.txt; \
     fi

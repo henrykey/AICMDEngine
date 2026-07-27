@@ -59,6 +59,7 @@ def test_new_build_persists_only_the_frozen_selected_document_scope() -> None:
     "graph_schema_version",
     "extractor_version",
     "normalization_version",
+    "graph_name",
   }
 
 
@@ -141,6 +142,7 @@ def scope() -> AuthorizedScopeEnvelope:
     document_group=(
       DocumentScopeItem(document_id="doc-1", version=3, content_hash=HASH_A),
     ),
+    graph_name="Test 4 — Knowledge Graph",
   )
   return unsigned.model_copy(update={
     "scope_fingerprint": canonical_scope_fingerprint(unsigned),

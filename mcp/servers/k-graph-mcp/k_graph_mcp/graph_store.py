@@ -95,6 +95,7 @@ class GraphVersionRecord:
   created_at: datetime
   published_at: datetime | None = None
   error_code: str | None = None
+  graph_name: str | None = None
 
 
 class GraphStore(Protocol):
@@ -184,6 +185,7 @@ class InMemoryGraphStore:
           status="STAGING",
           published_at=None,
           error_code=None,
+          graph_name=build.source_scope.get("graph_name"),
         )
         self._versions[existing_id] = version
         self._data.pop(existing_id, None)
@@ -203,6 +205,7 @@ class InMemoryGraphStore:
         normalization_version=scope["normalization_version"],
         status="STAGING",
         created_at=now,
+        graph_name=scope.get("graph_name"),
       )
       self._versions[version.graph_version_id] = version
       self._build_versions[build_key] = version.graph_version_id

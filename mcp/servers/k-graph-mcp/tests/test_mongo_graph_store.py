@@ -83,12 +83,14 @@ def test_graph_version_persists_self_contained_viewer_scope_and_name() -> None:
       "graph_schema_version": "1",
       "extractor_version": "g29.1",
       "normalization_version": "docintel-normalized-v1",
+      "graph_name": "Test 4 — Knowledge Graph",
     },
   )
 
   created = store.begin_or_reset(build, now=now())
   inserted = versions.insert_one.call_args.args[0]
   assert inserted["document_group"] == build.source_scope["document_group"]
+  assert inserted["graph_name"] == "Test 4 — Knowledge Graph"
 
   versions.find_one.return_value = {
     "tenant_id": "12",
@@ -110,7 +112,7 @@ def test_graph_version_persists_self_contained_viewer_scope_and_name() -> None:
   ), now=now())
 
   update = versions.update_one.call_args.args[1]
-  assert update["$set"]["graph_name"] == "红河盆地"
+  assert update["$set"]["graph_name"] == "Test 4 — Knowledge Graph"
 
 
 def test_load_never_reads_collections_for_unpublished_version() -> None:

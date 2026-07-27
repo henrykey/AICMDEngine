@@ -65,6 +65,7 @@ class AuthorizedScopeEnvelope(ContractModel):
   extractor_version: str = Field(default="g29.1", min_length=1)
   normalization_version: str = Field(default="docintel-normalized-v1", min_length=1)
   scope_fingerprint: str | None = None
+  graph_name: str | None = Field(default=None, min_length=1, max_length=512)
 
   @model_validator(mode="after")
   def validate_scope(self) -> "AuthorizedScopeEnvelope":

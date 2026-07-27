@@ -137,6 +137,7 @@ class MongoGraphStore:
             "document_group": [
               dict(item) for item in build.source_scope["document_group"]
             ],
+            "graph_name": build.source_scope.get("graph_name"),
             "published_at": None,
             "error_code": None,
             "staging_data_ready": False,
@@ -160,6 +161,7 @@ class MongoGraphStore:
       "document_group": [
         dict(item) for item in build.source_scope["document_group"]
       ],
+      "graph_name": build.source_scope.get("graph_name"),
       "graph_schema_version": build.source_scope["graph_schema_version"],
       "extractor_version": build.source_scope["extractor_version"],
       "normalization_version": build.source_scope["normalization_version"],
@@ -243,7 +245,7 @@ class MongoGraphStore:
           "relation_count": len(publication.relations),
           "evidence_count": len(publication.evidence),
           "gap_count": len(publication.gaps),
-          "graph_name": next((
+          "graph_name": version.graph_name or next((
             item.display_name
             for item in publication.entities
             if item.entity_type.value == "BASIN"
@@ -412,6 +414,7 @@ def _version(document: dict[str, Any]) -> GraphVersionRecord:
     created_at=document["created_at"],
     published_at=document.get("published_at"),
     error_code=document.get("error_code"),
+    graph_name=document.get("graph_name"),
   )
 
 
