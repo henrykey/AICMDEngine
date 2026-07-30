@@ -66,12 +66,20 @@ class AuthorizedScopeEnvelope(ContractModel):
   normalization_version: str = Field(default="docintel-normalized-v1", min_length=1)
   scope_fingerprint: str | None = None
   graph_name: str | None = Field(default=None, min_length=1, max_length=512)
+  document_names: dict[str, str] = Field(default_factory=dict)
 
   @model_validator(mode="after")
   def validate_scope(self) -> "AuthorizedScopeEnvelope":
     document_ids = [item.document_id for item in self.document_group]
     if len(document_ids) != len(set(document_ids)):
       raise ValueError("document_group must not contain duplicate document IDs")
+    if any(
+      document_id not in document_ids
+      or not name.strip()
+      or len(name.strip()) > 512
+      for document_id, name in self.document_names.items()
+    ):
+      raise ValueError("document_names must be bounded names for scoped documents")
     expected = canonical_scope_fingerprint(self)
     if self.scope_fingerprint is not None and self.scope_fingerprint != expected:
       raise ValueError("scope_fingerprint does not match the authorized scope")

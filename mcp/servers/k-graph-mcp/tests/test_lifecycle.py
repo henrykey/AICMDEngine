@@ -49,6 +49,22 @@ def test_start_returns_promptly_and_duplicate_start_reuses_build() -> None:
     coordinator.close()
 
 
+def test_forced_start_creates_new_build_for_same_compatible_scope() -> None:
+  repository = InMemoryBuildRepository()
+  first = repository.start_or_reuse(scope(), now=utc(10))
+
+  second = repository.start_or_reuse(
+    scope(request_id="request-2"),
+    now=utc(11),
+    force_rebuild=True,
+  )
+
+  assert second.build_id != first.build_id
+  assert second.scope_fingerprint == first.scope_fingerprint
+  assert second.attempt == 2
+  assert second.prior_build_id == first.build_id
+
+
 def test_atomic_lease_prevents_two_workers_from_claiming_same_build() -> None:
   repository = InMemoryBuildRepository()
   build = repository.start_or_reuse(scope(), now=utc(10))

@@ -10,6 +10,7 @@ from k_graph_mcp.graph_store import (
   GraphEntityType,
   GraphVersionRecord,
   PublishedEntity,
+  PublishedGap,
 )
 from k_graph_mcp.mongo_graph_store import MongoGraphStore
 
@@ -84,6 +85,7 @@ def test_graph_version_persists_self_contained_viewer_scope_and_name() -> None:
       "extractor_version": "g29.1",
       "normalization_version": "docintel-normalized-v1",
       "graph_name": "Test 4 — Knowledge Graph",
+      "document_names": {"doc-1": "Basin report"},
     },
   )
 
@@ -91,6 +93,7 @@ def test_graph_version_persists_self_contained_viewer_scope_and_name() -> None:
   inserted = versions.insert_one.call_args.args[0]
   assert inserted["document_group"] == build.source_scope["document_group"]
   assert inserted["graph_name"] == "Test 4 — Knowledge Graph"
+  assert inserted["document_names"] == {"doc-1": "Basin report"}
 
   versions.find_one.return_value = {
     "tenant_id": "12",
@@ -113,6 +116,41 @@ def test_graph_version_persists_self_contained_viewer_scope_and_name() -> None:
 
   update = versions.update_one.call_args.args[1]
   assert update["$set"]["graph_name"] == "Test 4 — Knowledge Graph"
+  assert update["$set"]["main_subject"] == "红河盆地"
+
+
+def test_stage_persists_structured_gap_review_context() -> None:
+  store, versions, _, _, _, gaps = fixture()
+  versions.find_one.return_value = {
+    "tenant_id": "12",
+    "graph_version_id": "graph-1",
+    "status": "STAGING",
+  }
+  versions.update_one.return_value = SimpleNamespace(matched_count=1)
+  gap = PublishedGap(
+    unit_id="doc-1/v3/p8/page/s0",
+    code="REJECTED_EXTRACTION_CANDIDATE",
+    description="relations.evidence_quote: missing_relation_mentions",
+    evidence_quote="红河盆地发育北部凹陷",
+    document_id="doc-1",
+    document_version=3,
+    page_no=8,
+    source_locator="document:doc-1/version:3/page:8/segment:0",
+    subject_kind="RELATION",
+    candidate="红河盆地 → 北部凹陷",
+    field="relations.evidence_quote",
+    issue="missing_relation_mentions",
+  )
+
+  store.stage(version(), GraphPublication(
+    entities=(), relations=(), evidence=(), gaps=(gap,),
+  ), now=now())
+
+  inserted = gaps.insert_many.call_args.args[0][0]
+  assert inserted["document_id"] == "doc-1"
+  assert inserted["page_no"] == 8
+  assert inserted["candidate"] == "红河盆地 → 北部凹陷"
+  assert inserted["issue"] == "missing_relation_mentions"
 
 
 def test_load_never_reads_collections_for_unpublished_version() -> None:

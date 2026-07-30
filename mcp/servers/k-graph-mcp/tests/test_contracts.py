@@ -86,6 +86,18 @@ def test_graph_display_name_is_metadata_not_fingerprint_input() -> None:
   )
 
 
+def test_document_names_are_bounded_metadata_not_fingerprint_input() -> None:
+  named = scope().model_copy(update={"document_names": {"doc-1": "Basin report"}})
+
+  assert canonical_scope_fingerprint(named) == canonical_scope_fingerprint(scope())
+
+  with pytest.raises(ValidationError, match="document_names"):
+    AuthorizedScopeEnvelope.model_validate({
+      **scope().model_dump(mode="json"),
+      "document_names": {"outside-scope": "Other report"},
+    })
+
+
 def test_scope_rejects_empty_or_duplicate_documents() -> None:
   with pytest.raises(ValidationError, match="at least 1"):
     scope(documents=())

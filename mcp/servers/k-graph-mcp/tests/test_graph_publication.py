@@ -162,6 +162,35 @@ def test_changed_document_hash_reports_stale_without_reusing_old_graph() -> None
   }
 
 
+def test_publication_preserves_structured_gap_context_for_expert_review() -> None:
+  build = build_record()
+  payload = publication_payload()
+  payload["gaps"] = [{
+    "code": "REJECTED_EXTRACTION_CANDIDATE",
+    "description": "relations.evidence_quote: missing_relation_mentions",
+    "evidence_quote": "红河盆地发育北部凹陷",
+    "document_id": "doc-1",
+    "document_version": 3,
+    "page_no": 1,
+    "source_locator": "document:doc-1/version:3/page:1/chunk:chunk-1/segment:0",
+    "subject_kind": "RELATION",
+    "candidate": "红河盆地 → 北部凹陷",
+    "field": "relations.evidence_quote",
+    "issue": "missing_relation_mentions",
+  }]
+  build.checkpoint_results["doc-1/v3/p1/chunk-1/s0"] = payload
+
+  gap = GraphPublisher(store=InMemoryGraphStore()).prepare(build, "graph-1").gaps[0]
+
+  assert gap.document_id == "doc-1"
+  assert gap.document_version == 3
+  assert gap.page_no == 1
+  assert gap.subject_kind == "RELATION"
+  assert gap.candidate == "红河盆地 → 北部凹陷"
+  assert gap.field == "relations.evidence_quote"
+  assert gap.issue == "missing_relation_mentions"
+
+
 def build_record(build_id: str = "build-1") -> BuildRecord:
   scope = authorized_scope()
   return BuildRecord(

@@ -18,6 +18,7 @@ class GraphBackend(Protocol):
     scope: AuthorizedScopeEnvelope,
     service_token: str | None = None,
     vlm_config: dict[str, Any] | None = None,
+    force_rebuild: bool = False,
   ) -> dict[str, Any]: ...
 
   def status(
@@ -44,6 +45,7 @@ class UnavailableGraphBackend:
     scope: AuthorizedScopeEnvelope,
     service_token: str | None = None,
     vlm_config: dict[str, Any] | None = None,
+    force_rebuild: bool = False,
   ) -> dict[str, Any]:
     raise RuntimeError("G29.2 asynchronous build backend is not implemented")
 
@@ -76,11 +78,12 @@ class BasinGraphTools:
     scope: AuthorizedScopeEnvelope,
     service_token: str,
     vlm_config: dict[str, Any] | None = None,
+    force_rebuild: bool = False,
   ) -> dict[str, Any]:
     if not service_token or not service_token.strip():
       raise ValueError("service_token is required")
     self._validate_scope(scope)
-    return self._backend.start(scope, service_token, vlm_config)
+    return self._backend.start(scope, service_token, vlm_config, force_rebuild)
 
   def get_basin_graph_build_status(
     self,

@@ -74,6 +74,7 @@ class BuildRecord:
   checkpoint_results: dict[str, Any] = field(default_factory=dict)
   graph_version_id: str | None = None
   error_diagnostic: dict[str, Any] | None = None
+  reusable: bool = True
 
 
 class BuildRepository(Protocol):
@@ -82,6 +83,7 @@ class BuildRepository(Protocol):
     scope: AuthorizedScopeEnvelope,
     *,
     now: datetime,
+    force_rebuild: bool = False,
   ) -> BuildRecord: ...
 
   def get_for_scope(
@@ -289,6 +291,7 @@ class InMemoryBuildRepository:
     scope: AuthorizedScopeEnvelope,
     *,
     now: datetime,
+    force_rebuild: bool = False,
   ) -> BuildRecord:
     fingerprint = _required_fingerprint(scope)
     with self._lock:
@@ -297,8 +300,22 @@ class InMemoryBuildRepository:
         if item.tenant_id == scope.tenant_id
         and item.scope_fingerprint == fingerprint
       ]
+      if force_rebuild:
+        same_request = next(
+          (item for item in compatible if item.request_id == scope.request_id),
+          None,
+        )
+        if same_request is not None:
+          return same_request
+        for item in compatible:
+          if item.reusable:
+            self._records[item.build_id] = replace(item, reusable=False)
+        compatible = [self._records[item.build_id] for item in compatible]
       reusable = next(
-        (item for item in compatible if item.status in REUSABLE_STATUSES),
+        (
+          item for item in compatible
+          if item.reusable and item.status in REUSABLE_STATUSES
+        ),
         None,
       )
       if reusable is not None:
@@ -847,9 +864,14 @@ class BuildCoordinator:
     scope: AuthorizedScopeEnvelope,
     service_token: str | None = None,
     vlm_config: dict[str, Any] | None = None,
+    force_rebuild: bool = False,
   ) -> dict[str, Any]:
     self._refresh_service_token(scope.tenant_id, service_token)
-    record = self._repository.start_or_reuse(scope, now=self._clock())
+    record = self._repository.start_or_reuse(
+      scope,
+      now=self._clock(),
+      force_rebuild=force_rebuild,
+    )
     self._refresh_model_config(record.build_id, vlm_config)
     self._wake.set()
     return build_status_payload(record)
@@ -1136,6 +1158,8 @@ def _durable_scope(scope: AuthorizedScopeEnvelope) -> dict[str, Any]:
   }
   if scope.graph_name:
     durable["graph_name"] = scope.graph_name
+  if scope.document_names:
+    durable["document_names"] = dict(scope.document_names)
   return durable
 
 

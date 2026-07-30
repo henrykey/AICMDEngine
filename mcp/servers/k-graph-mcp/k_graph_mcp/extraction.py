@@ -126,6 +126,15 @@ class ExtractedGap(ExtractionModel):
   code: str
   description: str
   evidence_quote: str | None = None
+  document_id: str | None = None
+  document_version: int | None = None
+  page_no: int | None = None
+  source_locator: str | None = None
+  subject_kind: str | None = None
+  candidate: str | None = None
+  candidate_text: str | None = None
+  field: str | None = None
+  issue: str | None = None
   diagnostic: dict[str, Any] | None = None
 
 
@@ -294,7 +303,13 @@ class PageFactExtractor:
             expose_candidate=True,
           )
       except GroundingValidationError as exception:
-        gaps.append(_rejected_candidate_gap(unit, exception))
+        gaps.append(_rejected_candidate_gap(
+          unit,
+          exception,
+          subject_kind="ENTITY",
+          candidate=item.display_name or item.original_mention,
+          evidence_quote=item.evidence_quote,
+        ))
         continue
       entity_by_ref[item.ref] = item
       entity_key = _stable_key(
@@ -321,6 +336,10 @@ class PageFactExtractor:
     for item in raw.relations:
       source = entity_by_ref.get(item.source_ref)
       target = entity_by_ref.get(item.target_ref)
+      relation_candidate = " → ".join(filter(None, (
+        _safe_candidate(source.original_mention if source else item.source_ref),
+        _safe_candidate(target.original_mention if target else item.target_ref),
+      )))
       try:
         if source is None or target is None:
           raise GroundingValidationError(
@@ -352,7 +371,13 @@ class PageFactExtractor:
             issue="missing_relation_mentions",
           )
       except GroundingValidationError as exception:
-        gaps.append(_rejected_candidate_gap(unit, exception))
+        gaps.append(_rejected_candidate_gap(
+          unit,
+          exception,
+          subject_kind="RELATION",
+          candidate=relation_candidate,
+          evidence_quote=item.evidence_quote,
+        ))
         continue
       source_key = _stable_key(
         "entity",
@@ -392,6 +417,10 @@ class PageFactExtractor:
         code=item.code,
         description=item.description,
         evidence_quote=item.evidence_quote,
+        document_id=unit.document_id,
+        document_version=unit.version,
+        page_no=unit.page_no,
+        source_locator=unit.source_locator,
       )
       for item in raw.gaps
     )
@@ -409,6 +438,11 @@ class PageFactExtractor:
           "No source-grounded Basin HAS_PART Sag/Depression relation was "
           "found in this scoped source unit."
         ),
+        document_id=unit.document_id,
+        document_version=unit.version,
+        page_no=unit.page_no,
+        source_locator=unit.source_locator,
+        subject_kind="RELATION",
       ))
     return ExtractedUnitResult(
       entities=tuple(entities),
@@ -480,6 +514,13 @@ class ScopedExtractionRunner:
                   f"{exception.diagnostic.get('field', 'response')}: "
                   f"{exception.diagnostic.get('issue', 'invalid_output')}"
                 ),
+                document_id=unit.document_id,
+                document_version=unit.version,
+                page_no=unit.page_no,
+                source_locator=unit.source_locator,
+                field=exception.diagnostic.get("field"),
+                issue=exception.diagnostic.get("issue"),
+                candidate=exception.diagnostic.get("candidate"),
                 diagnostic=exception.diagnostic,
               ),),
             )
@@ -694,6 +735,10 @@ def _safe_candidate(value: str) -> str | None:
 def _rejected_candidate_gap(
   unit: SourceUnit,
   exception: GroundingValidationError,
+  *,
+  subject_kind: str,
+  candidate: str | None,
+  evidence_quote: str | None,
 ) -> ExtractedGap:
   diagnostic: dict[str, Any] = {
     "category": ExtractionFailureCategory.GROUNDING.value,
@@ -711,6 +756,20 @@ def _rejected_candidate_gap(
     description=(
       f"{exception.field}: {exception.issue}"
     ),
+    evidence_quote=(
+      evidence_quote
+      if exception.issue != "not_exact_source_substring"
+      else None
+    ),
+    document_id=unit.document_id,
+    document_version=unit.version,
+    page_no=unit.page_no,
+    source_locator=unit.source_locator,
+    subject_kind=subject_kind,
+    candidate=_safe_candidate(candidate) if candidate is not None else None,
+    candidate_text=evidence_quote,
+    field=exception.field,
+    issue=exception.issue,
     diagnostic=diagnostic,
   )
 

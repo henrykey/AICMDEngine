@@ -71,6 +71,15 @@ class PublishedGap(GraphModel):
   code: str
   description: str
   evidence_quote: str | None = None
+  document_id: str | None = None
+  document_version: int | None = None
+  page_no: int | None = None
+  source_locator: str | None = None
+  subject_kind: str | None = None
+  candidate: str | None = None
+  candidate_text: str | None = None
+  field: str | None = None
+  issue: str | None = None
 
 
 class GraphPublication(GraphModel):
@@ -402,6 +411,19 @@ class GraphPublisher:
           code=gap.code,
           description=gap.description,
           evidence_quote=gap.evidence_quote,
+          document_id=gap.document_id,
+          document_version=gap.document_version,
+          page_no=gap.page_no,
+          source_locator=gap.source_locator,
+          subject_kind=gap.subject_kind,
+          candidate=gap.candidate,
+          candidate_text=gap.candidate_text,
+          field=gap.field or (
+            gap.diagnostic.get("field") if gap.diagnostic else None
+          ),
+          issue=gap.issue or (
+            gap.diagnostic.get("issue") if gap.diagnostic else None
+          ),
         )
         for gap in result.gaps
       )

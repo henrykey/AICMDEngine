@@ -63,6 +63,52 @@ def test_new_build_persists_only_the_frozen_selected_document_scope() -> None:
   }
 
 
+def test_forced_build_retires_reusable_build_before_creating_new_attempt() -> None:
+  collection = MagicMock()
+  previous = {
+    "tenant_id": "12",
+    "build_id": "build-1",
+    "scope_fingerprint": scope().scope_fingerprint,
+    "request_id": "request-1",
+    "requested_by": "42",
+    "project_id": "project-1",
+    "source_scope": scope().model_dump(mode="json"),
+    "status": "COMPLETED",
+    "phase": "COMPLETED",
+    "attempt": 1,
+    "prior_build_id": None,
+    "retry_count": 0,
+    "completed_unit_ids": [],
+    "checkpoint_results": {},
+    "cancel_requested": False,
+    "lease_owner": None,
+    "lease_expires_at": None,
+    "lease_reclaims": 0,
+    "next_attempt_at": datetime(2026, 7, 24, tzinfo=timezone.utc),
+    "created_at": datetime(2026, 7, 24, tzinfo=timezone.utc),
+    "updated_at": datetime(2026, 7, 24, tzinfo=timezone.utc),
+    "reusable": True,
+  }
+  collection.find_one.side_effect = [None, previous, previous]
+  repository = MongoBuildRepository(collection)
+
+  created = repository.start_or_reuse(
+    scope().model_copy(update={"request_id": "request-2"}),
+    now=datetime(2026, 7, 25, tzinfo=timezone.utc),
+    force_rebuild=True,
+  )
+
+  retired = collection.update_one.call_args.args
+  assert retired[0] == {
+    "tenant_id": "12",
+    "scope_fingerprint": scope().scope_fingerprint,
+    "reusable": True,
+  }
+  assert retired[1] == {"$set": {"reusable": False}}
+  assert created.build_id != "build-1"
+  assert collection.insert_one.call_args.args[0]["prior_build_id"] == "build-1"
+
+
 def test_worker_claim_and_stale_failure_are_tenant_scoped() -> None:
   collection = MagicMock()
   collection.find_one_and_update.side_effect = [None, None]

@@ -51,13 +51,27 @@ class MongoBuildRepository:
     scope: AuthorizedScopeEnvelope,
     *,
     now: datetime,
+    force_rebuild: bool = False,
   ) -> BuildRecord:
     fingerprint = _required_fingerprint(scope)
     identity = {
       "tenant_id": scope.tenant_id,
       "scope_fingerprint": fingerprint,
     }
+    if force_rebuild:
+      same_request = self._builds.find_one({
+        **identity,
+        "request_id": scope.request_id,
+      })
+      if same_request is not None:
+        return _record(same_request)
     reusable = self._builds.find_one({**identity, "reusable": True})
+    if force_rebuild and reusable is not None:
+      self._builds.update_one(
+        {**identity, "reusable": True},
+        {"$set": {"reusable": False}},
+      )
+      reusable = None
     if reusable is not None:
       if reusable["status"] == BuildStatus.PAUSED_AUTH_REQUIRED.value:
         resumed = self._builds.find_one_and_update(
@@ -625,6 +639,7 @@ def _record(document: dict[str, Any]) -> BuildRecord:
       for value in document.get("checkpoint_results", {}).values()
     },
     graph_version_id=document.get("graph_version_id"),
+    reusable=bool(document.get("reusable", True)),
   )
 
 

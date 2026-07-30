@@ -18,8 +18,8 @@ class RecordingBackend:
   def __init__(self):
     self.calls: list[tuple[str, object]] = []
 
-  def start(self, scope, service_token=None, vlm_config=None):
-    self.calls.append(("start", (scope, vlm_config)))
+  def start(self, scope, service_token=None, vlm_config=None, force_rebuild=False):
+    self.calls.append(("start", (scope, vlm_config, force_rebuild)))
     return {"build_id": "build-1", "status": "QUEUED"}
 
   def status(self, build_id, scope, service_token=None, vlm_config=None):
@@ -42,7 +42,21 @@ def test_start_validates_scope_before_calling_backend() -> None:
   result = tools.start_basin_graph_build(scope, "service-token")
 
   assert result["build_id"] == "build-1"
-  assert backend.calls == [("start", (scope, None))]
+  assert backend.calls == [("start", (scope, None, False))]
+
+
+def test_start_forwards_explicit_force_rebuild() -> None:
+  backend = RecordingBackend()
+  tools = BasinGraphTools(backend=backend)
+  selected = selected_scope()
+
+  tools.start_basin_graph_build(
+    selected,
+    "service-token",
+    force_rebuild=True,
+  )
+
+  assert backend.calls == [("start", (selected, None, True))]
 
 
 def test_start_forwards_runtime_provider_without_persisting_it_in_scope() -> None:
@@ -62,7 +76,7 @@ def test_start_forwards_runtime_provider_without_persisting_it_in_scope() -> Non
     vlm_config=runtime_provider,
   )
 
-  assert backend.calls == [("start", (scope, runtime_provider))]
+  assert backend.calls == [("start", (scope, runtime_provider, False))]
   assert "runtime-secret" not in scope.model_dump_json()
 
 
@@ -124,6 +138,7 @@ def test_start_tool_schema_accepts_router_runtime_provider_config() -> None:
   tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
 
   assert "vlm_config" in tools["start_basin_graph_build"].inputSchema["properties"]
+  assert "force_rebuild" in tools["start_basin_graph_build"].inputSchema["properties"]
   assert "vlm_config" in tools["get_basin_graph_build_status"].inputSchema["properties"]
 
 

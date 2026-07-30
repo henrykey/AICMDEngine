@@ -53,6 +53,12 @@ def test_invalid_relation_is_isolated_without_discarding_valid_entities() -> Non
   assert result.relations == ()
   assert len(result.entities) == 2
   assert result.gaps[0].diagnostic["field"] == "relations.evidence_quote"
+  assert result.gaps[0].document_id == "doc-1"
+  assert result.gaps[0].document_version == 3
+  assert result.gaps[0].page_no == 1
+  assert result.gaps[0].subject_kind == "RELATION"
+  assert result.gaps[0].candidate == "红河盆地 → 北部凹陷"
+  assert result.gaps[0].evidence_quote == "红河盆地"
   assert client.repair_flags == [False]
 
 
@@ -87,6 +93,10 @@ def test_exact_source_grounding_remains_required() -> None:
     "page_no": 1,
     "unit_id": "doc-1/v3/p1/chunk-1/s0",
   }
+  assert result.gaps[0].document_id == "doc-1"
+  assert result.gaps[0].source_locator.endswith("page:1/chunk:chunk-1/segment:0")
+  assert result.gaps[0].subject_kind == "ENTITY"
+  assert result.gaps[0].candidate == "规范化红河盆地"
   assert all(
     item.display_name != "规范化红河盆地"
     for item in result.entities
