@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.2.2 - 2026-08-01
+
+### Added
+
+- Added a hardened PDF2MD Enhanced OCR-first page-processing path with structured regression coverage for incomplete or unreliable PDF text.
+- Added deployment contracts for container ownership and wheelhouse cache integrity.
+- Added the structured-extraction hardening goals-loop plan.
+
+### Changed
+
+- Improved PDF2MD Enhanced page processing so OCR output remains the primary page source and VLM is used only for targeted recovery or semantic enrichment.
+- Improved external MCP deployment wiring, stable Compose ownership checks, host routing, and platform-specific wheelhouse cache handling.
+
+### Fixed
+
+- Fixed unsafe text-layer fallback behavior that could discard or corrupt structured page content.
+- Fixed deployment cache replacement so a failed dependency download does not destroy a known-good wheelhouse.
+
 ## v1.2.1 - 2026-05-20
 
 ### Added

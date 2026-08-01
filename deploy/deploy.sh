@@ -8,7 +8,8 @@ PHYSICAL_ROOT_DIR="$(cd -P "${SCRIPT_DIR}/.." && pwd)"
 BASIN_COMPARATOR_BACKEND_DIR="${BASIN_COMPARATOR_BACKEND_DIR:-${PHYSICAL_ROOT_DIR}/../membership/basin-comparator/backend}"
 OUT_DIR="${SCRIPT_DIR}/out"
 CACHE_DIR="${SCRIPT_DIR}/cache"
-WHEEL_CACHE_DIR="${CACHE_DIR}/wheels"
+WHEEL_CACHE_ROOT_DIR="${CACHE_DIR}/wheels"
+WHEEL_CACHE_DIR="${WHEEL_CACHE_ROOT_DIR}"
 ENV_FILE="${ENV_FILE:-${SCRIPT_DIR}/.env}"
 EXAMPLE_ENV_FILE="${SCRIPT_DIR}/env.aliyun.example"
 REMOTE_DIR_DEFAULT="/opt/AICMDEngine"
@@ -337,6 +338,7 @@ apply_env_defaults() {
       fail "Unsupported BUILD_PLATFORM: ${BUILD_PLATFORM} (expected linux/amd64 or linux/arm64)"
       ;;
   esac
+  WHEEL_CACHE_DIR="${WHEEL_CACHE_ROOT_DIR}/${BUILD_PLATFORM//\//-}"
 }
 
 apply_mirror_defaults() {
@@ -586,10 +588,12 @@ download_wheelhouse() {
   local output_dir="$4"
   local extra_requirements="${5:-}"
   local pip_index_arg_string=""
+  local staging_dir
   local -a docker_proxy_env=()
   local -a docker_host_args=()
 
-  clear_dir_contents "${output_dir}"
+  mkdir -p "$(dirname "${output_dir}")"
+  staging_dir="$(mktemp -d "${output_dir}.tmp.XXXXXX")"
   if [[ -n "${LOCAL_PIP_INDEX_URL}" ]]; then
     pip_index_arg_string="-i ${LOCAL_PIP_INDEX_URL}"
   fi
@@ -600,11 +604,11 @@ download_wheelhouse() {
     docker_host_args=(--add-host host.docker.internal:host-gateway)
   fi
 
-  docker run --rm --platform "${BUILD_PLATFORM}" \
+  if ! docker run --rm --platform "${BUILD_PLATFORM}" \
     "${docker_host_args[@]}" \
     "${docker_proxy_env[@]}" \
     -v "${source_dir}:/workspace:ro" \
-    -v "${output_dir}:/wheelhouse" \
+    -v "${staging_dir}:/wheelhouse" \
     "${image}" \
     sh -lc "
       set -euo pipefail
@@ -613,9 +617,17 @@ download_wheelhouse() {
       if [ -n \"${extra_requirements}\" ]; then
         python -m pip download --only-binary=:all: --dest /wheelhouse ${pip_index_arg_string} ${extra_requirements}
       fi
-    "
-  requirements_fingerprint "${source_dir}" "${requirements_rel}" \
-    "${extra_requirements}" > "${output_dir}/.requirements.sha256"
+    "; then
+    rm -rf "${staging_dir}"
+    return 1
+  fi
+  if ! requirements_fingerprint "${source_dir}" "${requirements_rel}" \
+    "${extra_requirements}" > "${staging_dir}/.requirements.sha256"; then
+    rm -rf "${staging_dir}"
+    return 1
+  fi
+  sync_wheelhouse "${staging_dir}" "${output_dir}"
+  rm -rf "${staging_dir}"
 }
 
 cache_base_images() {

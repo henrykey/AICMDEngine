@@ -126,8 +126,19 @@ def process_page(
                 markdown = _clean_markdown(glm_result.markdown)
                 rag_page_text = glm_result.page_text
                 structured = _structured_from_ocr_result(glm_result, include_figures=False)
-                if not markdown.strip() or _structured_insufficient_for_route(structured, route_selected, metrics):
-                    raise RuntimeError("glm_ocr_empty_or_insufficient_output")
+                if _glm_ocr_markdown_bad(markdown):
+                    raise RuntimeError("glm_ocr_bad_markdown")
+                if _structured_insufficient_for_route(structured, route_selected, metrics):
+                    raise RuntimeError("glm_ocr_insufficient_structured_output")
+                if (
+                    route_decision["signals"].get("has_meaningful_figures")
+                    and rc.get("figure_semantic_description_required")
+                    and rc.get("vlm_ocr_enabled")
+                    and vlm.enabled
+                ):
+                    figure_structured = _normalize_structured(vlm.extract_region_structured(str(image_path)))
+                    structured["figures"] = figure_structured.get("figures") or []
+                    vlm_calls += 1
             except Exception as err:
                 if rc.get("full_vlm_fallback_enabled") and rc.get("vlm_ocr_enabled") and vlm.enabled:
                     route_selected = "full_vlm_ocr"
@@ -186,7 +197,7 @@ def process_page(
                 if not markdown.strip():
                     raise RuntimeError("full_vlm_no_render_recovered")
         else:  # REGION_VLM
-            markdown = _clean_markdown(page.get_text("text") or "")
+            markdown = _build_direct_markdown(page)
             structured = _normalize_structured(vlm.extract_region_structured(str(image_path)))
             vlm_calls += 1
             markdown = _merge_region_vlm_markdown(markdown, structured)
@@ -521,22 +532,18 @@ def _decide_capability_route(
         route = "blank"
         mode = "DIRECT"
         route_reasons = _unique_keep_order(route_reasons + ["blank_page"])
-    elif text_layer_bad:
-        route = "full_glm_ocr" if glm_available else "full_vlm_ocr"
+    elif glm_available:
+        # Do not treat the PDF text layer as authoritative page content. It can
+        # silently omit section labels even when it otherwise looks reliable.
+        route = "full_glm_ocr"
         mode = "FULL_VLM"
-    elif text_layer_reliable:
-        if has_meaningful_figures:
-            route = "hybrid_vlm_ocr"
-            mode = "REGION_VLM"
-        elif needs_formula_latex or needs_table_structure:
-            route = "hybrid_glm_ocr" if glm_available else "hybrid_vlm_ocr"
-            mode = "REGION_VLM"
-        else:
-            route = "text_only"
-            mode = "DIRECT"
-    else:
+        route_reasons = _unique_keep_order(route_reasons + ["glm_ocr_primary"])
+    elif vlm_available:
         route = "full_vlm_ocr"
         mode = "FULL_VLM"
+    else:
+        route = "text_only"
+        mode = "DIRECT"
 
     engine = {
         "text_only": "text_layer",
@@ -713,7 +720,9 @@ def _build_direct_markdown(page: fitz.Page) -> str:
             continue
         if any(_overlap_ratio(rect, table_rect) >= 0.45 for table_rect in table_rects):
             continue
-        cleaned = _clean_markdown(_trim_section_tail(raw_text))
+        # A PyMuPDF text block may contain several consecutive clause headings.
+        # Keeping only its prefix silently drops valid sections such as "7.1".
+        cleaned = _clean_markdown(raw_text)
         if not cleaned:
             continue
         items.append((float(y0), float(x0), cleaned))
@@ -730,7 +739,36 @@ def _build_direct_markdown(page: fitz.Page) -> str:
         parts.append(text)
 
     merged = "\n\n".join(parts)
-    return _clean_markdown(merged)
+    return _format_text_layer_markdown(_clean_markdown(merged))
+
+
+def _format_text_layer_markdown(text: str) -> str:
+    """Restore only unambiguous clause headings from text-layer line breaks."""
+    lines = str(text or "").splitlines()
+    formatted: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        match = re.fullmatch(r"\s*(\d+(?:\s*\.\s*\d+){1,4})\s*\.?\s*", line)
+        if match and index + 1 < len(lines):
+            title = lines[index + 1].strip()
+            if _is_clause_title_line(title):
+                number = re.sub(r"\s*\.\s*", ".", match.group(1))
+                formatted.append(f"## {number} {title}")
+                index += 2
+                continue
+        formatted.append(line)
+        index += 1
+    return _clean_markdown("\n".join(formatted))
+
+
+def _is_clause_title_line(line: str) -> bool:
+    value = str(line or "").strip()
+    if not value or len(value) > 120:
+        return False
+    if value.startswith(("#", "|", "$$", "[")):
+        return False
+    return not value.endswith(("。", "；", ";", ".", ":", "："))
 
 
 def _clean_markdown(text: str) -> str:
@@ -933,19 +971,6 @@ def _overlap_ratio(a: fitz.Rect, b: fitz.Rect) -> float:
     return float(inter.get_area() / denom)
 
 
-def _trim_section_tail(text: str) -> str:
-    lines = str(text or "").splitlines()
-    if not lines:
-        return ""
-    trimmed: list[str] = []
-    for idx, line in enumerate(lines):
-        stripped = line.strip()
-        if idx > 0 and re.match(r"^\d+(?:\.\d+){1,}\s+", stripped):
-            break
-        trimmed.append(line)
-    return "\n".join(trimmed).strip()
-
-
 def _unwrap_render_json(text: str) -> str:
     """
     Some models occasionally return JSON {"render":"...","rag":...} even when
@@ -1138,55 +1163,78 @@ def _build_output_elements(markdown: str, structured: Dict[str, Any], route_sele
     lines = (markdown or "").splitlines()
     table_source = "glm_ocr" if "glm" in route_selected else ("vlm_ocr" if "vlm" in route_selected else "pymupdf")
     formula_source = "glm_ocr" if "glm" in route_selected else "vlm_ocr"
+    table_metadata = structured.get("table_metadata") or {}
     tables = []
     for table in structured.get("tables") or []:
         table_text = str(table or "").strip()
         if not table_text:
             continue
-        title = _title_for_table(table_text, lines)
-        tables.append(
-            {
-                "source": table_source if not table_text.startswith("[TABLE_PLACEHOLDER]") else "pymupdf",
-                "title": title,
-                "markdown": table_text,
-                "semantic_summary": _table_summary(title, table_text),
-                "context": _context_for_anchor(title, lines),
-            }
-        )
+        metadata = table_metadata.get(table_text) if isinstance(table_metadata, dict) else None
+        metadata = metadata if isinstance(metadata, dict) else {}
+        title = str(metadata.get("title") or "").strip() or _title_for_table(table_text, lines)
+        item = {
+            "source": table_source if not table_text.startswith("[TABLE_PLACEHOLDER]") else "pymupdf",
+            "title": title,
+            "markdown": table_text,
+            "semantic_summary": str(metadata.get("description") or "").strip() or _table_summary(title, table_text),
+            "context": str(metadata.get("context") or "").strip() or _context_for_anchor(title, lines),
+        }
+        _copy_optional_element_metadata(item, metadata)
+        tables.append(item)
 
+    formula_descriptions = structured.get("formula_descriptions") or {}
+    formula_metadata = structured.get("formula_metadata") or {}
     formulas = []
     for formula in structured.get("formulas") or []:
         latex = str(formula or "").strip()
         if not latex:
             continue
-        context = _context_for_formula(latex, lines)
-        formulas.append(
-            {
-                "source": formula_source,
-                "latex": latex,
-                "semantic_summary": _formula_summary(context),
-                "variables": _extract_formula_variables_context(lines),
-                "context": context,
-            }
-        )
+        metadata = formula_metadata.get(latex) if isinstance(formula_metadata, dict) else None
+        metadata = metadata if isinstance(metadata, dict) else {}
+        context = str(metadata.get("context") or "").strip() or _context_for_formula(latex, lines)
+        semantic_summary = str(formula_descriptions.get(latex) or "").strip() or _formula_summary(context)
+        item = {
+            "source": formula_source,
+            "latex": latex,
+            "semantic_summary": semantic_summary,
+            "variables": str(metadata.get("variables") or "").strip() or _extract_formula_variables_context(lines),
+            "context": context,
+        }
+        _copy_optional_element_metadata(item, metadata)
+        formulas.append(item)
 
+    figure_metadata = structured.get("figure_metadata") or {}
     figures = []
     for figure in structured.get("figures") or []:
         desc = str(figure or "").strip()
         if not desc:
             continue
-        figures.append(
-            {
-                "source": "vlm_ocr",
-                "type": _guess_figure_type(desc),
-                "caption": _figure_caption(desc),
-                "description": desc,
-                "labels": _extract_figure_labels(desc),
-                "semantic_summary": desc,
-                "context": _nearby_figure_context(desc, lines),
-            }
-        )
+        metadata = figure_metadata.get(desc) if isinstance(figure_metadata, dict) else None
+        metadata = metadata if isinstance(metadata, dict) else {}
+        item = {
+            "source": "vlm_ocr",
+            "type": str(metadata.get("type") or "").strip() or _guess_figure_type(desc),
+            "caption": str(metadata.get("caption") or "").strip() or _figure_caption(desc),
+            "description": desc,
+            "labels": metadata.get("labels") if isinstance(metadata.get("labels"), list) else _extract_figure_labels(desc),
+            "semantic_summary": desc,
+            "context": str(metadata.get("context") or "").strip() or _nearby_figure_context(desc, lines),
+        }
+        _copy_optional_element_metadata(item, metadata)
+        figures.append(item)
     return {"tables": tables, "formulas": formulas, "figures": figures}
+
+
+def _copy_optional_element_metadata(item: Dict[str, Any], metadata: Dict[str, Any]) -> None:
+    bbox = metadata.get("bbox")
+    if isinstance(bbox, list) and len(bbox) == 4:
+        item["bbox"] = bbox
+    confidence = metadata.get("confidence")
+    if isinstance(confidence, (int, float)) and not isinstance(confidence, bool):
+        item["confidence"] = confidence
+    status = str(metadata.get("status") or "").strip()
+    if status:
+        item["status"] = status
 
 
 def _semantic_status(
@@ -1198,16 +1246,30 @@ def _semantic_status(
 ) -> Dict[str, Any]:
     missing = []
     reason = ""
+    if metrics.get("needs_formula_latex") and not structured.get("formulas"):
+        missing.append("formula_latex")
+        if not rc.get("vlm_ocr_enabled") or not metrics.get("vlm_ocr_available"):
+            reason = "vlm_ocr_disabled"
+        else:
+            reason = fallback_reason or "formula_extraction_unavailable"
+    if metrics.get("needs_table_structure") and not structured.get("tables"):
+        missing.append("table_structure")
+        if not reason:
+            if not rc.get("vlm_ocr_enabled") or not metrics.get("vlm_ocr_available"):
+                reason = "vlm_ocr_disabled"
+            else:
+                reason = fallback_reason or "table_extraction_unavailable"
     if (
         rc.get("figure_semantic_description_required")
         and metrics.get("has_meaningful_figures")
         and not structured.get("figures")
     ):
         missing.append("figure_description")
-        if not rc.get("vlm_ocr_enabled") or not metrics.get("vlm_ocr_available"):
-            reason = "vlm_ocr_disabled"
-        else:
-            reason = fallback_reason or "figure_description_unavailable"
+        if not reason:
+            if not rc.get("vlm_ocr_enabled") or not metrics.get("vlm_ocr_available"):
+                reason = "vlm_ocr_disabled"
+            else:
+                reason = fallback_reason or "figure_description_unavailable"
     if route_selected == "blank":
         return {"complete": True, "missing": [], "reason": ""}
     return {"complete": not missing, "missing": missing, "reason": reason}
@@ -1437,36 +1499,197 @@ def _is_formula_noise_line(line: str) -> bool:
 
 def _normalize_structured(value: Any) -> Dict[str, Any]:
     raw = value if isinstance(value, dict) else {}
+    table_metadata: Dict[str, Dict[str, Any]] = {}
+    tables: list[str] = []
+    for item in _structured_list(raw, "tables"):
+        table_value = _structured_value(item, "markdown", "table_markdown", "data")
+        for table in _normalize_table_candidates([table_value]):
+            tables.append(table)
+            metadata = _structured_metadata(
+                item,
+                title=("title", "table_title", "tableName", "table_name"),
+                description=("description", "semanticDesc", "semantic_summary", "summary"),
+                context=("context", "surrounding_text"),
+            )
+            if metadata:
+                table_metadata[table] = metadata
+    tables = _unique_keep_order(tables)
 
-    def _as_list(name: str) -> list[str]:
-        v = raw.get(name)
-        if isinstance(v, list):
-            return [str(x).strip() for x in v if str(x).strip()]
-        return []
+    formula_descriptions: Dict[str, str] = {}
+    formula_metadata: Dict[str, Dict[str, Any]] = {}
+    formula_values: list[str] = []
+    for item in _structured_list(raw, "formulas"):
+        latex = str(_structured_value(item, "latex", "formula", "text") or "").strip()
+        if not latex:
+            continue
+        formula_values.append(latex)
+        metadata = _structured_metadata(
+            item,
+            variables=("variables",),
+            context=("context", "surrounding_text"),
+        )
+        if metadata:
+            formula_metadata[latex] = metadata
+        description = _first_text(
+            item if isinstance(item, dict) else {},
+            "description",
+            "semanticDesc",
+            "semantic_summary",
+            "summary",
+        )
+        if description:
+            formula_descriptions[latex] = description
+    formulas = _filter_formula_candidates(formula_values, tables)
 
-    figures = _as_list("figures")
-    figures = [f for f in figures if not _is_noise_figure_line(f"[FIGURE: {f}]")]
-    tables = _normalize_table_candidates(_as_list("tables"))
-    formulas = _filter_formula_candidates(_as_list("formulas"), tables)
+    figure_metadata: Dict[str, Dict[str, Any]] = {}
+    figures: list[str] = []
+    for item in _structured_list(raw, "figures"):
+        item_dict = item if isinstance(item, dict) else {}
+        description = _first_text(item_dict, "description", "semanticDesc", "semantic_summary", "summary")
+        caption = _first_text(item_dict, "caption", "capture", "figureName", "name", "title")
+        figure = description or caption or (str(item or "").strip() if not isinstance(item, dict) else "")
+        if not figure or _is_noise_figure_line(f"[FIGURE: {figure}]"):
+            continue
+        figures.append(figure)
+        metadata = _structured_metadata(
+            item,
+            caption=("caption", "capture", "figureName", "name", "title"),
+            type=("type",),
+            context=("context", "surrounding_text"),
+        )
+        labels = item_dict.get("labels")
+        if isinstance(labels, list):
+            metadata["labels"] = [str(label).strip() for label in labels if str(label).strip()]
+        if metadata:
+            figure_metadata[figure] = metadata
+    figures = _unique_keep_order(figures)
 
-    return {
+    raw_descriptions = raw.get("formula_descriptions")
+    if isinstance(raw_descriptions, dict):
+        formula_descriptions.update(
+            {
+                str(latex).strip(): str(description).strip()
+                for latex, description in raw_descriptions.items()
+                if str(latex).strip() in formulas and str(description).strip()
+            }
+        )
+
+    normalized = {
         "formulas": formulas,
         "tables": tables,
         "figures": figures,
     }
+    if formula_descriptions:
+        normalized["formula_descriptions"] = {
+            latex: formula_descriptions[latex]
+            for latex in formulas
+            if latex in formula_descriptions
+        }
+    if formula_metadata:
+        normalized["formula_metadata"] = {
+            latex: formula_metadata[latex]
+            for latex in formulas
+            if latex in formula_metadata
+        }
+    if table_metadata:
+        normalized["table_metadata"] = {
+            table: table_metadata[table]
+            for table in tables
+            if table in table_metadata
+        }
+    if figure_metadata:
+        normalized["figure_metadata"] = {
+            figure: figure_metadata[figure]
+            for figure in figures
+            if figure in figure_metadata
+        }
+    return normalized
+
+
+def _structured_list(raw: Dict[str, Any], name: str) -> list[Any]:
+    value = raw.get(name)
+    return value if isinstance(value, list) else []
+
+
+def _structured_value(item: Any, *keys: str) -> Any:
+    if not isinstance(item, dict):
+        return item
+    for key in keys:
+        value = item.get(key)
+        if value:
+            return value
+    if any(item.get(key) for key in ("header", "columns", "rows", "raw_array", "normalized_rows")):
+        return item
+    return ""
+
+
+def _structured_metadata(item: Any, **text_fields: tuple[str, ...]) -> Dict[str, Any]:
+    if not isinstance(item, dict):
+        return {}
+    metadata: Dict[str, Any] = {}
+    for output_name, keys in text_fields.items():
+        value = _first_text(item, *keys)
+        if value:
+            metadata[output_name] = value
+    bbox = item.get("bbox")
+    if isinstance(bbox, list) and len(bbox) == 4:
+        metadata["bbox"] = bbox
+    confidence = item.get("confidence")
+    if isinstance(confidence, (int, float)) and not isinstance(confidence, bool):
+        metadata["confidence"] = confidence
+    status = _first_text(item, "status")
+    if status:
+        metadata["status"] = status
+    return metadata
+
+
+def _first_text(item: Dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 def _structured_from_ocr_result(result: OcrResult, include_figures: bool) -> Dict[str, Any]:
-    tables = [item.markdown or item.text for item in result.tables if (item.markdown or item.text)]
-    formulas = [item.latex or item.text for item in result.formulas if (item.latex or item.text)]
-    figures = []
-    if include_figures:
-        figures = [
-            item.description or item.caption or item.text
-            for item in result.figures
-            if (item.description or item.caption or item.text)
-        ]
+    tables = [_ocr_element_payload(item, "table") for item in result.tables if (item.markdown or item.text)]
+    formulas = [_ocr_element_payload(item, "formula") for item in result.formulas if (item.latex or item.text)]
+    figures = (
+        [_ocr_element_payload(item, "figure") for item in result.figures if (item.description or item.caption or item.text)]
+        if include_figures
+        else []
+    )
     return _normalize_structured({"tables": tables, "formulas": formulas, "figures": figures})
+
+
+def _ocr_element_payload(item: Any, kind: str) -> Dict[str, Any]:
+    raw = item.raw if isinstance(item.raw, dict) else {}
+    if kind == "table":
+        payload = {
+            "markdown": item.markdown or item.text,
+            "title": item.title,
+            "description": item.description,
+            "context": item.context,
+        }
+    elif kind == "formula":
+        payload = {
+            "latex": item.latex or item.text,
+            "description": item.description,
+            "variables": raw.get("variables"),
+            "context": item.context,
+        }
+    else:
+        payload = {
+            "caption": item.caption,
+            "description": item.description or item.caption or item.text,
+            "type": raw.get("type"),
+            "labels": raw.get("labels"),
+            "context": item.context,
+        }
+    for key in ("bbox", "confidence", "status"):
+        if raw.get(key) is not None:
+            payload[key] = raw[key]
+    return payload
 
 
 def _structured_insufficient_for_route(structured: Dict[str, Any], route_selected: str, metrics: Dict[str, Any]) -> bool:
@@ -1476,6 +1699,19 @@ def _structured_insufficient_for_route(structured: Dict[str, Any], route_selecte
         if metrics.get("needs_table_structure") and not structured.get("tables"):
             return True
     return False
+
+
+def _glm_ocr_markdown_bad(markdown: str) -> bool:
+    text = str(markdown or "")
+    compact = re.sub(r"\s+", "", text)
+    if not compact:
+        return True
+    if re.search(r"\(cid:\d+\)|[\uE000-\uF8FF\uFFFD�]", text, flags=re.IGNORECASE):
+        return True
+    if re.search(r"[?]{4,}", compact):
+        return True
+    symbol_ratio = len(re.findall(r"[!-/:-@\\[-`{-~]", compact)) / max(len(compact), 1)
+    return symbol_ratio >= 0.75 and not re.search(r"[A-Za-z0-9\u3400-\u4dbf\u4e00-\u9fff]", compact)
 
 
 def _filter_formula_candidates(formulas: list[str], tables: list[str]) -> list[str]:

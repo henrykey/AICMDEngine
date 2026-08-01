@@ -356,7 +356,7 @@ bash AIPlanner/deploy/deploy.sh \
 
 缓存目录：
 
-- `AIPlanner/deploy/cache/wheels/`
+- `AIPlanner/deploy/cache/wheels/linux-amd64/` 或 `linux-arm64/`
 - `AIPlanner/.wheelhouse/mcp-router/`
 - `AIPlanner/mcp/servers/PageIndex/.wheelhouse/`
 - `AIPlanner/mcp/servers/PDF2MDEnhanced/.wheelhouse/`

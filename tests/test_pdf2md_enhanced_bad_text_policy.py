@@ -131,6 +131,7 @@ class FakeDoc:
 class FakeVLMClient:
     render = "VLM markdown"
     page_text = "VLM page text"
+    region_structured = {"formulas": [], "tables": [], "figures": []}
 
     def __init__(self, cfg):
         self.enabled = bool(cfg is not None)
@@ -156,11 +157,26 @@ class FakeVLMClient:
 
     def extract_region_structured(self, image_path):
         _ = image_path
-        return {"formulas": [], "tables": [], "figures": []}
+        return self.region_structured
 
     def cleanup_markdown_table_noise(self, markdown_text):
         return markdown_text
 
+
+def test_direct_markdown_preserves_multiple_numbered_sections_in_one_text_block():
+    page = FakePage(
+        text="7 结构\n7.1 总体结构\n7.1.1 本文件中发卡式热交换器主要包括。\n",
+        blocks=[
+            (10.0, 10.0, 70.0, 20.0,
+             "7 结构\n7.1 总体结构\n7.1.1 本文件中发卡式热交换器主要包括。\n", 0, 0)
+        ],
+    )
+
+    markdown = page_processor._build_direct_markdown(page)
+
+    assert "7 结构" in markdown
+    assert "7.1 总体结构" in markdown
+    assert "7.1.1 本文件中发卡式热交换器主要包括。" in markdown
 
 class FakeGLMOcrClient:
     result = None
@@ -210,9 +226,208 @@ def _patch_page_runtime(monkeypatch, page):
     monkeypatch.setattr(page_processor, "OpenAICompatibleOcrClient", FakeGLMOcrClient)
     FakeGLMOcrClient.result = None
     FakeGLMOcrClient.error = None
+    FakeVLMClient.render = "VLM markdown"
+    FakeVLMClient.page_text = "VLM page text"
+    FakeVLMClient.region_structured = {"formulas": [], "tables": [], "figures": []}
 
 
-def test_good_text_page_stays_on_text_layer(monkeypatch):
+def _build_structured_pdf_fixture(path: Path) -> None:
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text(
+        (48, 64),
+        "4.1 Structured extraction fixture\n"
+        "This authorized synthetic page validates local routing and structured element contracts.\n"
+        "Formula: t = pD / (2 sigma phi - p). Variables are defined below.\n"
+        "Table 1 Fixture measurements",
+        fontsize=11,
+    )
+
+    left, top, cell_width, cell_height = 48, 150, 140, 28
+    for row in range(4):
+        y = top + row * cell_height
+        page.draw_line((left, y), (left + 2 * cell_width, y))
+    for col in range(3):
+        x = left + col * cell_width
+        page.draw_line((x, top), (x, top + 3 * cell_height))
+    page.insert_text((left + 8, top + 19), "Name", fontsize=10)
+    page.insert_text((left + cell_width + 8, top + 19), "Value", fontsize=10)
+    page.insert_text((left + 8, top + cell_height + 19), "alpha", fontsize=10)
+    page.insert_text((left + cell_width + 8, top + cell_height + 19), "1.25", fontsize=10)
+    page.insert_text((left + 8, top + 2 * cell_height + 19), "beta", fontsize=10)
+    page.insert_text((left + cell_width + 8, top + 2 * cell_height + 19), "2.50", fontsize=10)
+
+    page.draw_circle((420, 210), 38)
+    page.draw_line((382, 210), (458, 210))
+    page.draw_line((420, 172), (420, 248))
+    page.insert_text((370, 270), "Figure 1 Calibration schematic", fontsize=10)
+    doc.save(path)
+    doc.close()
+
+
+def test_real_pdf_auto_glm_to_vlm_preserves_structured_element_contract(monkeypatch, tmp_path):
+    pdf_path = tmp_path / "structured-extraction-fixture.pdf"
+    _build_structured_pdf_fixture(pdf_path)
+
+    with fitz.open(pdf_path) as doc:
+        assert len(doc) == 1
+        assert doc[0].find_tables().tables
+
+    class FixtureGLMOcrClient:
+        calls = 0
+
+        def __init__(self, cfg, source="glm_ocr"):
+            self.enabled = bool((cfg or {}).get("enabled"))
+            self.source = source
+
+        def extract_page(self, image_path):
+            FixtureGLMOcrClient.calls += 1
+            assert Path(image_path).read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+            return OcrResult(
+                markdown="GLM OCR fixture markdown",
+                formulas=[
+                    OcrElement(
+                        kind="formula",
+                        source="glm_ocr",
+                        latex="t=\\frac{pD}{2\\sigma\\phi-p}",
+                        description="GLM formula only; table intentionally omitted to exercise fallback.",
+                    )
+                ]
+            )
+
+    class FixtureVLMClient:
+        calls = 0
+
+        def __init__(self, cfg):
+            self.enabled = bool(cfg)
+            self.provider = "fixture"
+            self.model = "fixture-vlm"
+            self.base_url = "local://fixture"
+            self.timeout_sec = 5
+            self.max_retries = 0
+
+        def extract_region_structured(self, image_path):
+            FixtureVLMClient.calls += 1
+            assert Path(image_path).read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+            return {
+                "tables": [
+                    {
+                        "title": "Table 1 Fixture measurements",
+                        "markdown": "| Name | Value |\n| --- | --- |\n| alpha | 1.25 |\n| beta | 2.50 |",
+                        "description": "Synthetic calibration values for the local persistence contract.",
+                        "bbox": [48, 150, 328, 234],
+                        "confidence": 0.99,
+                        "status": "EXTRACTED",
+                    }
+                ],
+                "formulas": [
+                    {
+                        "latex": "t=\\frac{pD}{2\\sigma\\phi-p}",
+                        "description": "Computes the required wall thickness from pressure, diameter, stress, and efficiency.",
+                        "variables": "t thickness; p pressure; D diameter; sigma stress; phi efficiency",
+                        "context": "Formula on the synthetic validation page.",
+                        "bbox": [48, 92, 360, 112],
+                        "confidence": 0.98,
+                        "status": "EXTRACTED",
+                    }
+                ],
+                "figures": [
+                    {
+                        "caption": "Figure 1 Calibration schematic",
+                        "type": "schematic",
+                        "description": "A circle with horizontal and vertical center lines.",
+                        "labels": ["horizontal axis", "vertical axis"],
+                        "context": "Synthetic calibration figure.",
+                        "bbox": [370, 172, 458, 270],
+                        "confidence": 0.97,
+                        "status": "EXTRACTED",
+                    }
+                ],
+            }
+
+        def full_page_dual_output(self, image_path):
+            return {
+                "render": "VLM fixture markdown",
+                "rag": {
+                    "page_text": "VLM fixture page text",
+                    "elements": self.extract_region_structured(image_path),
+                },
+            }
+
+        def cleanup_markdown_table_noise(self, markdown_text):
+            return markdown_text
+
+    monkeypatch.setattr(page_processor, "OpenAICompatibleOcrClient", FixtureGLMOcrClient)
+    monkeypatch.setattr(page_processor, "DynamicVLMClient", FixtureVLMClient)
+
+    result = page_processor.process_page(
+        source_path=str(pdf_path),
+        page_no=1,
+        policy="auto",
+        vlm_config={"provider": "fixture"},
+        routing_config={
+            "formula_score_region_vlm": 0.01,
+            "table_score_region_vlm": 0.01,
+            "ocr_config": {
+                "glm_ocr": {
+                    "enabled": True,
+                    "model": "fixture-glm",
+                    "api_key": "unused",
+                    "base_url": "local://fixture",
+                }
+            },
+            "render_cleanup_with_llm": False,
+        },
+        prev_context=None,
+    )
+
+    assert result["route_selected"] == "full_vlm_ocr"
+    assert result["decision"]["fallback_reason"] == "glm_ocr_insufficient_structured_output"
+    assert result["decision"]["glm_calls"] == FixtureGLMOcrClient.calls == 1
+    assert result["decision"]["vlm_calls"] == FixtureVLMClient.calls == 1
+    assert result["semantic_status"] == {"complete": True, "missing": [], "reason": ""}
+
+    table = result["elements"]["tables"][0]
+    assert table["title"] == "Table 1 Fixture measurements"
+    assert table["markdown"].splitlines()[-1] == "| beta | 2.50 |"
+    assert table["semantic_summary"] == "Synthetic calibration values for the local persistence contract."
+    assert table["bbox"] == [48, 150, 328, 234]
+    assert table["confidence"] == 0.99
+    assert table["status"] == "EXTRACTED"
+
+    formula = result["elements"]["formulas"][0]
+    assert formula["latex"] == "t=\\frac{pD}{2\\sigma\\phi-p}"
+    assert formula["semantic_summary"].startswith("Computes the required wall thickness")
+    assert formula["variables"].startswith("t thickness")
+    assert formula["context"] == "Formula on the synthetic validation page."
+    assert formula["bbox"] == [48, 92, 360, 112]
+    assert formula["confidence"] == 0.98
+    assert formula["status"] == "EXTRACTED"
+
+    figure = result["elements"]["figures"][0]
+    assert figure["caption"] == "Figure 1 Calibration schematic"
+    assert figure["type"] == "schematic"
+    assert figure["description"] == "A circle with horizontal and vertical center lines."
+    assert figure["labels"] == ["horizontal axis", "vertical axis"]
+    assert figure["context"] == "Synthetic calibration figure."
+    assert figure["bbox"] == [370, 172, 458, 270]
+    assert figure["confidence"] == 0.97
+    assert figure["status"] == "EXTRACTED"
+
+
+def test_unreadable_empty_structured_objects_do_not_count_as_extracted():
+    structured = page_processor._normalize_structured(
+        {
+            "tables": [{"title": "Unreadable table", "markdown": "", "status": "UNREADABLE"}],
+            "formulas": [{"latex": "", "status": "UNREADABLE"}],
+            "figures": [{"caption": "", "description": "", "status": "UNREADABLE"}],
+        }
+    )
+
+    assert structured == {"tables": [], "formulas": [], "figures": []}
+
+
+def test_good_text_page_uses_vlm_when_glm_is_unavailable(monkeypatch):
     text = "这是正常中文文本，用于测试文本层提取。\n第二段包含 English words and numbers 123."
     page = FakePage(
         text=text,
@@ -231,12 +446,50 @@ def test_good_text_page_stays_on_text_layer(monkeypatch):
         prev_context=None,
     )
 
-    assert result["route_selected"] == "text_only"
-    assert result["legacy_route_selected"] == "text_layer"
+    assert result["route_selected"] == "full_vlm_ocr"
+    assert result["legacy_route_selected"] == "vlm"
     assert result["bad_text_detected"] is False
     assert result["bad_text_reasons"] == []
-    assert "正常中文文本" in result["render"]["markdown"]
+    assert result["render"]["markdown"] == "VLM markdown"
     assert result["text_quality_summary"]["missing_unicode_mapping"] is False
+
+
+def test_text_only_page_formats_split_clause_titles_as_markdown(monkeypatch):
+    text = (
+        "3.7\n"
+        "加强环\n"
+        "reinforcement rings\n"
+        "用于提高波纹管局部刚度的构件。\n\n"
+        "3. 10\n"
+        "辅助套筒\n"
+        "auxiliary sleeve\n"
+        "用于保护波纹管的部件。\n\n"
+        "4 .1\n"
+        "通则\n"
+        "波纹膨胀节应符合本标准的规定。"
+    )
+    page = FakePage(
+        text=text,
+        blocks=[(10, 10, 80, 80, text, 0, 0)],
+        dict_payload=_text_block_payload(text),
+        rawdict_payload=_text_block_payload(text),
+    )
+    _patch_page_runtime(monkeypatch, page)
+
+    result = page_processor.process_page(
+        source_path="/tmp/gbt16749-page-7.pdf",
+        page_no=1,
+        policy="force_direct",
+        vlm_config=None,
+        routing_config={"render_cleanup_with_llm": False},
+        prev_context=None,
+    )
+
+    assert result["route_selected"] == "text_only"
+    assert "## 3.7 加强环" in result["render"]["markdown"]
+    assert "## 3.10 辅助套筒" in result["render"]["markdown"]
+    assert "## 4.1 通则" in result["render"]["markdown"]
+    assert "用于提高波纹管局部刚度的构件。" in result["render"]["markdown"]
 
 
 def test_bad_font_page_switches_to_vlm(monkeypatch):
@@ -312,9 +565,16 @@ def test_formula_page_uses_hybrid_glm_when_enabled(monkeypatch):
     )
     _patch_page_runtime(monkeypatch, page)
     FakeGLMOcrClient.result = OcrResult(
-        markdown="",
+        markdown="所需壁厚按下式计算。",
         page_text="",
-        formulas=[OcrElement(kind="formula", source="glm_ocr", latex="t=\\frac{pD}{2\\sigma\\phi-p}")],
+        formulas=[
+            OcrElement(
+                kind="formula",
+                source="glm_ocr",
+                latex="t=\\frac{pD}{2\\sigma\\phi-p}",
+                description="用于计算承压部件所需壁厚。",
+            )
+        ],
     )
 
     result = page_processor.process_page(
@@ -329,10 +589,37 @@ def test_formula_page_uses_hybrid_glm_when_enabled(monkeypatch):
         prev_context=None,
     )
 
-    assert result["route_selected"] == "hybrid_glm_ocr"
+    assert result["route_selected"] == "full_glm_ocr"
     assert result["decision"]["glm_calls"] == 1
     assert result["elements"]["formulas"][0]["source"] == "glm_ocr"
+    assert result["elements"]["formulas"][0]["semantic_summary"] == "用于计算承压部件所需壁厚。"
     assert result["semantic_status"]["complete"] is True
+
+
+def test_formula_page_without_ocr_result_is_not_marked_complete(monkeypatch):
+    text = "所需壁厚按下式计算：t = pD / (2σφ - p)。式中 p 为设计压力。"
+    page = FakePage(
+        text=text,
+        blocks=[(10, 10, 80, 30, text, 0, 0)],
+        dict_payload=_text_block_payload(text),
+        rawdict_payload=_text_block_payload(text),
+    )
+    _patch_page_runtime(monkeypatch, page)
+
+    result = page_processor.process_page(
+        source_path="/tmp/formula-missing.pdf",
+        page_no=1,
+        policy="auto",
+        vlm_config=None,
+        routing_config={"render_cleanup_with_llm": False, "vlm_ocr_enabled": False},
+        prev_context=None,
+    )
+
+    assert result["route_selected"] == "text_only"
+    assert result["elements"]["formulas"] == []
+    assert result["semantic_status"]["complete"] is False
+    assert result["semantic_status"]["missing"] == ["formula_latex"]
+    assert result["semantic_status"]["reason"] == "vlm_ocr_disabled"
 
 
 def test_scanned_page_uses_full_glm_then_falls_back_to_vlm(monkeypatch):
@@ -380,20 +667,95 @@ def test_vlm_disabled_marks_missing_figure_semantics_incomplete(monkeypatch):
         image_rects={1: [fitz.Rect(0, 0, 60, 60)]},
     )
     _patch_page_runtime(monkeypatch, page)
+    FakeGLMOcrClient.result = OcrResult(markdown="工程结构示意图正文。")
 
     result = page_processor.process_page(
         source_path="/tmp/figure.pdf",
         page_no=1,
         policy="auto",
         vlm_config=None,
-        routing_config={"vlm_ocr_enabled": False, "render_cleanup_with_llm": False},
+        routing_config={
+            "vlm_ocr_enabled": False,
+            "ocr_config": {"glm_ocr": {"enabled": True, "model": "glm-ocr", "api_key": "x", "base_url": "http://x"}},
+            "render_cleanup_with_llm": False,
+        },
         prev_context=None,
     )
 
-    assert result["route_selected"] == "hybrid_vlm_ocr"
+    assert result["route_selected"] == "full_glm_ocr"
     assert result["semantic_status"]["complete"] is False
     assert result["semantic_status"]["missing"] == ["figure_description"]
     assert result["semantic_status"]["reason"] == "vlm_ocr_disabled"
+
+
+def test_visual_page_prefers_full_glm_ocr_for_page_markdown(monkeypatch):
+    text = "本页包含工程结构示意图，正文说明用于保持文本层可靠。" * 6
+    page = FakePage(
+        text=text,
+        blocks=[(0, 0, 100, 20, text, 0, 0)],
+        dict_payload=_text_block_payload(text),
+        rawdict_payload=_text_block_payload(text),
+        images=[(1,)],
+        image_rects={1: [fitz.Rect(0, 0, 60, 60)]},
+    )
+    _patch_page_runtime(monkeypatch, page)
+    FakeGLMOcrClient.result = OcrResult(markdown="7 结构\n\n7.1 总体结构")
+    FakeVLMClient.region_structured = {
+        "formulas": [],
+        "tables": [],
+        "figures": [{"caption": "图1", "description": "发卡式热交换器结构示意图。"}],
+    }
+
+    result = page_processor.process_page(
+        source_path="/tmp/figure-page.pdf",
+        page_no=1,
+        policy="auto",
+        vlm_config={"provider": "fake"},
+        routing_config={
+            "ocr_config": {"glm_ocr": {"enabled": True, "model": "glm-ocr", "api_key": "x", "base_url": "http://x"}},
+            "render_cleanup_with_llm": False,
+        },
+        prev_context=None,
+    )
+
+    assert result["route_selected"] == "full_glm_ocr"
+    assert result["decision"]["glm_calls"] == 1
+    assert result["decision"]["vlm_calls"] == 1
+    assert result["render"]["markdown"] == "7 结构\n\n7.1 总体结构"
+    assert result["elements"]["figures"][0]["semantic_summary"] == "发卡式热交换器结构示意图。"
+
+
+def test_bad_glm_markdown_falls_back_to_full_vlm(monkeypatch):
+    text = "本页包含工程结构示意图，正文说明用于保持文本层可靠。" * 6
+    page = FakePage(
+        text=text,
+        blocks=[(0, 0, 100, 20, text, 0, 0)],
+        dict_payload=_text_block_payload(text),
+        rawdict_payload=_text_block_payload(text),
+        images=[(1,)],
+        image_rects={1: [fitz.Rect(0, 0, 60, 60)]},
+    )
+    _patch_page_runtime(monkeypatch, page)
+    FakeGLMOcrClient.result = OcrResult(markdown="\ufffd\ufffd\ufffd????")
+    FakeVLMClient.region_structured = {"formulas": [], "tables": [], "figures": []}
+
+    result = page_processor.process_page(
+        source_path="/tmp/bad-glm-page.pdf",
+        page_no=1,
+        policy="auto",
+        vlm_config={"provider": "fake"},
+        routing_config={
+            "ocr_config": {"glm_ocr": {"enabled": True, "model": "glm-ocr", "api_key": "x", "base_url": "http://x"}},
+            "render_cleanup_with_llm": False,
+        },
+        prev_context=None,
+    )
+
+    assert result["route_selected"] == "full_vlm_ocr"
+    assert result["decision"]["glm_calls"] == 1
+    assert result["decision"]["vlm_calls"] == 1
+    assert result["decision"]["fallback_reason"] == "glm_ocr_bad_markdown"
+    assert result["render"]["markdown"] == "VLM markdown"
 
 
 def test_blank_page_completes_placeholder_without_vlm(monkeypatch):

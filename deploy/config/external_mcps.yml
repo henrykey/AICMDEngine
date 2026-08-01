@@ -1,7 +1,7 @@
 servers:
   office-word:
     transport: http
-    url: http://office-word:9002
+    url: http://host.docker.internal:9002
     timeout: 120
   docs-converter:
     transport: http
@@ -23,5 +23,5 @@ servers:
     timeout: 60
   basin-comparator:
     transport: http
-    url: http://basin-comparator-mcp:8139
+    url: http://host.docker.internal:8139
     timeout: 300

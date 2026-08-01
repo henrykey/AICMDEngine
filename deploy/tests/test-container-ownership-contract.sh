@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT="${ROOT_DIR}/deploy/deploy.sh"
+COMPOSE="${ROOT_DIR}/deploy/docker-compose.mcp.yml"
+EXTERNAL_MCPS="${ROOT_DIR}/deploy/config/external_mcps.yml"
 
 fail_test() {
   echo "FAIL: $*" >&2
@@ -26,5 +28,12 @@ grep -F -- '--project-name "${COMPOSE_PROJECT_NAME}"' "${SCRIPT}" >/dev/null \
   || fail_test "Compose project identity is not stable"
 grep -F -- 'up -d --force-recreate ${SERVICES}' "${SCRIPT}" >/dev/null \
   || fail_test "selected services are not force-recreated"
+sed -n '/^  mcp-router:/,/^  plan2:/p' "${COMPOSE}" \
+  | grep -F -- 'host.docker.internal:host-gateway' >/dev/null \
+  || fail_test "mcp-router cannot resolve host-proxied MCP services"
+grep -F -- 'url: http://host.docker.internal:9002' "${EXTERNAL_MCPS}" >/dev/null \
+  || fail_test "office-word does not target the host MCP proxy"
+grep -F -- 'url: http://host.docker.internal:8139' "${EXTERNAL_MCPS}" >/dev/null \
+  || fail_test "BasinComparator does not use an allowed host name"
 
 echo "PASS: remote container ownership contract"

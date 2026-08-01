@@ -172,8 +172,17 @@ class DynamicVLMClient:
 
     def extract_region_structured(self, image_path: str) -> Dict[str, Any]:
         prompt = (
-            "Extract formulas, tables and figure captions from this page and return strict JSON keys: "
-            "formulas(list of latex strings), tables(list of markdown tables), figures(list of captions)."
+            "Extract tables, formulas, and meaningful figures from this page. Return strict JSON only with keys "
+            "tables, formulas, figures. Preserve visible source content; do not invent missing values. "
+            "Use objects so downstream persistence retains semantics and source location. Schema: "
+            '{"tables":[{"title":"","markdown":"","description":"","bbox":[0,0,0,0],'
+            '"confidence":0.0,"status":"EXTRACTED|LOW_CONFIDENCE|UNREADABLE"}],'
+            '"formulas":[{"latex":"","description":"","variables":"","context":"",'
+            '"bbox":[0,0,0,0],"confidence":0.0,"status":"EXTRACTED|LOW_CONFIDENCE|UNREADABLE"}],'
+            '"figures":[{"caption":"","type":"schematic|chart|diagram|figure|unknown",'
+            '"description":"","labels":[],"context":"","bbox":[0,0,0,0],'
+            '"confidence":0.0,"status":"EXTRACTED|LOW_CONFIDENCE|UNREADABLE"}]}. '
+            "Do not invent content for unreadable objects; empty content remains incomplete downstream."
         )
         text = self._call_image_prompt(image_path, prompt, max_tokens=self.max_tokens)
         data = self._extract_json(text)
