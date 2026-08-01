@@ -1235,6 +1235,20 @@ def _copy_optional_element_metadata(item: Dict[str, Any], metadata: Dict[str, An
     status = str(metadata.get("status") or "").strip()
     if status:
         item["status"] = status
+    bbox_space = str(metadata.get("bbox_space") or "").strip()
+    if bbox_space:
+        item["bbox_space"] = bbox_space
+    for key in (
+        "columns",
+        "normalized_rows",
+        "source_cells",
+        "cell_status",
+        "source_cell_row_offset",
+        "source_block_index",
+    ):
+        value = metadata.get(key)
+        if value is not None:
+            item[key] = value
 
 
 def _semantic_status(
@@ -1503,15 +1517,29 @@ def _normalize_structured(value: Any) -> Dict[str, Any]:
     tables: list[str] = []
     for item in _structured_list(raw, "tables"):
         table_value = _structured_value(item, "markdown", "table_markdown", "data")
-        for table in _normalize_table_candidates([table_value]):
-            tables.append(table)
-            metadata = _structured_metadata(
-                item,
-                title=("title", "table_title", "tableName", "table_name"),
-                description=("description", "semanticDesc", "semantic_summary", "summary"),
-                context=("context", "surrounding_text"),
-            )
-            if metadata:
+        normalized_tables = _normalize_table_candidates([table_value])
+        tables.extend(normalized_tables)
+        if not normalized_tables:
+            continue
+        metadata = _structured_metadata(
+            item,
+            title=("title", "table_title", "tableName", "table_name"),
+            description=("description", "semanticDesc", "semantic_summary", "summary"),
+            context=("context", "surrounding_text"),
+        )
+        for key in (
+            "columns",
+            "normalized_rows",
+            "source_cells",
+            "cell_status",
+            "source_cell_row_offset",
+            "source_block_index",
+        ):
+            value = item.get(key) if isinstance(item, dict) else None
+            if value is not None:
+                metadata[key] = value
+        if metadata:
+            for table in normalized_tables:
                 table_metadata[table] = metadata
     tables = _unique_keep_order(tables)
 
@@ -1634,12 +1662,18 @@ def _structured_metadata(item: Any, **text_fields: tuple[str, ...]) -> Dict[str,
     bbox = item.get("bbox")
     if isinstance(bbox, list) and len(bbox) == 4:
         metadata["bbox"] = bbox
+    bbox_space = _first_text(item, "bbox_space")
+    if bbox_space:
+        metadata["bbox_space"] = bbox_space
     confidence = item.get("confidence")
     if isinstance(confidence, (int, float)) and not isinstance(confidence, bool):
         metadata["confidence"] = confidence
     status = _first_text(item, "status")
     if status:
         metadata["status"] = status
+    source_block_index = item.get("source_block_index", item.get("block_index"))
+    if isinstance(source_block_index, int) and not isinstance(source_block_index, bool):
+        metadata["source_block_index"] = source_block_index
     return metadata
 
 
@@ -1686,7 +1720,19 @@ def _ocr_element_payload(item: Any, kind: str) -> Dict[str, Any]:
             "labels": raw.get("labels"),
             "context": item.context,
         }
-    for key in ("bbox", "confidence", "status"):
+    passthrough_keys = ["bbox", "bbox_space", "confidence", "status", "block_index", "source_block_index"]
+    if kind == "table":
+        passthrough_keys.extend(
+            [
+                "columns",
+                "normalized_rows",
+                "source_cells",
+                "cell_status",
+                "source_cell_row_offset",
+                "source_block_index",
+            ]
+        )
+    for key in passthrough_keys:
         if raw.get(key) is not None:
             payload[key] = raw[key]
     return payload

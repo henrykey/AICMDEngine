@@ -265,5 +265,9 @@ class OpenAICompatibleOcrClient:
             "render, rag. render is markdown. rag.page_text is plain text. "
             "rag.elements has formulas, tables, figures arrays. "
             "Tables must be markdown when possible. Formulas must be LaTeX when possible. "
-            "For figures, return only caption/layout hints, not semantic explanation."
+            "For figures, return only caption/layout hints, not semantic explanation. "
+            "When layout geometry is available, use bbox [x0,y0,x1,y1] normalized to the full page image "
+            "in the 0..1 range and set bbox_space to normalized_page. Table source_cells row 0 is the header "
+            "row; set source_cell_row_offset to 1 and include row, col, rowspan, colspan, source_cell_index, "
+            "confidence, and bbox for each reliably bounded source cell. Omit uncertain cell bboxes."
         )

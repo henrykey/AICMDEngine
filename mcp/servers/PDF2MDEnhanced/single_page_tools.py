@@ -844,6 +844,10 @@ def _table_item(
         "manualReviewRequired": normalized["manualReviewRequired"],
         "context": (raw_item.context if raw_item else "") or _near_context(page_text, title),
     }
+    for key in ("bbox", "bbox_space", "source_cell_row_offset", "source_block_index"):
+        value = normalized.get(key)
+        if value is not None:
+            item[key] = value
     if normalized["reason"]:
         item["reason"] = normalized["reason"]
     if normalized["sourceHtml"]:
@@ -859,13 +863,18 @@ def _formula_item(source: str, item: OcrElement, page_text: str, describe: bool)
     desc = item.description if describe else ""
     if describe and not desc:
         desc = context[:180] if context else "Formula extracted from the selected page."
-    return {
+    result = {
         "source": source,
         "latex": latex,
         "description": desc,
         "variables": (item.raw.get("variables") or _variables_context(page_text)) if isinstance(item.raw, dict) else _variables_context(page_text),
         "context": context,
     }
+    if isinstance(item.raw, dict):
+        for key in ("bbox", "bbox_space", "confidence", "status", "block_index"):
+            if item.raw.get(key) is not None:
+                result[key] = item.raw[key]
+    return result
 
 
 def _formula_items_from_result(source: str, result: OcrResult, fallback_page_text: str, describe: bool) -> List[Dict[str, Any]]:
@@ -969,7 +978,7 @@ def _figure_item(item: OcrElement, page_text: str, source: str = "vlm_ocr") -> D
     if not isinstance(labels, list):
         labels = []
     labels = [str(x).strip() for x in labels if str(x).strip()] or _figure_labels(desc)
-    return {
+    result = {
         "source": source,
         "caption": caption,
         "capture": caption,
@@ -981,6 +990,11 @@ def _figure_item(item: OcrElement, page_text: str, source: str = "vlm_ocr") -> D
         "labels": labels,
         "context": item.context or _near_context(page_text, caption),
     }
+    if isinstance(item.raw, dict):
+        for key in ("bbox", "bbox_space", "confidence", "status", "block_index"):
+            if item.raw.get(key) is not None:
+                result[key] = item.raw[key]
+    return result
 
 
 def _figure_page_result(
@@ -1478,16 +1492,17 @@ def _prompt_tables(page_text: str, describe: bool) -> str:
         "规则：\n"
         "1. 识别表名。\n"
         "2. 检测页面/表格方向，orientation 只能是 0/90/180/270；横置或倒置时按旋正后的逻辑顺序抽取。\n"
-        "3. 识别行、列、单元格边界、rowspan、colspan；source_cells 必须包含 row/col/text/rowspan/colspan/confidence。\n"
-        "4. 输出 normalized_rows：每行列数必须一致；rowspan 覆盖区域必须向下填充原单元格文本，不能写成 n/a。\n"
-        "5. colspan 按逻辑列展开；无法可靠拆分时仍保留矩阵并设置 degraded/manualReviewRequired/warnings。\n"
-        "6. 区分空白来源：merged_fill、blank_in_source、unreadable、recognized，并在 cell_status 返回。\n"
-        "7. 禁止因为空白或合并单元格导致后续数值左移；禁止额外产生尾部 n/a 伪列。\n"
-        "8. 单元格数字必须按图中原样抄录，不要根据相邻数字推断或修正；看不清的单元格标记 unreadable。\n"
-        "9. 可以额外返回 markdown/raw_html，但必须返回 normalized JSON。\n"
+        "3. 识别行、列、单元格边界、rowspan、colspan；所有 bbox 使用整页图像 0..1 归一化坐标 [x0,y0,x1,y1]，bbox_space=normalized_page。\n"
+        "4. source_cells 的 row=0 表示表头行，source_cell_row_offset=1；每个边界可靠的源单元格必须包含 row/col/text/rowspan/colspan/source_cell_index/bbox/bbox_space/confidence，边界不可靠时不得编造 bbox。\n"
+        "5. 输出 normalized_rows：每行列数必须一致；rowspan 覆盖区域必须向下填充原单元格文本，不能写成 n/a。\n"
+        "6. colspan 按逻辑列展开；无法可靠拆分时仍保留矩阵并设置 degraded/manualReviewRequired/warnings。\n"
+        "7. 区分空白来源：merged_fill、blank_in_source、unreadable、recognized，并在 cell_status 返回。\n"
+        "8. 禁止因为空白或合并单元格导致后续数值左移；禁止额外产生尾部 n/a 伪列。\n"
+        "9. 单元格数字必须按图中原样抄录，不要根据相邻数字推断或修正；看不清的单元格标记 unreadable。\n"
+        "10. 可以额外返回 markdown/raw_html，但必须返回 normalized JSON。\n"
         "JSON schema："
-        "{\"table_title\":\"\",\"orientation\":0,\"columns\":[],\"normalized_rows\":[[]],"
-        "\"source_cells\":[{\"row\":0,\"col\":0,\"text\":\"\",\"rowspan\":1,\"colspan\":1,\"confidence\":1.0}],"
+        "{\"table_title\":\"\",\"orientation\":0,\"columns\":[],\"normalized_rows\":[[]],\"bbox\":[0,0,0,0],\"bbox_space\":\"normalized_page\",\"source_block_index\":0,\"source_cell_row_offset\":1,"
+        "\"source_cells\":[{\"row\":0,\"col\":0,\"text\":\"\",\"rowspan\":1,\"colspan\":1,\"source_cell_index\":0,\"bbox\":[0,0,0,0],\"bbox_space\":\"normalized_page\",\"confidence\":1.0}],"
         "\"cell_status\":[{\"row\":0,\"col\":0,\"status\":\"recognized\"}],"
         "\"raw_html\":\"\",\"markdown\":\"\",\"degraded\":false,\"manualReviewRequired\":false,\"warnings\":[]}。\n"
         f"是否需要语义描述：{bool(describe)}。\n"
@@ -1711,6 +1726,10 @@ def _normalize_table_contract(table_text: str, table_rows_format: str = "markdow
         "normalized_rows": meta.get("normalized_rows", grid[1:] if len(grid) > 1 else []),
         "source_cells": meta.get("source_cells", []),
         "cell_status": meta.get("cell_status", []),
+        "bbox": meta.get("bbox"),
+        "bbox_space": meta.get("bbox_space"),
+        "source_cell_row_offset": meta.get("source_cell_row_offset"),
+        "source_block_index": meta.get("source_block_index"),
         "raw_html": source_html,
         "sourceHtml": source_html,
         "rawText": raw_text if raw_text and raw_text != source_html else "",
@@ -1775,6 +1794,16 @@ def _merge_model_normalized_table(normalized: Dict[str, Any], raw: Dict[str, Any
                 "normalized_rows": norm_rows,
                 "source_cells": source_cells,
                 "cell_status": cell_status,
+                "bbox": raw.get("bbox", normalized.get("bbox")),
+                "bbox_space": raw.get("bbox_space", normalized.get("bbox_space")),
+                "source_cell_row_offset": raw.get(
+                    "source_cell_row_offset",
+                    normalized.get("source_cell_row_offset"),
+                ),
+                "source_block_index": raw.get(
+                    "source_block_index",
+                    raw.get("block_index", normalized.get("source_block_index")),
+                ),
             },
             raw_html,
             markdown,
@@ -1799,6 +1828,16 @@ def _merge_model_normalized_table(normalized: Dict[str, Any], raw: Dict[str, Any
             "normalized_rows": norm_rows,
             "source_cells": source_cells,
             "cell_status": cell_status,
+            "bbox": raw.get("bbox", normalized.get("bbox")),
+            "bbox_space": raw.get("bbox_space", normalized.get("bbox_space")),
+            "source_cell_row_offset": raw.get(
+                "source_cell_row_offset",
+                normalized.get("source_cell_row_offset"),
+            ),
+            "source_block_index": raw.get(
+                "source_block_index",
+                raw.get("block_index", normalized.get("source_block_index")),
+            ),
             "raw_html": raw_html,
             "sourceHtml": raw_html,
             "warnings": _dedupe(warnings),
@@ -2417,7 +2456,7 @@ def _structured_table_payload(
 ) -> Dict[str, Any]:
     columns = meta.get("columns") or (grid[0] if grid else [])
     normalized_rows = meta.get("normalized_rows") or (grid[1:] if len(grid) > 1 else [])
-    return {
+    payload = {
         "table_title": _table_title_from_markdown(markdown),
         "orientation": meta.get("orientation", 0),
         "columns": columns,
@@ -2432,6 +2471,11 @@ def _structured_table_payload(
         "warnings": _dedupe(warnings),
         "reason": reason,
     }
+    for key in ("bbox", "bbox_space", "source_cell_row_offset", "source_block_index"):
+        value = meta.get(key)
+        if value is not None:
+            payload[key] = value
+    return payload
 
 
 def _structured_table_payload_json(payload: Dict[str, Any]) -> str:

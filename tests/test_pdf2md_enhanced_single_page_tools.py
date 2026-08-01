@@ -50,9 +50,42 @@ normalize_text_response = sys.modules[f"{PACKAGE_NAME}.ocr_clients.ocr_normalize
 OpenAICompatibleOcrClient = sys.modules[
     f"{PACKAGE_NAME}.ocr_clients.openai_compatible_ocr_client"
 ].OpenAICompatibleOcrClient
+DynamicVLMClient = sys.modules[f"{PACKAGE_NAME}.vlm_client"].DynamicVLMClient
 
 
 PNG_DATA = base64.b64encode(b"\x89PNG\r\n\x1a\nfake").decode("ascii")
+
+
+def test_full_page_dual_output_preserves_object_shaped_geometry():
+    client = DynamicVLMClient.__new__(DynamicVLMClient)
+    table = {
+        "markdown": "| A | B |\n| --- | --- |\n| 1 | 2 |",
+        "bbox": [0.1, 0.1, 0.9, 0.8],
+        "bbox_space": "normalized_page",
+        "source_cell_row_offset": 1,
+        "source_cells": [{
+            "row": 1,
+            "col": 1,
+            "bbox": [0.5, 0.3, 0.9, 0.6],
+            "bbox_space": "normalized_page",
+            "confidence": 0.98,
+        }],
+    }
+
+    normalized = client._normalize_dual_payload({
+        "render": table["markdown"],
+        "rag": {
+            "page_text": "",
+            "elements": {
+                "tables": [table],
+                "formulas": [{"latex": "x=y", "bbox": [0.6, 0.4, 0.7, 0.5]}],
+                "figures": [],
+            },
+        },
+    })
+
+    assert normalized["rag"]["elements"]["tables"][0] == table
+    assert normalized["rag"]["elements"]["formulas"][0]["latex"] == "x=y"
 
 
 def test_glm_ocr_layout_file_payload_uses_data_uri():
@@ -1072,14 +1105,27 @@ def test_single_page_table_schema_is_not_used_by_task_output_elements():
     assert forbidden.isdisjoint(elements["tables"][0].keys())
 
 
-def test_task_ocr_table_elements_remain_markdown_only_for_normalized_model_json():
+def test_task_ocr_table_elements_preserve_source_cell_geometry_additively():
     result = normalize_text_response(
         json.dumps(
             {
                 "columns": ["牌号", "状态", "规格"],
                 "normalized_rows": [["20", "正火", "≤M22"], ["20", "正火", "M24~M48"]],
-                "source_cells": [{"row": 1, "col": 0, "text": "20", "rowspan": 2, "colspan": 1, "confidence": 0.98}],
+                "source_cells": [{
+                    "row": 1,
+                    "col": 0,
+                    "text": "20",
+                    "rowspan": 2,
+                    "colspan": 1,
+                    "bbox": [0.10, 0.20, 0.30, 0.60],
+                    "bbox_space": "normalized_page",
+                    "source_cell_index": 3,
+                    "confidence": 0.98,
+                }],
                 "cell_status": [{"row": 2, "col": 0, "status": "merged_fill", "source_row": 1, "source_col": 0}],
+                "bbox": [0.05, 0.10, 0.95, 0.80],
+                "bbox_space": "normalized_page",
+                "source_cell_row_offset": 1,
             },
             ensure_ascii=False,
         ),
@@ -1092,7 +1138,36 @@ def test_task_ocr_table_elements_remain_markdown_only_for_normalized_model_json(
         "tables": ["| 牌号 | 状态 | 规格 |\n| --- | --- | --- |\n| 20 | 正火 | ≤M22 |\n| 20 | 正火 | M24~M48 |"],
         "formulas": [],
         "figures": [],
+        "table_metadata": {
+            "| 牌号 | 状态 | 规格 |\n| --- | --- | --- |\n| 20 | 正火 | ≤M22 |\n| 20 | 正火 | M24~M48 |": {
+                "bbox": [0.05, 0.10, 0.95, 0.80],
+                "bbox_space": "normalized_page",
+                "columns": ["牌号", "状态", "规格"],
+                "normalized_rows": [["20", "正火", "≤M22"], ["20", "正火", "M24~M48"]],
+                "source_cells": [{
+                    "row": 1,
+                    "col": 0,
+                    "text": "20",
+                    "rowspan": 2,
+                    "colspan": 1,
+                    "bbox": [0.10, 0.20, 0.30, 0.60],
+                    "bbox_space": "normalized_page",
+                    "source_cell_index": 3,
+                    "confidence": 0.98,
+                }],
+                "cell_status": [{"row": 2, "col": 0, "status": "merged_fill", "source_row": 1, "source_col": 0}],
+                "source_cell_row_offset": 1,
+            }
+        },
     }
+
+    elements = page_processor._build_output_elements("", structured, "hybrid_glm_ocr")
+    table = elements["tables"][0]
+    assert table["markdown"] == structured["tables"][0]
+    assert table["source_cells"][0]["bbox"] == [0.10, 0.20, 0.30, 0.60]
+    assert table["source_cells"][0]["source_cell_index"] == 3
+    assert table["bbox_space"] == "normalized_page"
+    assert table["source_cell_row_offset"] == 1
 
 
 def test_extract_page_formulas_only_uses_formula_items(monkeypatch):

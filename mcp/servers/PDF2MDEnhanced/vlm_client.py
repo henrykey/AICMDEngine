@@ -147,10 +147,17 @@ class DynamicVLMClient:
             "2) render: markdown for display; keep headings/paragraphs/lists/tables/formulas. "
             "Tables in markdown; formulas in LaTeX; figures as [FIGURE: description].\n"
             "3) rag.page_text: plain body text for retrieval (can be empty if uncertain).\n"
-            "4) rag.elements: {formulas:[], tables:[], figures:[]} with short semantic items only.\n"
-            "5) If uncertain, use empty string/empty arrays. No extra text outside JSON.\n"
+            "4) rag.elements: formulas, tables, figures arrays with short semantic items and source geometry. "
+            "All bbox values use [x0,y0,x1,y1] normalized to the full page image in 0..1 and "
+            "bbox_space=normalized_page. Each table includes columns, normalized_rows, source_cell_row_offset=1, "
+            "and only reliably bounded source_cells; source_cells row 0 is the header row and each cell includes "
+            "row, col, rowspan, colspan, source_cell_index, bbox, bbox_space, and confidence.\n"
+            "5) If uncertain, omit the uncertain bbox or use empty string/empty arrays. No extra text outside JSON.\n"
             "Schema:\n"
-            "{\"render\":\"...\",\"rag\":{\"page_text\":\"\",\"elements\":{\"formulas\":[],\"tables\":[],\"figures\":[]}}}"
+            "{\"render\":\"...\",\"rag\":{\"page_text\":\"\",\"elements\":{"
+            "\"formulas\":[{\"latex\":\"\",\"description\":\"\",\"bbox\":[0,0,0,0],\"bbox_space\":\"normalized_page\",\"confidence\":0.0}],"
+            "\"tables\":[{\"title\":\"\",\"markdown\":\"\",\"description\":\"\",\"columns\":[],\"normalized_rows\":[[]],\"bbox\":[0,0,0,0],\"bbox_space\":\"normalized_page\",\"source_cell_row_offset\":1,\"source_cells\":[]}],"
+            "\"figures\":[{\"caption\":\"\",\"description\":\"\",\"bbox\":[0,0,0,0],\"bbox_space\":\"normalized_page\",\"confidence\":0.0}]}}}"
         )
         # Keep dual-output bounded; very large outputs increase timeout/parse-failure risk.
         text = self._call_image_prompt(image_path, prompt, max_tokens=min(self.max_tokens, 4096))
@@ -174,13 +181,22 @@ class DynamicVLMClient:
         prompt = (
             "Extract tables, formulas, and meaningful figures from this page. Return strict JSON only with keys "
             "tables, formulas, figures. Preserve visible source content; do not invent missing values. "
-            "Use objects so downstream persistence retains semantics and source location. Schema: "
+            "Use objects so downstream persistence retains semantics and source location. "
+            "All bbox values must use [x0,y0,x1,y1] normalized to the full page image in the 0..1 range, "
+            "with bbox_space set to normalized_page. For tables, source_cells row 0 is the header row and "
+            "source_cell_row_offset is 1; each source cell must include its original row/col, spans, confidence, "
+            "source_cell_index, and bbox. Do not return a cell bbox when its boundary is uncertain. Schema: "
             '{"tables":[{"title":"","markdown":"","description":"","bbox":[0,0,0,0],'
+            '"bbox_space":"normalized_page","columns":[],"normalized_rows":[[]],'
+            '"source_cell_row_offset":1,"source_cells":[{"row":0,"col":0,"text":"",'
+            '"rowspan":1,"colspan":1,"source_cell_index":0,"bbox":[0,0,0,0],'
+            '"bbox_space":"normalized_page","confidence":0.0}],"cell_status":[],'
             '"confidence":0.0,"status":"EXTRACTED|LOW_CONFIDENCE|UNREADABLE"}],'
             '"formulas":[{"latex":"","description":"","variables":"","context":"",'
-            '"bbox":[0,0,0,0],"confidence":0.0,"status":"EXTRACTED|LOW_CONFIDENCE|UNREADABLE"}],'
+            '"bbox":[0,0,0,0],"bbox_space":"normalized_page",'
+            '"confidence":0.0,"status":"EXTRACTED|LOW_CONFIDENCE|UNREADABLE"}],'
             '"figures":[{"caption":"","type":"schematic|chart|diagram|figure|unknown",'
-            '"description":"","labels":[],"context":"","bbox":[0,0,0,0],'
+            '"description":"","labels":[],"context":"","bbox":[0,0,0,0],"bbox_space":"normalized_page",'
             '"confidence":0.0,"status":"EXTRACTED|LOW_CONFIDENCE|UNREADABLE"}]}. '
             "Do not invent content for unreadable objects; empty content remains incomplete downstream."
         )
@@ -485,15 +501,21 @@ class DynamicVLMClient:
         elements_raw = rag_obj.get("elements")
         elements_obj = elements_raw if isinstance(elements_raw, dict) else {}
 
-        def _as_str_list(v: Any) -> list[str]:
-            if isinstance(v, list):
-                return [str(x).strip() for x in v if str(x).strip()]
-            return []
+        def _as_item_list(v: Any) -> list[Any]:
+            if not isinstance(v, list):
+                return []
+            items: list[Any] = []
+            for item in v:
+                if isinstance(item, dict):
+                    items.append(dict(item))
+                elif isinstance(item, str) and item.strip():
+                    items.append(item.strip())
+            return items
 
-        illustrations = _as_str_list(elements_obj.get("illustrations")) or _as_str_list(elements_obj.get("figures"))
+        illustrations = _as_item_list(elements_obj.get("illustrations")) or _as_item_list(elements_obj.get("figures"))
         normalized_elements = {
-            "formulas": _as_str_list(elements_obj.get("formulas")),
-            "tables": _as_str_list(elements_obj.get("tables")),
+            "formulas": _as_item_list(elements_obj.get("formulas")),
+            "tables": _as_item_list(elements_obj.get("tables")),
             "figures": illustrations,
         }
 
