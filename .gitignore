@@ -66,3 +66,6 @@ data/*
 /deploy/cache/
 /deploy/out/
 ./coverage/
+
+# Generated local CodeGraph tooling state
+.codegraph/
