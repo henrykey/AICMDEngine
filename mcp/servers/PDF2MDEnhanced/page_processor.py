@@ -120,6 +120,9 @@ def process_page(
                     route_decision["fallback_reason"] = str(err)
                     structured = {"formulas": [], "tables": [], "figures": []}
         elif route_selected == "full_glm_ocr":
+            glm_markdown_candidate = ""
+            glm_rag_page_text = ""
+            glm_structured_candidate = {"formulas": [], "tables": [], "figures": []}
             try:
                 glm_calls += 1
                 glm_result = glm_ocr.extract_page(str(image_path))
@@ -128,6 +131,9 @@ def process_page(
                 structured = _structured_from_ocr_result(glm_result, include_figures=False)
                 if _glm_ocr_markdown_bad(markdown):
                     raise RuntimeError("glm_ocr_bad_markdown")
+                glm_markdown_candidate = markdown
+                glm_rag_page_text = rag_page_text
+                glm_structured_candidate = structured
                 if _structured_insufficient_for_route(structured, route_selected, metrics):
                     raise RuntimeError("glm_ocr_insufficient_structured_output")
                 if (
@@ -144,18 +150,34 @@ def process_page(
                     route_selected = "full_vlm_ocr"
                     route_decision["fallback_reason"] = str(err)
                     rag_page_text = ""
-                    dual = vlm.full_page_dual_output(str(image_path))
-                    markdown = _clean_markdown(dual.get("render") or "")
-                    rag_obj = dual.get("rag") or {}
-                    rag_page_text = str(rag_obj.get("page_text") or "").strip()
-                    structured = _normalize_structured(rag_obj.get("elements"))
                     vlm_calls += 1
-                    if not markdown.strip():
-                        if rc.get("full_vlm_retry_markdown", False):
-                            markdown = _clean_markdown(vlm.full_page_markdown(str(image_path)))
-                            vlm_calls += 1
+                    try:
+                        dual = vlm.full_page_dual_output(str(image_path))
+                        markdown = _clean_markdown(dual.get("render") or "")
+                        rag_obj = dual.get("rag") or {}
+                        rag_page_text = str(rag_obj.get("page_text") or "").strip()
+                        structured = _normalize_structured(rag_obj.get("elements"))
                         if not markdown.strip():
                             raise RuntimeError("full_vlm_empty_render")
+                    except Exception as vlm_err:
+                        route_decision["fallback_reason"] = str(vlm_err)
+                        if glm_markdown_candidate:
+                            route_selected = "full_glm_ocr"
+                            markdown = glm_markdown_candidate
+                            rag_page_text = glm_rag_page_text
+                            structured = glm_structured_candidate
+                            logger.warning(
+                                "full VLM fallback failed; preserving usable GLM markdown: error_type=%s",
+                                type(vlm_err).__name__,
+                            )
+                        elif rc.get("full_vlm_retry_markdown", False):
+                            markdown = _clean_markdown(vlm.full_page_markdown(str(image_path)))
+                            vlm_calls += 1
+                            structured = {"formulas": [], "tables": [], "figures": []}
+                            if not markdown.strip():
+                                raise RuntimeError("full_vlm_empty_render")
+                        else:
+                            raise
                 else:
                     raise
         elif route_selected == "hybrid_vlm_ocr" and (not rc.get("vlm_ocr_enabled") or not vlm.enabled):
@@ -264,6 +286,7 @@ def process_page(
             "legacy_route_selected": legacy_route_selected,
             "engine_selected": route_decision.get("engine_selected"),
             "fallback_reason": route_decision.get("fallback_reason"),
+            "vlm_budget": getattr(vlm, "last_dual_output_budget", {}),
             "semantic_status": semantic_status,
             "bad_text_detected": bad_text_eval["detected"],
             "bad_text_reasons": bad_text_eval["reasons"],

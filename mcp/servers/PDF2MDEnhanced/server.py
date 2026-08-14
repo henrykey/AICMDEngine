@@ -379,6 +379,8 @@ def _vlm_runtime_info(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "model": c.get("model"),
         "base_url": c.get("base_url"),
         "max_tokens": c.get("max_tokens"),
+        "context_window": c.get("context_window"),
+        "dual_output_max_tokens": c.get("dual_output_max_tokens"),
     }
 
 

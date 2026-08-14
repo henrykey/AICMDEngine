@@ -415,6 +415,72 @@ def test_real_pdf_auto_glm_to_vlm_preserves_structured_element_contract(monkeypa
     assert figure["status"] == "EXTRACTED"
 
 
+def test_full_glm_keeps_usable_markdown_when_structured_fallback_fails(monkeypatch, tmp_path):
+    pdf_path = tmp_path / "large-table-recovery-fixture.pdf"
+    _build_structured_pdf_fixture(pdf_path)
+
+    glm_markdown = (
+        "# Table 1 Fixture measurements\n\n"
+        "| Name | Value |\n| --- | --- |\n| alpha | 1.25 |\n| beta | 2.50 |"
+    )
+
+    class MarkdownOnlyGLMClient:
+        def __init__(self, cfg, source="glm_ocr"):
+            self.enabled = True
+            self.source = source
+
+        def extract_page(self, image_path):
+            _ = image_path
+            return OcrResult(markdown=glm_markdown, page_text=glm_markdown)
+
+    class FailingDualVLMClient:
+        def __init__(self, cfg):
+            self.enabled = True
+            self.provider = "fixture"
+            self.model = "fixture-vlm"
+            self.base_url = "local://fixture"
+            self.timeout_sec = 5
+            self.max_retries = 0
+
+        def full_page_dual_output(self, image_path):
+            _ = image_path
+            raise ValueError("dual output json parse failed")
+
+        def cleanup_markdown_table_noise(self, markdown_text):
+            return markdown_text
+
+    monkeypatch.setattr(page_processor, "OpenAICompatibleOcrClient", MarkdownOnlyGLMClient)
+    monkeypatch.setattr(page_processor, "DynamicVLMClient", FailingDualVLMClient)
+
+    result = page_processor.process_page(
+        source_path=str(pdf_path),
+        page_no=1,
+        policy="auto",
+        vlm_config={"provider": "fixture"},
+        routing_config={
+            "formula_score_region_vlm": 0.01,
+            "table_score_region_vlm": 0.01,
+            "render_cleanup_with_llm": False,
+            "ocr_config": {
+                "glm_ocr": {
+                    "enabled": True,
+                    "model": "fixture-glm",
+                    "api_key": "unused",
+                    "base_url": "local://fixture",
+                }
+            },
+        },
+        prev_context=None,
+    )
+
+    assert result["render"]["markdown"] == glm_markdown
+    assert result["route_selected"] == "full_glm_ocr"
+    assert result["decision"]["fallback_reason"] == "dual output json parse failed"
+    assert result["semantic_status"]["complete"] is False
+    assert "formula_latex" in result["semantic_status"]["missing"]
+    assert len(result["elements"]["tables"]) == 1
+
+
 def test_unreadable_empty_structured_objects_do_not_count_as_extracted():
     structured = page_processor._normalize_structured(
         {

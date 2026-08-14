@@ -56,6 +56,88 @@ DynamicVLMClient = sys.modules[f"{PACKAGE_NAME}.vlm_client"].DynamicVLMClient
 PNG_DATA = base64.b64encode(b"\x89PNG\r\n\x1a\nfake").decode("ascii")
 
 
+def test_full_page_dual_output_uses_configured_bounded_budget(monkeypatch):
+    observed = []
+    client = DynamicVLMClient(
+        {
+            "model": "fixture-vlm",
+            "api_key": "unused",
+            "base_url": "https://example.test/v1",
+            "max_tokens": 20480,
+            "context_window": 128000,
+            "dual_output_max_tokens": 8192,
+        }
+    )
+    monkeypatch.setattr(
+        client,
+        "_call_image_prompt",
+        lambda image_path, prompt, max_tokens: observed.append(max_tokens)
+        or '{"render":"ok","rag":{"page_text":"","elements":{}}}',
+    )
+
+    client.full_page_dual_output("/tmp/unused.png")
+
+    assert observed == [8192]
+    assert client.last_dual_output_budget == {
+        "provider_max_tokens": 20480,
+        "context_window": 128000,
+        "configured_max_tokens": 8192,
+        "effective_max_tokens": 8192,
+        "cap_reason": "dual_output_max_tokens",
+    }
+
+
+def test_full_page_dual_output_budget_supports_three_controlled_tiers(monkeypatch):
+    for configured in (4096, 8192, 16384):
+        observed = []
+        client = DynamicVLMClient(
+            {
+                "model": "fixture-vlm",
+                "api_key": "unused",
+                "base_url": "https://example.test/v1",
+                "max_tokens": 20480,
+                "context_window": 128000,
+                "dual_output_max_tokens": configured,
+            }
+        )
+        monkeypatch.setattr(
+            client,
+            "_call_image_prompt",
+            lambda image_path, prompt, max_tokens: observed.append(max_tokens)
+            or '{"render":"ok","rag":{"page_text":"","elements":{}}}',
+        )
+
+        client.full_page_dual_output("/tmp/unused.png")
+
+        assert observed == [configured]
+
+
+def test_full_page_dual_output_budget_reserves_context_space(monkeypatch):
+    observed = []
+    client = DynamicVLMClient(
+        {
+            "model": "fixture-vlm",
+            "api_key": "unused",
+            "base_url": "https://example.test/v1",
+            "max_tokens": 20480,
+            "context_window": 6000,
+            "dual_output_max_tokens": 8192,
+            "context_window_safety_margin": 2000,
+        }
+    )
+    monkeypatch.setattr(
+        client,
+        "_call_image_prompt",
+        lambda image_path, prompt, max_tokens: observed.append(max_tokens)
+        or '{"render":"ok","rag":{"page_text":"","elements":{}}}',
+    )
+
+    client.full_page_dual_output("/tmp/unused.png")
+
+    assert observed == [4000]
+    assert client.last_dual_output_budget["cap_reason"] == "context_window"
+
+
 def test_full_page_dual_output_preserves_object_shaped_geometry():
     client = DynamicVLMClient.__new__(DynamicVLMClient)
     table = {

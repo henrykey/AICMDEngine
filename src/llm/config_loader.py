@@ -34,6 +34,7 @@ class LLMConfig:
         # Capability detection fields
         capabilities: List[str] = None,
         context_window: int = 4096,
+        dual_output_max_tokens: int = 4096,
         supports_multimodal: bool = False,
         supported_formats: List[str] = None,
         embedding_dimensions: Optional[int] = None,
@@ -60,6 +61,7 @@ class LLMConfig:
         # Capability fields
         self.capabilities = capabilities or ["chat"]
         self.context_window = context_window
+        self.dual_output_max_tokens = dual_output_max_tokens
         self.supports_multimodal = supports_multimodal
         self.supported_formats = supported_formats or []
         self.embedding_dimensions = embedding_dimensions
@@ -88,6 +90,7 @@ class LLMConfig:
             # Capability fields
             "capabilities": self.capabilities,
             "context_window": self.context_window,
+            "dual_output_max_tokens": self.dual_output_max_tokens,
             "supports_multimodal": self.supports_multimodal,
             "supported_formats": self.supported_formats,
             "embedding_dimensions": self.embedding_dimensions,
@@ -138,6 +141,7 @@ class LLMConfig:
             # Capability fields with defaults
             capabilities=data.get("capabilities", ["chat"]),
             context_window=data.get("context_window", 4096),
+            dual_output_max_tokens=data.get("dual_output_max_tokens", 4096),
             supports_multimodal=data.get("supports_multimodal", False),
             supported_formats=data.get("supported_formats", []),
             embedding_dimensions=data.get("embedding_dimensions"),
@@ -200,6 +204,7 @@ class LLMConfigLoader:
                         # Capability fields
                         capabilities=provider_config.get("capabilities"),
                         context_window=provider_config.get("context_window", 4096),
+                        dual_output_max_tokens=provider_config.get("dual_output_max_tokens", 4096),
                         supports_multimodal=provider_config.get("supports_multimodal", False),
                         supported_formats=provider_config.get("supported_formats"),
                         embedding_dimensions=provider_config.get("embedding_dimensions"),

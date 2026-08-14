@@ -26,6 +26,7 @@ interface LLMProvider {
   // Capability detection fields
   capabilities?: string[];
   context_window?: number;
+  dual_output_max_tokens?: number;
   supports_multimodal?: boolean;
   supported_formats?: string[];
   embedding_dimensions?: number | null;
@@ -379,6 +380,10 @@ const ProviderDetails = ({ provider }: ProviderDetailsProps) => (
         <div>
           <label className="text-sm font-semibold text-slate-700">Max Tokens</label>
           <p className="text-slate-900">{provider.max_tokens}</p>
+        </div>
+        <div>
+          <label className="text-sm font-semibold text-slate-700">PDF2MD Dual Output Max Tokens</label>
+          <p className="text-slate-900">{provider.dual_output_max_tokens || 4096}</p>
         </div>
       </div>
       <div className="grid grid-cols-2 gap-4">

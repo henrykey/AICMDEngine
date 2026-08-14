@@ -30,6 +30,8 @@ class FakeProvider:
     timeout = 120
     temperature = 0.1
     max_tokens = 4096
+    context_window = 128000
+    dual_output_max_tokens = 16384
 
 
 class FakeConfigLoader:
@@ -117,6 +119,8 @@ def test_protocol_injects_vlm_config_for_schema_declared_new_tool():
 
     assert args["vlm_config"]["provider"] == "glmocr"
     assert args["vlm_config"]["api_key"] == "secret-key"
+    assert args["vlm_config"]["context_window"] == 128000
+    assert args["vlm_config"]["dual_output_max_tokens"] == 16384
     assert "vlm_defaults" not in args
 
 
@@ -207,6 +211,8 @@ def test_rest_injects_vlm_config_for_schema_declared_new_tool():
 
     assert response["result"]["content"][0]["text"] == "ok"
     assert registry.kwargs["vlm_config"]["provider"] == "glmocr"
+    assert registry.kwargs["vlm_config"]["context_window"] == 128000
+    assert registry.kwargs["vlm_config"]["dual_output_max_tokens"] == 16384
 
 
 def test_rest_injects_vlm_defaults_for_schema_declared_defaults_tool():

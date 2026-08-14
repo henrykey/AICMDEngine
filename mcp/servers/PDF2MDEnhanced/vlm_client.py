@@ -20,9 +20,13 @@ class DynamicVLMClient:
         self.timeout_sec = int(cfg.get("timeout_sec", 60))
         self.max_retries = int(cfg.get("max_retries", 2))
         self.max_tokens = int(cfg.get("max_tokens", 4096))
+        self.context_window = int(cfg.get("context_window", 4096))
+        self.dual_output_max_tokens = int(cfg.get("dual_output_max_tokens", 4096))
+        self.context_window_safety_margin = int(cfg.get("context_window_safety_margin", 0))
         self.temperature = float(cfg.get("temperature", 0.1))
         self.extra_headers = cfg.get("extra_headers") or {}
         self._runtime_max_tokens_cap: Optional[int] = None
+        self.last_dual_output_budget: Dict[str, Any] = {}
 
         self.enabled = bool(self.model and self.api_key and self.base_url)
         self._client = None
@@ -159,8 +163,9 @@ class DynamicVLMClient:
             "\"tables\":[{\"title\":\"\",\"markdown\":\"\",\"description\":\"\",\"columns\":[],\"normalized_rows\":[[]],\"bbox\":[0,0,0,0],\"bbox_space\":\"normalized_page\",\"source_cell_row_offset\":1,\"source_cells\":[]}],"
             "\"figures\":[{\"caption\":\"\",\"description\":\"\",\"bbox\":[0,0,0,0],\"bbox_space\":\"normalized_page\",\"confidence\":0.0}]}}}"
         )
-        # Keep dual-output bounded; very large outputs increase timeout/parse-failure risk.
-        text = self._call_image_prompt(image_path, prompt, max_tokens=min(self.max_tokens, 4096))
+        # Keep dual-output bounded by the provider, task setting, and context reserve.
+        effective_max_tokens = self._dual_output_budget()
+        text = self._call_image_prompt(image_path, prompt, max_tokens=effective_max_tokens)
         data = self._extract_json(text)
         if not data:
             # Fallback rule: if render markdown can be recovered from partial/truncated JSON,
@@ -176,6 +181,34 @@ class DynamicVLMClient:
                 }
             raise ValueError("dual output json parse failed")
         return self._normalize_dual_payload(data)
+
+    def _dual_output_budget(self) -> int:
+        provider_max = max(512, self.max_tokens)
+        configured_max = max(512, self.dual_output_max_tokens)
+        context_available = max(512, self.context_window - max(0, self.context_window_safety_margin))
+        effective = min(provider_max, configured_max, context_available)
+        if effective == context_available and context_available < min(provider_max, configured_max):
+            cap_reason = "context_window"
+        elif effective == configured_max and configured_max < provider_max:
+            cap_reason = "dual_output_max_tokens"
+        else:
+            cap_reason = "provider_max_tokens"
+        self.last_dual_output_budget = {
+            "provider_max_tokens": provider_max,
+            "context_window": self.context_window,
+            "configured_max_tokens": configured_max,
+            "effective_max_tokens": effective,
+            "cap_reason": cap_reason,
+        }
+        logger.info(
+            "VLM dual-output budget: provider_max=%s context_window=%s configured_max=%s effective_max=%s cap_reason=%s",
+            provider_max,
+            self.context_window,
+            configured_max,
+            effective,
+            cap_reason,
+        )
+        return effective
 
     def extract_region_structured(self, image_path: str) -> Dict[str, Any]:
         prompt = (

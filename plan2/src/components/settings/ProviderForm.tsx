@@ -22,6 +22,7 @@ interface LLMProvider {
   // Capability fields
   capabilities?: string[];
   context_window?: number;
+  dual_output_max_tokens?: number;
   supports_multimodal?: boolean;
   supported_formats?: string[];
   embedding_dimensions?: number | null;
@@ -51,6 +52,7 @@ const DEFAULT_PROVIDER: LLMProvider = {
   capabilities_mode: 'auto',
   capabilities: [],
   context_window: 4096,
+  dual_output_max_tokens: 4096,
   supports_multimodal: false,
   supported_formats: [],
   embedding_dimensions: null,
@@ -74,6 +76,9 @@ const ProviderForm = ({ provider, onSave, onCancel }: ProviderFormProps) => {
     if (formData.temperature < 0 || formData.temperature > 2)
       newErrors.temperature = 'Temperature must be between 0 and 2';
     if (formData.max_tokens < 1) newErrors.max_tokens = 'Max tokens must be at least 1';
+    if ((formData.context_window || 0) < 1) newErrors.context_window = 'Context window must be at least 1';
+    if ((formData.dual_output_max_tokens || 0) < 512)
+      newErrors.dual_output_max_tokens = 'PDF2MD dual output max tokens must be at least 512';
     if (formData.cost_per_1k_tokens < 0)
       newErrors.cost_per_1k_tokens = 'Cost cannot be negative';
     if (formData.priority < 1) newErrors.priority = 'Priority must be at least 1';
@@ -90,7 +95,7 @@ const ProviderForm = ({ provider, onSave, onCancel }: ProviderFormProps) => {
 
       // If auto-detect mode, exclude capabilities field to let backend detect automatically
       if (formData.capabilities_mode === 'auto') {
-        const { capabilities, context_window, supports_multimodal, supported_formats, embedding_dimensions, ...dataWithoutCapabilities } = submitData;
+        const { capabilities, supports_multimodal, supported_formats, embedding_dimensions, ...dataWithoutCapabilities } = submitData;
         submitData = dataWithoutCapabilities;
       }
 
@@ -282,6 +287,42 @@ const ProviderForm = ({ provider, onSave, onCancel }: ProviderFormProps) => {
               className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
+
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1">
+              Context Window
+            </label>
+            <input
+              type="number"
+              name="context_window"
+              value={formData.context_window || 4096}
+              onChange={handleChange}
+              min="1"
+              placeholder="e.g., 128000"
+              className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            {errors.context_window && (
+              <p className="text-red-600 text-sm mt-1">{errors.context_window}</p>
+            )}
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1">
+              PDF2MD Dual Output Max Tokens
+            </label>
+            <input
+              type="number"
+              name="dual_output_max_tokens"
+              value={formData.dual_output_max_tokens || 4096}
+              onChange={handleChange}
+              min="512"
+              placeholder="e.g., 8192"
+              className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            {errors.dual_output_max_tokens && (
+              <p className="text-red-600 text-sm mt-1">{errors.dual_output_max_tokens}</p>
+            )}
+          </div>
         </div>
       </div>
 
@@ -376,21 +417,6 @@ const ProviderForm = ({ provider, onSave, onCancel }: ProviderFormProps) => {
             </div>
 
             <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">
-                  Context Window
-                </label>
-                <input
-                  type="number"
-                  name="context_window"
-                  value={formData.context_window || 4096}
-                  onChange={handleChange}
-                  min="1"
-                  placeholder="e.g., 128000"
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-              </div>
-
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1">
                   Embedding Dimensions
