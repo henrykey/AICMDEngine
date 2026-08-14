@@ -55,6 +55,7 @@ def extract_page_tables_direct(
     output_format: str = "json",
     describe: bool = True,
     table_rows_format: str = "structured_json",
+    description_language: str = "en",
     ocr_config: Optional[Dict[str, Any]] = None,
     vlm_config: Optional[Dict[str, Any]] = None,
     routing_config: Optional[Dict[str, Any]] = None,
@@ -69,6 +70,7 @@ def extract_page_tables_direct(
         input_type=input_type,
         describe=describe,
         table_rows_format=table_rows_format,
+        description_language=description_language,
         ocr_config=ocr_config,
         vlm_config=vlm_config,
         routing_config=routing_config,
@@ -84,6 +86,7 @@ def extract_page_formulas_direct(
     input_type: str = "auto",
     output_format: str = "json",
     describe: bool = True,
+    description_language: str = "en",
     ocr_config: Optional[Dict[str, Any]] = None,
     vlm_config: Optional[Dict[str, Any]] = None,
     routing_config: Optional[Dict[str, Any]] = None,
@@ -97,6 +100,7 @@ def extract_page_formulas_direct(
         page_no=page_no,
         input_type=input_type,
         describe=describe,
+        description_language=description_language,
         ocr_config=ocr_config,
         vlm_config=vlm_config,
         routing_config=routing_config,
@@ -112,6 +116,7 @@ def extract_page_figures_direct(
     input_type: str = "auto",
     output_format: str = "json",
     describe: bool = True,
+    description_language: str = "en",
     ocr_config: Optional[Dict[str, Any]] = None,
     vlm_config: Optional[Dict[str, Any]] = None,
     routing_config: Optional[Dict[str, Any]] = None,
@@ -126,6 +131,7 @@ def extract_page_figures_direct(
         page_no=page_no,
         input_type=input_type,
         describe=True,
+        description_language=description_language,
         ocr_config=ocr_config,
         vlm_config=vlm_config,
         routing_config=routing_config,
@@ -141,6 +147,7 @@ def extract_page_structured_direct(
     input_type: str = "auto",
     output_format: str = "json",
     describe: bool = True,
+    description_language: str = "en",
     ocr_config: Optional[Dict[str, Any]] = None,
     vlm_config: Optional[Dict[str, Any]] = None,
     routing_config: Optional[Dict[str, Any]] = None,
@@ -154,6 +161,7 @@ def extract_page_structured_direct(
         page_no=page_no,
         input_type=input_type,
         describe=describe,
+        description_language=description_language,
         ocr_config=ocr_config,
         vlm_config=vlm_config,
         routing_config=routing_config,
@@ -277,12 +285,14 @@ def _extract_single_page(
     page_no: int,
     input_type: str,
     describe: bool,
+    description_language: str,
     ocr_config: Optional[Dict[str, Any]],
     vlm_config: Optional[Dict[str, Any]],
     routing_config: Optional[Dict[str, Any]],
     table_rows_format: str = "structured_json",
 ) -> Dict[str, Any]:
     _validate_output_target(target)
+    description_language = _normalize_description_language(description_language)
     with tempfile.TemporaryDirectory(prefix="pdf2md_enh_single_page_") as work_dir:
         ctx = _prepare_context(
             Path(work_dir),
@@ -300,16 +310,16 @@ def _extract_single_page(
         model_calls = {"glm_ocr": 0, "vlm_ocr": 0}
 
         if target == "tables":
-            items = _extract_tables(ctx, glm, vlm, describe, model_calls, warnings, table_rows_format=table_rows_format)
+            items = _extract_tables(ctx, glm, vlm, describe, model_calls, warnings, description_language, table_rows_format=table_rows_format)
             return _base_result(tool, ctx, model_calls, warnings, items=items)
         if target == "formulas":
-            return _extract_formula_page_result(ctx, glm, vlm, describe, model_calls, warnings)
+            return _extract_formula_page_result(ctx, glm, vlm, describe, model_calls, warnings, description_language)
         if target == "figures":
-            return _extract_figure_page_result(ctx, glm, vlm, model_calls, warnings)
+            return _extract_figure_page_result(ctx, glm, vlm, model_calls, warnings, description_language)
 
-        tables = _extract_tables(ctx, glm, vlm, describe, model_calls, warnings, allow_native=True, table_rows_format=table_rows_format)
-        formulas = _extract_formulas(ctx, glm, vlm, describe, model_calls, warnings)
-        figures = _extract_figures(ctx, glm, vlm, model_calls, warnings)
+        tables = _extract_tables(ctx, glm, vlm, describe, model_calls, warnings, description_language, allow_native=True, table_rows_format=table_rows_format)
+        formulas = _extract_formulas(ctx, glm, vlm, describe, model_calls, warnings, description_language)
+        figures = _extract_figures(ctx, glm, vlm, model_calls, warnings, description_language)
         figure_semantics_missing = any(
             item.startswith("vlm_ocr_unavailable_for_figure_description") or item.startswith("vlm_ocr_failed")
             for item in warnings
@@ -497,6 +507,7 @@ def _extract_tables(
     describe: bool,
     model_calls: Dict[str, int],
     warnings: List[str],
+    description_language: str,
     allow_native: bool = True,
     table_rows_format: str = "structured_json",
 ) -> List[Dict[str, Any]]:
@@ -506,7 +517,7 @@ def _extract_tables(
     if glm.enabled:
         try:
             model_calls["glm_ocr"] += 1
-            result = glm.extract_page(ctx.image_path, prompt=_prompt_tables(ctx.page_text, describe))
+            result = glm.extract_page(ctx.image_path, prompt=_prompt_tables(ctx.page_text, describe, description_language))
             items = [
                 _table_item("glm_ocr", item.markdown or item.text, ctx.page_text, describe, item, table_rows_format=table_rows_format)
                 for item in result.tables
@@ -516,7 +527,7 @@ def _extract_tables(
                 if recovered:
                     items = [_table_item("glm_ocr", recovered, ctx.page_text, describe, table_rows_format=table_rows_format, source_text=source_text)]
             if items:
-                _enrich_table_metadata_with_vlm(ctx, vlm, items, describe, model_calls, warnings)
+                _enrich_table_metadata_with_vlm(ctx, vlm, items, describe, model_calls, warnings, description_language)
                 return items
             warnings.append("glm_ocr_returned_no_tables")
         except Exception as exc:
@@ -525,7 +536,7 @@ def _extract_tables(
     if vlm.enabled:
         try:
             model_calls["vlm_ocr"] += 1
-            result = _call_vlm_structured(vlm, ctx.image_path, _prompt_tables(ctx.page_text, describe))
+            result = _call_vlm_structured(vlm, ctx.image_path, _prompt_tables(ctx.page_text, describe, description_language))
             items = [
                 _table_item("vlm_ocr", item.markdown or item.text, ctx.page_text, describe, item, table_rows_format=table_rows_format)
                 for item in result.tables
@@ -551,10 +562,11 @@ def _enrich_table_metadata_with_vlm(
     describe: bool,
     model_calls: Dict[str, int],
     warnings: List[str],
+    description_language: str,
 ) -> None:
     if not items or not describe:
         return
-    _fill_local_table_descriptions(items)
+    _fill_local_table_descriptions(items, description_language)
     if not _tables_need_vlm_metadata(items):
         return
     if not vlm.enabled:
@@ -564,7 +576,7 @@ def _enrich_table_metadata_with_vlm(
         model_calls["vlm_ocr"] += 1
         raw = vlm._call_image_prompt(
             ctx.image_path,
-            _prompt_table_metadata(items, ctx.page_text),
+            _prompt_table_metadata(items, ctx.page_text, description_language),
             max_tokens=min(vlm.max_tokens, 2048),
         )
         metadata = _parse_table_metadata_response(raw)
@@ -576,15 +588,17 @@ def _enrich_table_metadata_with_vlm(
         warnings.append(f"vlm_ocr_table_metadata_failed: {exc}")
 
 
-def _fill_local_table_descriptions(items: List[Dict[str, Any]]) -> None:
+def _fill_local_table_descriptions(items: List[Dict[str, Any]], description_language: str) -> None:
     for item in items:
         title = _cell_to_text(item.get("title"))
         if not title or not _is_reliable_table_title(title, item):
             continue
         columns = item.get("columns") if isinstance(item.get("columns"), list) else []
         headers = [_cell_to_text(col) for col in columns if _cell_to_text(col)]
-        if headers:
+        if headers and description_language == "zh":
             desc = f"{title}。字段包括：{', '.join(headers[:8])}。"
+        elif headers:
+            desc = f"{title}. Fields include: {', '.join(headers[:8])}."
         else:
             desc = title
         item["description"] = desc
@@ -602,11 +616,12 @@ def _extract_formulas(
     describe: bool,
     model_calls: Dict[str, int],
     warnings: List[str],
+    description_language: str,
 ) -> List[Dict[str, Any]]:
     if glm.enabled:
         try:
             model_calls["glm_ocr"] += 1
-            result = glm.extract_page(ctx.image_path, prompt=_prompt_formulas(ctx.page_text, describe))
+            result = glm.extract_page(ctx.image_path, prompt=_prompt_formulas(ctx.page_text, describe, description_language))
             items = _formula_items_from_result("glm_ocr", result, ctx.page_text, describe)
             if items:
                 return items
@@ -617,7 +632,7 @@ def _extract_formulas(
     if vlm.enabled:
         try:
             model_calls["vlm_ocr"] += 1
-            result = _call_vlm_structured(vlm, ctx.image_path, _prompt_formulas(ctx.page_text, describe))
+            result = _call_vlm_structured(vlm, ctx.image_path, _prompt_formulas(ctx.page_text, describe, description_language))
             items = _formula_items_from_result("vlm_ocr", result, ctx.page_text, describe)
             if items:
                 return items
@@ -636,13 +651,14 @@ def _extract_formula_page_result(
     describe: bool,
     model_calls: Dict[str, int],
     warnings: List[str],
+    description_language: str,
 ) -> Dict[str, Any]:
     page_markdown = ""
     items: List[Dict[str, Any]] = []
     if glm.enabled:
         try:
             model_calls["glm_ocr"] += 1
-            result = glm.extract_page(ctx.image_path, prompt=_prompt_formula_page(ctx.page_text, describe))
+            result = glm.extract_page(ctx.image_path, prompt=_prompt_formula_page(ctx.page_text, describe, description_language))
             page_markdown = _normalize_page_markdown(result.markdown or result.page_text)
             if not page_markdown and result.formulas:
                 page_markdown = _formula_page_markdown_from_items(result.formulas)
@@ -658,7 +674,7 @@ def _extract_formula_page_result(
     if vlm.enabled:
         try:
             model_calls["vlm_ocr"] += 1
-            result = _call_vlm_structured(vlm, ctx.image_path, _prompt_formula_page(ctx.page_text, describe))
+            result = _call_vlm_structured(vlm, ctx.image_path, _prompt_formula_page(ctx.page_text, describe, description_language))
             page_markdown = _normalize_page_markdown(result.markdown or result.page_text)
             if not page_markdown and result.formulas:
                 page_markdown = _formula_page_markdown_from_items(result.formulas)
@@ -682,11 +698,12 @@ def _extract_figures(
     vlm: DynamicVLMClient,
     model_calls: Dict[str, int],
     warnings: List[str],
+    description_language: str,
 ) -> List[Dict[str, Any]]:
     if glm.enabled:
         try:
             model_calls["glm_ocr"] += 1
-            result = glm.extract_page(ctx.image_path, prompt=_prompt_figures(ctx.page_text))
+            result = glm.extract_page(ctx.image_path, prompt=_prompt_figures(ctx.page_text, description_language))
             items = [_figure_item(item, ctx.page_text, "glm_ocr") for item in result.figures]
             if items:
                 return items
@@ -699,7 +716,7 @@ def _extract_figures(
         return []
     try:
         model_calls["vlm_ocr"] += 1
-        result = _call_vlm_structured(vlm, ctx.image_path, _prompt_figures(ctx.page_text))
+        result = _call_vlm_structured(vlm, ctx.image_path, _prompt_figures(ctx.page_text, description_language))
         items = [_figure_item(item, ctx.page_text, "vlm_ocr") for item in result.figures]
         if items:
             return items
@@ -715,13 +732,14 @@ def _extract_figure_page_result(
     vlm: DynamicVLMClient,
     model_calls: Dict[str, int],
     warnings: List[str],
+    description_language: str,
 ) -> Dict[str, Any]:
     page_markdown = ""
     items: List[Dict[str, Any]] = []
     if glm.enabled:
         try:
             model_calls["glm_ocr"] += 1
-            result = glm.extract_page(ctx.image_path, prompt=_prompt_figure_page(ctx.page_text))
+            result = glm.extract_page(ctx.image_path, prompt=_prompt_figure_page(ctx.page_text, description_language))
             page_markdown = _normalize_page_markdown(result.markdown or result.page_text)
             items = [_figure_item(item, ctx.page_text or page_markdown, "glm_ocr") for item in result.figures]
             if not page_markdown and items:
@@ -737,7 +755,7 @@ def _extract_figure_page_result(
         return _figure_page_result(ctx, model_calls, warnings, page_markdown, items)
     try:
         model_calls["vlm_ocr"] += 1
-        result = _call_vlm_structured(vlm, ctx.image_path, _prompt_figure_page(ctx.page_text))
+        result = _call_vlm_structured(vlm, ctx.image_path, _prompt_figure_page(ctx.page_text, description_language))
         page_markdown = _normalize_page_markdown(result.markdown or result.page_text)
         items = [_figure_item(item, ctx.page_text or page_markdown, "vlm_ocr") for item in result.figures]
         if not page_markdown and items:
@@ -1485,8 +1503,23 @@ def _vlm_ocr_config(ocr_config: Optional[Dict[str, Any]]) -> Optional[Dict[str, 
     return None
 
 
-def _prompt_tables(page_text: str, describe: bool) -> str:
+def _normalize_description_language(value: Optional[str]) -> str:
+    normalized = str(value or "").strip().lower()
+    return "zh" if normalized.startswith("zh") else "en"
+
+
+def _description_language_instruction(value: Optional[str]) -> str:
+    if _normalize_description_language(value) == "zh":
+        return "所有生成的语义描述和变量说明必须使用中文。可见标题仍须按原文抄录。"
     return (
+        "All generated semantic descriptions and variable explanations MUST be written in English. "
+        "Do not translate them into Chinese. Visible titles must still be copied verbatim."
+    )
+
+
+def _prompt_tables(page_text: str, describe: bool, description_language: str = "en") -> str:
+    return (
+        f"{_description_language_instruction(description_language)}\n"
         "识别截图中的表格内容，输出严格 JSON，不要输出 Markdown、HTML 或解释。\n"
         "请按表格网格线逐行逐列读取，不能按文本连续顺序重排。目标是可查询的标准矩阵，不是视觉 Markdown。\n"
         "规则：\n"
@@ -1510,7 +1543,7 @@ def _prompt_tables(page_text: str, describe: bool) -> str:
     )
 
 
-def _prompt_table_metadata(items: List[Dict[str, Any]], page_text: str) -> str:
+def _prompt_table_metadata(items: List[Dict[str, Any]], page_text: str, description_language: str = "en") -> str:
     summaries = []
     for idx, item in enumerate(items):
         columns = item.get("columns") if isinstance(item.get("columns"), list) else []
@@ -1526,18 +1559,20 @@ def _prompt_table_metadata(items: List[Dict[str, Any]], page_text: str) -> str:
             }
         )
     return (
+        f"{_description_language_instruction(description_language)}\n"
         "请根据这张页面图片，为已抽取的表格补全表名和语义描述，只输出严格 JSON。\n"
         "不要重新抽取或改写表格数据；不要输出 Markdown、代码围栏或解释。\n"
         "表名必须来自图片中可见的表题/表注原文，例如“表 7-35 ...”；看不到可靠表名时返回空字符串。\n"
-        "semanticDesc 用图片/表题同语种简要说明该表含义，不要编造数据。\n"
+        "semanticDesc 必须遵守开头指定的描述语言，简要说明该表含义，不要编造数据。\n"
         "返回 schema：{\"tables\":[{\"index\":0,\"title\":\"\",\"semanticDesc\":\"\"}]}。\n"
         f"已抽取表格摘要：\n{json.dumps(summaries, ensure_ascii=False)}\n"
         f"可用页面文本上下文（可能含 OCR 噪声，仅供定位，不要当正文）：\n{_trim_context(page_text)}"
     )
 
 
-def _prompt_formulas(page_text: str, describe: bool) -> str:
+def _prompt_formulas(page_text: str, describe: bool, description_language: str = "en") -> str:
     return (
+        f"{_description_language_instruction(description_language)}\n"
         "Extract formulas only from this single page image. Ignore tables and figures. "
         "Return formulas as LaTeX and include visible variable explanations. Return strict JSON only: "
         "{\"formulas\":[{\"latex\":\"\",\"description\":\"\",\"variables\":\"\",\"context\":\"\"}],\"tables\":[],\"figures\":[]}.\n"
@@ -1546,8 +1581,9 @@ def _prompt_formulas(page_text: str, describe: bool) -> str:
     )
 
 
-def _prompt_formula_page(page_text: str, describe: bool) -> str:
+def _prompt_formula_page(page_text: str, describe: bool, description_language: str = "en") -> str:
     return (
+        f"{_description_language_instruction(description_language)}\n"
         "识别这张单页图片中的公式页内容，只关注公式、公式标题、公式前后说明、式中变量说明和相关正文。"
         "忽略表格和图的结构化抽取。请按页面自然阅读顺序输出 Markdown，尽量保持原有层级、段落顺序和公式位置。"
         "所有公式必须转换为 LaTeX，并用 $$...$$ 块包裹。"
@@ -1558,8 +1594,9 @@ def _prompt_formula_page(page_text: str, describe: bool) -> str:
     )
 
 
-def _prompt_figures(page_text: str) -> str:
+def _prompt_figures(page_text: str, description_language: str = "en") -> str:
     return (
+        f"{_description_language_instruction(description_language)}\n"
         "只识别这张单页图片中的插图、示意图、结构图、曲线图或技术图，忽略表格和公式。"
         "请描述图像语义、可见标注、图题/图注和图类型。必须严格返回 JSON，不要输出解释："
         "{\"figures\":[{\"caption\":\"\",\"capture\":\"\",\"name\":\"\",\"figureName\":\"\","
@@ -1568,14 +1605,15 @@ def _prompt_figures(page_text: str) -> str:
         "字段要求：caption/capture/name/figureName 都表示图名/图题；有可见图题/图注时必须抄录原文并填入这些字段。"
         "description/semanticDesc 都表示图的语义描述。"
         "语种要求：图名必须抄录图片中可见图题/图注的原文；description/semanticDesc 和 context "
-        "必须优先使用图题/图注的语种，其次使用正文/图片中文字的主要语种；中文页面请用中文描述，不要翻译成英文。"
+        "必须遵守开头指定的描述语言。"
         "未见图题时图名字段都留空，不要编造图名。\n"
         f"可用的文本层上下文：\n{_trim_context(page_text)}"
     )
 
 
-def _prompt_figure_page(page_text: str) -> str:
+def _prompt_figure_page(page_text: str, description_language: str = "en") -> str:
     return (
+        f"{_description_language_instruction(description_language)}\n"
         "识别这张单页图片中的含插图页面内容，只关注正文、图题、图注、插图位置和插图语义描述。"
         "忽略表格和公式的结构化抽取。请按页面自然阅读顺序输出严格 JSON："
         "{\"markdown\":\"整页Markdown，保留正文顺序，并在插图位置写图题和图描述\","
@@ -1585,8 +1623,8 @@ def _prompt_figure_page(page_text: str) -> str:
         "Markdown 中的每个插图应包含图题和简洁但具体的图像描述。"
         "字段要求：caption/capture/name/figureName 都表示图名/图题；有可见图题/图注时必须抄录原文并填入这些字段。"
         "description/semanticDesc 都表示图的语义描述。"
-        "语种要求：图名必须抄录图片中可见图题/图注的原文；Markdown、description/semanticDesc 和 context "
-        "必须优先使用图题/图注的语种，其次使用正文/图片中文字的主要语种；中文页面请用中文描述，不要翻译成英文。"
+        "语种要求：图名必须抄录图片中可见图题/图注的原文；生成的 description/semanticDesc 和 context "
+        "必须遵守开头指定的描述语言。Markdown 中抄录的原文保持原语种。"
         "未见图题时图名字段都留空，不要编造图名。"
         f"可用的文本层上下文：\n{_trim_context(page_text)}"
     )

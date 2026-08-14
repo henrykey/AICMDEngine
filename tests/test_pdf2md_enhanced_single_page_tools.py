@@ -711,7 +711,7 @@ def test_extract_page_tables_skips_vlm_metadata_when_glm_title_is_reliable(monke
     assert result["model_calls"] == {"glm_ocr": 1, "vlm_ocr": 0}
     assert result["items"][0]["title"] == "表 7-35 铜换热管的折流板和支撑板管孔直径及允许偏差"
     assert result["items"][0]["semanticDesc"].startswith("表 7-35 铜换热管")
-    assert "字段包括：换热管外径, 10, 12" in result["items"][0]["semanticDesc"]
+    assert "Fields include: 换热管外径, 10, 12" in result["items"][0]["semanticDesc"]
     assert not FakeVLMClient.prompts
 
 
@@ -1379,7 +1379,7 @@ def test_extract_page_figures_falls_back_to_vlm_without_glm_ocr(monkeypatch):
     assert result["items"][0]["source"] == "vlm_ocr"
     assert result["model_calls"] == {"glm_ocr": 0, "vlm_ocr": 1}
     assert "含插图页面" in FakeVLMClient.prompts[0]
-    assert "中文页面请用中文描述" in FakeVLMClient.prompts[0]
+    assert "MUST be written in English" in FakeVLMClient.prompts[0]
 
 
 def test_analyze_page_layout_returns_blocks_and_recommendation(monkeypatch):
@@ -1652,3 +1652,30 @@ def test_revise_page_markdown_tool_schema_exposed():
     assert "file_data" in properties
     assert "file_path" in properties
     assert "file_url" in properties
+
+
+def test_semantic_description_language_defaults_to_english():
+    assert single_page_tools._normalize_description_language(None) == "en"
+    assert single_page_tools._normalize_description_language("unknown") == "en"
+    prompt = single_page_tools._prompt_table_metadata([], "", "unknown")
+    assert "MUST be written in English" in prompt
+    assert "Do not translate them into Chinese" in prompt
+
+
+def test_semantic_description_language_supports_chinese():
+    assert single_page_tools._normalize_description_language("zh-CN") == "zh"
+    prompt = single_page_tools._prompt_table_metadata([], "", "zh-CN")
+    assert "必须使用中文" in prompt
+
+
+def test_completion_tool_schemas_expose_description_language():
+    for tool_name in (
+        "extract_page_tables",
+        "extract_page_formulas",
+        "extract_page_figures",
+        "extract_page_structured",
+    ):
+        tool = server.mcp.get_tool(tool_name)
+        if asyncio.iscoroutine(tool):
+            tool = asyncio.run(tool)
+        assert tool.parameters["properties"]["description_language"]["default"] == "en"
