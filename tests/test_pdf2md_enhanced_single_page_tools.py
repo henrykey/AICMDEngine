@@ -173,6 +173,55 @@ def test_full_page_dual_output_preserves_object_shaped_geometry():
     assert normalized["rag"]["elements"]["formulas"][0]["latex"] == "x=y"
 
 
+def test_single_page_table_vlm_uses_provider_output_budget(monkeypatch):
+    observed = []
+    client = DynamicVLMClient.__new__(DynamicVLMClient)
+    client.max_tokens = 16384
+    client.last_call_info = {}
+    monkeypatch.setattr(
+        client,
+        "_call_image_prompt",
+        lambda image_path, prompt, max_tokens: observed.append(max_tokens)
+        or '{"tables":[{"title":"T","markdown":"| A | B |\\n| --- | --- |\\n| 1 | 2 |"}]}',
+    )
+
+    result = single_page_tools._call_vlm_structured(
+        client,
+        "/tmp/unused.png",
+        "extract tables",
+        max_tokens=client.max_tokens,
+    )
+
+    assert observed == [16384]
+    assert len(result.tables) == 1
+
+
+def test_vlm_stream_response_preserves_finish_reason():
+    class Delta:
+        content = '{"tables":['
+
+    class Choice:
+        delta = Delta()
+        finish_reason = "length"
+
+    class Chunk:
+        choices = [Choice()]
+
+    class Completions:
+        def create(self, stream, **kwargs):
+            assert stream is True
+            return iter([Chunk()])
+
+    client = DynamicVLMClient.__new__(DynamicVLMClient)
+    client._client = types.SimpleNamespace(chat=types.SimpleNamespace(completions=Completions()))
+
+    content, mode, finish_reason = client._chat_completion_with_stream_fallback(model="fixture", messages=[])
+
+    assert content == '{"tables":['
+    assert mode == "stream"
+    assert finish_reason == "length"
+
+
 def test_glm_ocr_layout_file_payload_uses_data_uri():
     client = OpenAICompatibleOcrClient({})
 
@@ -453,6 +502,69 @@ def test_extract_page_tables_recovers_gbt16749_qwen_mixed_markdown_with_bounded_
     assert result["normalized_rows"] == table["normalized_rows"]
     assert json.loads(result["tableRowsContent"])["normalized_rows"] == table["normalized_rows"]
     assert any('"tables"' in prompt and '"footnotes"' in prompt for prompt in FakeVLMClient.prompts)
+
+
+def test_extract_page_tables_retries_truncated_detailed_json_with_compact_contract(monkeypatch):
+    class TruncatedThenCompactVLM:
+        calls = []
+
+        def __init__(self, cfg):
+            self.enabled = bool(cfg)
+            self.max_tokens = 16384
+            self.last_call_info = {}
+
+        def _call_image_prompt(self, image_path, prompt, max_tokens):
+            _ = image_path
+            self.__class__.calls.append((prompt, max_tokens))
+            if len(self.__class__.calls) == 1:
+                self.last_call_info = {
+                    "finish_reason": "length",
+                    "response_chars": 12000,
+                    "truncated": True,
+                }
+                return '{"tables":[{"title":"表 8（续）","normalized_rows":[["0.35","1.480"]]'
+            self.last_call_info = {
+                "finish_reason": "stop",
+                "response_chars": 120,
+                "truncated": False,
+            }
+            return json.dumps(
+                {
+                    "tables": [
+                        {
+                            "title": "表 8（续）",
+                            "markdown": "| x | y |\n| --- | --- |\n| 0.35 | 1.480 |",
+                            "notes": ["中间值采用差值法计算。"],
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            )
+
+    monkeypatch.setattr(single_page_tools, "OpenAICompatibleOcrClient", FakeGLMOcrClient)
+    monkeypatch.setattr(single_page_tools, "DynamicVLMClient", TruncatedThenCompactVLM)
+    FakeGLMOcrClient.result = None
+    FakeGLMOcrClient.error = None
+    FakeGLMOcrClient.prompts = []
+    TruncatedThenCompactVLM.calls = []
+
+    result = json.loads(
+        single_page_tools.extract_page_tables_direct(
+            file_data=PNG_DATA,
+            input_type="image",
+            description_language="zh",
+            vlm_config={"model": "qwen3.7-flash", "api_key": "x", "base_url": "http://x", "max_tokens": 16384},
+        )
+    )
+
+    assert [max_tokens for _, max_tokens in TruncatedThenCompactVLM.calls] == [16384, 16384]
+    assert "只返回紧凑 JSON" in TruncatedThenCompactVLM.calls[1][0]
+    assert result["model_calls"] == {"glm_ocr": 0, "vlm_ocr": 2}
+    assert result["tables"][0]["title"] == "表 8（续）"
+    assert result["tables"][0]["normalized_rows"] == [["0.35", "1.480"]]
+    assert result["tables"][0]["notes"] == ["中间值采用差值法计算。"]
+    assert "vlm_ocr_detailed_response_truncated" in result["warnings"]
+    assert "vlm_ocr_compact_table_retry_used" in result["warnings"]
 
 
 def test_extract_page_tables_accepts_top_level_rows_json_and_preserves_table_notes(monkeypatch):

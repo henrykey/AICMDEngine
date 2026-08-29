@@ -4,6 +4,7 @@ import base64
 import hashlib
 import html
 import json
+import logging
 import re
 import tempfile
 import urllib.parse
@@ -21,6 +22,7 @@ from .page_processor import _render_page_image, _routing_defaults, _table_to_mar
 from .vlm_client import DynamicVLMClient
 
 
+logger = logging.getLogger(__name__)
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 PDF_EXTENSIONS = {".pdf"}
 DEFAULT_REVISE_PAGE_MARKDOWN_PROMPT = """请根据这张单页渲染图片，重新生成该页可审核的 Markdown 内容。
@@ -536,7 +538,12 @@ def _extract_tables(
     if vlm.enabled:
         try:
             model_calls["vlm_ocr"] += 1
-            result = _call_vlm_structured(vlm, ctx.image_path, _prompt_tables(ctx.page_text, describe, description_language))
+            result = _call_vlm_structured(
+                vlm,
+                ctx.image_path,
+                _prompt_tables(ctx.page_text, describe, description_language),
+                max_tokens=vlm.max_tokens,
+            )
             items = [
                 _table_item("vlm_ocr", item.markdown or item.text, ctx.page_text, describe, item, table_rows_format=table_rows_format)
                 for item in result.tables
@@ -547,6 +554,60 @@ def _extract_tables(
                     items = [_table_item("vlm_ocr", recovered, ctx.page_text, describe, table_rows_format=table_rows_format, source_text=source_text)]
             if items:
                 return items
+            if _vlm_table_response_was_truncated(vlm, result):
+                warnings.append("vlm_ocr_detailed_response_truncated")
+                call_info = getattr(vlm, "last_call_info", {})
+                logger.warning(
+                    "VLM table response truncated: model=%s max_tokens=%s response_chars=%s finish_reason=%s retry=compact",
+                    getattr(vlm, "model", ""),
+                    call_info.get("effective_max_tokens") if isinstance(call_info, dict) else None,
+                    call_info.get("response_chars") if isinstance(call_info, dict) else None,
+                    call_info.get("finish_reason") if isinstance(call_info, dict) else None,
+                )
+                model_calls["vlm_ocr"] += 1
+                compact_result = _call_vlm_structured(
+                    vlm,
+                    ctx.image_path,
+                    _prompt_tables_compact(ctx.page_text, description_language),
+                    max_tokens=vlm.max_tokens,
+                )
+                compact_items = [
+                    _table_item(
+                        "vlm_ocr",
+                        item.markdown or item.text,
+                        ctx.page_text,
+                        describe,
+                        item,
+                        table_rows_format=table_rows_format,
+                    )
+                    for item in compact_result.tables
+                ]
+                if not compact_items:
+                    recovered, source_text = _recover_table_from_result(compact_result)
+                    if recovered:
+                        compact_items = [
+                            _table_item(
+                                "vlm_ocr",
+                                recovered,
+                                ctx.page_text,
+                                describe,
+                                table_rows_format=table_rows_format,
+                                source_text=source_text,
+                            )
+                        ]
+                if compact_items:
+                    warnings.append("vlm_ocr_compact_table_retry_used")
+                    return compact_items
+                if _vlm_table_response_was_truncated(vlm, compact_result):
+                    warnings.append("vlm_ocr_compact_response_truncated")
+                    compact_info = getattr(vlm, "last_call_info", {})
+                    logger.warning(
+                        "VLM compact table response truncated: model=%s max_tokens=%s response_chars=%s finish_reason=%s",
+                        getattr(vlm, "model", ""),
+                        compact_info.get("effective_max_tokens") if isinstance(compact_info, dict) else None,
+                        compact_info.get("response_chars") if isinstance(compact_info, dict) else None,
+                        compact_info.get("finish_reason") if isinstance(compact_info, dict) else None,
+                    )
             warnings.append("vlm_ocr_returned_no_tables")
         except Exception as exc:
             warnings.append(f"vlm_ocr_failed: {exc}")
@@ -768,9 +829,31 @@ def _extract_figure_page_result(
     return _figure_page_result(ctx, model_calls, warnings, page_markdown, items)
 
 
-def _call_vlm_structured(vlm: DynamicVLMClient, image_path: str, prompt: str) -> OcrResult:
-    text = vlm._call_image_prompt(image_path, prompt, max_tokens=min(vlm.max_tokens, 4096))
+def _call_vlm_structured(
+    vlm: DynamicVLMClient,
+    image_path: str,
+    prompt: str,
+    max_tokens: Optional[int] = None,
+) -> OcrResult:
+    budget = min(vlm.max_tokens, 4096) if max_tokens is None else min(vlm.max_tokens, int(max_tokens))
+    text = vlm._call_image_prompt(image_path, prompt, max_tokens=budget)
     return normalize_text_response(text, "vlm_ocr")
+
+
+def _vlm_table_response_was_truncated(vlm: DynamicVLMClient, result: OcrResult) -> bool:
+    call_info = getattr(vlm, "last_call_info", {})
+    if isinstance(call_info, dict):
+        if call_info.get("truncated") is True or str(call_info.get("finish_reason") or "").lower() == "length":
+            return True
+    raw = result.raw if isinstance(result.raw, dict) else {}
+    text = str(raw.get("text") or "").strip()
+    if not text:
+        return False
+    unfenced = re.sub(r"^```(?:json|html)?\s*", "", text, flags=re.IGNORECASE).strip()
+    if unfenced.startswith("{") and _extract_json_payload(unfenced) is None:
+        return True
+    lower = unfenced.lower()
+    return "<table" in lower and "</table>" not in lower
 
 
 def _vlm_debug_info(vlm: DynamicVLMClient) -> Dict[str, Any]:
@@ -1550,6 +1633,19 @@ def _prompt_tables(page_text: str, describe: bool, description_language: str = "
         "\"cell_status\":[{\"row\":0,\"col\":0,\"status\":\"recognized\"}],"
         "\"raw_html\":\"\",\"markdown\":\"\",\"degraded\":false,\"manualReviewRequired\":false,\"warnings\":[]}]}。\n"
         f"是否需要语义描述：{bool(describe)}。\n"
+        f"可用的文本层上下文：\n{_trim_context(page_text)}"
+    )
+
+
+def _prompt_tables_compact(page_text: str, description_language: str = "en") -> str:
+    return (
+        f"{_description_language_instruction(description_language)}\n"
+        "识别图片中的所有表格，只返回紧凑 JSON，不要输出解释、代码围栏或内联样式。\n"
+        "每张表只返回 title、markdown、notes、footnotes；markdown 必须是紧凑 pipe Markdown，完整保留所有可见行列、"
+        "合并表头文本、数字和单元格内 LaTeX。不要返回 bbox、source_cells、cell_status、confidence、raw_html 或重复矩阵。\n"
+        "按图片从上到下保持表格顺序；没有表格时返回空数组。\n"
+        "JSON schema：{\"tables\":[{\"title\":\"\",\"markdown\":\"| A | B |\\n| --- | --- |\\n| 1 | 2 |\","
+        "\"notes\":[],\"footnotes\":[]}]}。\n"
         f"可用的文本层上下文：\n{_trim_context(page_text)}"
     )
 

@@ -27,6 +27,7 @@ class DynamicVLMClient:
         self.extra_headers = cfg.get("extra_headers") or {}
         self._runtime_max_tokens_cap: Optional[int] = None
         self.last_dual_output_budget: Dict[str, Any] = {}
+        self.last_call_info: Dict[str, Any] = {}
 
         self.enabled = bool(self.model and self.api_key and self.base_url)
         self._client = None
@@ -266,7 +267,7 @@ class DynamicVLMClient:
             try:
                 t0 = time.time()
                 call_max_tokens = self._apply_runtime_max_tokens_cap(max_tokens)
-                content, mode = self._chat_completion_with_stream_fallback(
+                content, mode, finish_reason = self._chat_completion_with_stream_fallback(
                     model=self.model,
                     messages=[
                         {
@@ -282,12 +283,22 @@ class DynamicVLMClient:
                     temperature=self.temperature,
                 )
                 elapsed = time.time() - t0
+                self.last_call_info = {
+                    "mode": mode,
+                    "finish_reason": finish_reason,
+                    "requested_max_tokens": max_tokens,
+                    "effective_max_tokens": call_max_tokens,
+                    "response_chars": len(content or ""),
+                    "truncated": finish_reason == "length",
+                }
                 logger.info(
-                    "VLM call ok: model=%s max_tokens=%s attempt=%s mode=%s elapsed=%.2fs",
+                    "VLM call ok: model=%s max_tokens=%s attempt=%s mode=%s finish_reason=%s response_chars=%s elapsed=%.2fs",
                     self.model,
                     call_max_tokens,
                     attempt + 1,
                     mode,
+                    finish_reason,
+                    len(content or ""),
                     elapsed,
                 )
                 return content or ""
@@ -314,7 +325,7 @@ class DynamicVLMClient:
             try:
                 t0 = time.time()
                 call_max_tokens = self._apply_runtime_max_tokens_cap(max_tokens)
-                content, mode = self._chat_completion_with_stream_fallback(
+                content, mode, finish_reason = self._chat_completion_with_stream_fallback(
                     model=self.model,
                     messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}],
                     timeout=self.timeout_sec,
@@ -322,12 +333,22 @@ class DynamicVLMClient:
                     temperature=min(self.temperature, 0.1),
                 )
                 elapsed = time.time() - t0
+                self.last_call_info = {
+                    "mode": mode,
+                    "finish_reason": finish_reason,
+                    "requested_max_tokens": max_tokens,
+                    "effective_max_tokens": call_max_tokens,
+                    "response_chars": len(content or ""),
+                    "truncated": finish_reason == "length",
+                }
                 logger.info(
-                    "VLM text call ok: model=%s max_tokens=%s attempt=%s mode=%s elapsed=%.2fs",
+                    "VLM text call ok: model=%s max_tokens=%s attempt=%s mode=%s finish_reason=%s response_chars=%s elapsed=%.2fs",
                     self.model,
                     call_max_tokens,
                     attempt + 1,
                     mode,
+                    finish_reason,
+                    len(content or ""),
                     elapsed,
                 )
                 return content or ""
@@ -346,7 +367,7 @@ class DynamicVLMClient:
 
         raise RuntimeError(f"VLM text call failed: {last_err}")
 
-    def _chat_completion_with_stream_fallback(self, **kwargs: Any) -> tuple[str, str]:
+    def _chat_completion_with_stream_fallback(self, **kwargs: Any) -> tuple[str, str, str]:
         """
         Prefer streaming mode for lower first-token latency.
         Automatically falls back to non-stream mode for providers/gateways
@@ -356,14 +377,16 @@ class DynamicVLMClient:
         try:
             stream_resp = self._client.chat.completions.create(stream=True, **kwargs)
             chunks: list[str] = []
+            finish_reason = ""
             for chunk in stream_resp:
+                finish_reason = self._stream_finish_reason(chunk) or finish_reason
                 piece = self._extract_stream_chunk_text(chunk)
                 if piece:
                     chunks.append(piece)
 
             merged = "".join(chunks)
             if merged:
-                return merged, "stream"
+                return merged, "stream", finish_reason
 
             logger.warning("VLM stream call returned empty content, fallback to non-stream mode")
         except Exception as exc:
@@ -376,14 +399,16 @@ class DynamicVLMClient:
                 try:
                     stream_resp = self._client.chat.completions.create(stream=True, **kwargs)
                     chunks: list[str] = []
+                    finish_reason = ""
                     for chunk in stream_resp:
+                        finish_reason = self._stream_finish_reason(chunk) or finish_reason
                         piece = self._extract_stream_chunk_text(chunk)
                         if piece:
                             chunks.append(piece)
 
                     merged = "".join(chunks)
                     if merged:
-                        return merged, "stream"
+                        return merged, "stream", finish_reason
                     logger.warning("VLM stream retry returned empty content, fallback to non-stream mode")
                 except Exception as retry_exc:
                     stream_err = retry_exc
@@ -403,10 +428,11 @@ class DynamicVLMClient:
             else:
                 raise
         content = resp.choices[0].message.content if resp.choices else ""
+        finish_reason = str(getattr(resp.choices[0], "finish_reason", "") or "") if resp.choices else ""
         normalized = self._normalize_message_content(content)
         if stream_err is not None:
             logger.info("VLM non-stream fallback succeeded after stream failure")
-        return normalized, "non-stream"
+        return normalized, "non-stream", finish_reason
 
     def _apply_runtime_max_tokens_cap(self, max_tokens: int) -> int:
         cap = self._runtime_max_tokens_cap
@@ -452,6 +478,12 @@ class DynamicVLMClient:
             return ""
         content = getattr(delta, "content", "")
         return self._normalize_message_content(content)
+
+    def _stream_finish_reason(self, chunk: Any) -> str:
+        choices = getattr(chunk, "choices", None) or []
+        if not choices:
+            return ""
+        return str(getattr(choices[0], "finish_reason", "") or "")
 
     def _normalize_message_content(self, content: Any) -> str:
         if isinstance(content, str):
