@@ -130,7 +130,7 @@ def _localized_table_payload_to_markdown(data: Dict[str, Any]) -> str:
     if not headers:
         return ""
     markdown_rows: List[List[str]] = [[str(row_header).strip(), *headers]]
-    if data.get("normalized_rows") is rows and all(isinstance(row, list) for row in rows):
+    if all(isinstance(row, list) for row in rows):
         return _table_data_to_markdown([headers, *rows])
     for row in rows:
         if not isinstance(row, dict):

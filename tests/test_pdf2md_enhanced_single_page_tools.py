@@ -54,6 +54,9 @@ DynamicVLMClient = sys.modules[f"{PACKAGE_NAME}.vlm_client"].DynamicVLMClient
 
 
 PNG_DATA = base64.b64encode(b"\x89PNG\r\n\x1a\nfake").decode("ascii")
+GBT16749_PAGE12_QWEN_RESPONSE = (
+    ROOT / "tests/fixtures/gbt16749_page12_qwen_table_response.md"
+).read_text(encoding="utf-8")
 
 
 def test_full_page_dual_output_uses_configured_bounded_budget(monkeypatch):
@@ -411,6 +414,75 @@ def test_extract_page_tables_only_uses_table_items(monkeypatch):
     assert json.loads(result["tableRowsContent"])["normalized_rows"] == result["normalized_rows"]
     assert result["model_calls"] == {"glm_ocr": 1, "vlm_ocr": 1}
     assert "目标是可查询的标准矩阵" in FakeGLMOcrClient.prompts[0]
+
+
+def test_extract_page_tables_recovers_gbt16749_qwen_mixed_markdown_with_bounded_notes(monkeypatch):
+    _patch_clients(monkeypatch)
+    FakeVLMClient.result_text = GBT16749_PAGE12_QWEN_RESPONSE
+
+    result = json.loads(
+        single_page_tools.extract_page_tables_direct(
+            file_data=PNG_DATA,
+            input_type="image",
+            description_language="zh",
+            table_rows_format="structured_json",
+            vlm_config={"model": "qwen-vl", "api_key": "x", "base_url": "http://x"},
+        )
+    )
+
+    assert "vlm_ocr_returned_no_tables" not in result["warnings"]
+    assert len(result["tables"]) == len(result["items"]) == 1
+    table = result["tables"][0]
+    assert table["title"] == "表 3 焊接接头高温强度降低系数 $w$"
+    assert table["columns"] == [
+        "材料", "427", "454", "482", "510", "538", "566", "593",
+        "621", "649", "677", "704", "732", "760", "788", "816",
+    ]
+    assert len(table["normalized_rows"]) == 5
+    assert all(len(row) == 16 for row in table["normalized_rows"])
+    assert table["normalized_rows"][0][:4] == ["CrMo 钢$^{a \\sim e}$", "1", "0.95", "0.91"]
+    assert table["normalized_rows"][-1][-3:] == ["0.59", "0.55", "0.5"]
+    assert table["notes"] == [
+        "本表所列温度仅用于相应材料焊接接头高温强度降低系数 $w$，材料的使用温度上限按 GB/T 150.2—2011 相应材料标准的规定。"
+    ]
+    assert len(table["footnotes"]) == 6
+    metadata_text = "\n".join([*table["notes"], *table["footnotes"]])
+    assert "4.4 厚度附加量" not in metadata_text
+    assert "C=C_1+C_2" not in metadata_text
+    assert result["columns"] == table["columns"]
+    assert result["normalized_rows"] == table["normalized_rows"]
+    assert json.loads(result["tableRowsContent"])["normalized_rows"] == table["normalized_rows"]
+    assert any('"tables"' in prompt and '"footnotes"' in prompt for prompt in FakeVLMClient.prompts)
+
+
+def test_extract_page_tables_accepts_top_level_rows_json_and_preserves_table_notes(monkeypatch):
+    _patch_clients(monkeypatch)
+    FakeVLMClient.result_text = json.dumps(
+        {
+            "title": "表 3 焊接接头高温强度降低系数 w",
+            "columns": ["材料", "427", "454"],
+            "rows": [["CrMo 钢", "1", "0.95"]],
+            "description": "不同材料在高温下的焊接接头强度降低系数。",
+            "notes": ["本表温度仅用于对应材料。"],
+            "footnotes": ["a CrMo 钢包括若干铬钼钢。"],
+        },
+        ensure_ascii=False,
+    )
+
+    result = json.loads(
+        single_page_tools.extract_page_tables_direct(
+            file_data=PNG_DATA,
+            input_type="image",
+            table_rows_format="structured_json",
+            vlm_config={"model": "qwen-vl", "api_key": "x", "base_url": "http://x"},
+        )
+    )
+
+    assert len(result["tables"]) == 1
+    assert result["tables"][0]["columns"] == ["材料", "427", "454"]
+    assert result["tables"][0]["normalized_rows"] == [["CrMo 钢", "1", "0.95"]]
+    assert result["tables"][0]["notes"] == ["本表温度仅用于对应材料。"]
+    assert result["tables"][0]["footnotes"] == ["a CrMo 钢包括若干铬钼钢。"]
 
 
 def test_extract_page_tables_recovers_localized_json_table(monkeypatch):

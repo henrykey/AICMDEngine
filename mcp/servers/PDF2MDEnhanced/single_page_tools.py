@@ -834,9 +834,14 @@ def _table_item(
     if raw_item and isinstance(raw_item.raw, dict):
         normalized = _merge_model_normalized_table(normalized, raw_item.raw)
     table_md = normalized["markdown"]
+    metadata = _table_response_metadata(
+        raw_item.raw if raw_item and isinstance(raw_item.raw, dict) else {},
+        source_text,
+    )
     title = (
         (raw_item.title if raw_item else "")
         or _table_title_from_raw(raw_item.raw if raw_item else None)
+        or metadata["title"]
         or _find_table_title(page_text)
         or _table_title_from_markdown(table_md)
     )
@@ -861,6 +866,8 @@ def _table_item(
         "degraded": normalized["degraded"],
         "manualReviewRequired": normalized["manualReviewRequired"],
         "context": (raw_item.context if raw_item else "") or _near_context(page_text, title),
+        "notes": metadata["notes"],
+        "footnotes": metadata["footnotes"],
     }
     for key in ("bbox", "bbox_space", "source_cell_row_offset", "source_block_index"):
         value = normalized.get(key)
@@ -1274,6 +1281,8 @@ def _promote_first_table_fields(result: Dict[str, Any], item: Dict[str, Any]) ->
         "degraded",
         "manualReviewRequired",
         "reason",
+        "notes",
+        "footnotes",
     ]:
         if key in item:
             result[key] = item[key]
@@ -1520,7 +1529,7 @@ def _description_language_instruction(value: Optional[str]) -> str:
 def _prompt_tables(page_text: str, describe: bool, description_language: str = "en") -> str:
     return (
         f"{_description_language_instruction(description_language)}\n"
-        "识别截图中的表格内容，输出严格 JSON，不要输出 Markdown、HTML 或解释。\n"
+        "识别截图中的表格内容，输出严格 JSON，不要输出 JSON 之外的 Markdown、HTML 或解释。\n"
         "请按表格网格线逐行逐列读取，不能按文本连续顺序重排。目标是可查询的标准矩阵，不是视觉 Markdown。\n"
         "规则：\n"
         "1. 识别表名。\n"
@@ -1532,12 +1541,14 @@ def _prompt_tables(page_text: str, describe: bool, description_language: str = "
         "7. 区分空白来源：merged_fill、blank_in_source、unreadable、recognized，并在 cell_status 返回。\n"
         "8. 禁止因为空白或合并单元格导致后续数值左移；禁止额外产生尾部 n/a 伪列。\n"
         "9. 单元格数字必须按图中原样抄录，不要根据相邻数字推断或修正；看不清的单元格标记 unreadable。\n"
-        "10. 可以额外返回 markdown/raw_html，但必须返回 normalized JSON。\n"
+        "10. 表注放入 notes，a/b/c 等脚注分别放入 footnotes；遇到下一个章节标题立即停止，不能把表后公式或正文当作表注。\n"
+        "11. 可以额外返回 markdown/raw_html，但必须返回 normalized JSON。\n"
         "JSON schema："
-        "{\"table_title\":\"\",\"orientation\":0,\"columns\":[],\"normalized_rows\":[[]],\"bbox\":[0,0,0,0],\"bbox_space\":\"normalized_page\",\"source_block_index\":0,\"source_cell_row_offset\":1,"
+        "{\"tables\":[{\"title\":\"\",\"description\":\"\",\"orientation\":0,\"columns\":[],\"normalized_rows\":[[]],\"notes\":[],\"footnotes\":[],"
+        "\"bbox\":[0,0,0,0],\"bbox_space\":\"normalized_page\",\"source_block_index\":0,\"source_cell_row_offset\":1,"
         "\"source_cells\":[{\"row\":0,\"col\":0,\"text\":\"\",\"rowspan\":1,\"colspan\":1,\"source_cell_index\":0,\"bbox\":[0,0,0,0],\"bbox_space\":\"normalized_page\",\"confidence\":1.0}],"
         "\"cell_status\":[{\"row\":0,\"col\":0,\"status\":\"recognized\"}],"
-        "\"raw_html\":\"\",\"markdown\":\"\",\"degraded\":false,\"manualReviewRequired\":false,\"warnings\":[]}。\n"
+        "\"raw_html\":\"\",\"markdown\":\"\",\"degraded\":false,\"manualReviewRequired\":false,\"warnings\":[]}]}。\n"
         f"是否需要语义描述：{bool(describe)}。\n"
         f"可用的文本层上下文：\n{_trim_context(page_text)}"
     )
@@ -1728,6 +1739,8 @@ def _normalize_table_contract(table_text: str, table_rows_format: str = "markdow
     else:
         markdown = _recover_table_markdown(raw_text) or raw_text
         grid, meta = _markdown_table_to_grid_and_meta(markdown)
+        if "multirow_markdown_header_flattened" in meta.get("warnings", []):
+            markdown = _grid_to_markdown(grid)
         warnings.extend(meta["warnings"])
         degraded = bool(meta["degraded"])
         manual_review = bool(meta["manualReviewRequired"])
@@ -2166,12 +2179,13 @@ def _markdown_table_to_grid_and_meta(markdown: str) -> tuple[List[List[str]], Di
         rows.append(cells)
     if not rows:
         return [], _grid_table_meta([])
+    rows, header_warnings = _flatten_markdown_header_rows(rows)
     width = max(len(row) for row in rows)
     if width <= 1:
         return rows, _grid_table_meta(rows)
     repaired, repair_meta = _repair_markdown_merged_rows(rows, width)
     meta = _grid_table_meta(repaired)
-    warnings = _dedupe([*meta.get("warnings", []), *repair_meta.get("warnings", [])])
+    warnings = _dedupe([*meta.get("warnings", []), *repair_meta.get("warnings", []), *header_warnings])
     meta.update(
         {
             "columns": repaired[0] if repaired else [],
@@ -2185,6 +2199,31 @@ def _markdown_table_to_grid_and_meta(markdown: str) -> tuple[List[List[str]], Di
         }
     )
     return repaired, meta
+
+
+def _flatten_markdown_header_rows(rows: List[List[str]]) -> tuple[List[List[str]], List[str]]:
+    if len(rows) < 3 or len(rows[0]) != len(rows[1]) or len(rows[0]) < 3:
+        return rows, []
+    group_header = rows[0]
+    leaf_header = rows[1]
+    if (
+        not _cell_to_text(group_header[0])
+        or not _cell_to_text(group_header[1])
+        or any(_cell_to_text(cell) for cell in group_header[2:])
+        or _cell_to_text(leaf_header[0])
+        or any(not _cell_to_text(cell) for cell in leaf_header[1:])
+    ):
+        return rows, []
+    flattened = [
+        _strip_markdown_emphasis(group_header[0]),
+        *[_strip_markdown_emphasis(cell) for cell in leaf_header[1:]],
+    ]
+    return [flattened, *rows[2:]], ["multirow_markdown_header_flattened"]
+
+
+def _strip_markdown_emphasis(value: str) -> str:
+    text = _cell_to_text(value)
+    return re.sub(r"^(?:\*\*|__)(.*?)(?:\*\*|__)$", r"\1", text).strip()
 
 
 def _repair_markdown_merged_rows(rows: List[List[str]], width: int) -> tuple[List[List[str]], Dict[str, Any]]:
@@ -2632,6 +2671,89 @@ def _table_title_from_raw(raw: Any) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()[:120]
     return ""
+
+
+def _table_response_metadata(raw: Dict[str, Any], source_text: str) -> Dict[str, Any]:
+    title = _table_title_from_raw(raw)
+    notes = _string_list(raw.get("notes") or raw.get("note") or raw.get("table_notes"))
+    footnotes = _string_list(raw.get("footnotes") or raw.get("footnote") or raw.get("table_footnotes"))
+    if source_text:
+        mixed = _mixed_markdown_table_metadata(source_text)
+        title = title or mixed["title"]
+        notes = notes or mixed["notes"]
+        footnotes = footnotes or mixed["footnotes"]
+    return {"title": title, "notes": notes, "footnotes": footnotes}
+
+
+def _mixed_markdown_table_metadata(text: str) -> Dict[str, Any]:
+    lines = str(text or "").splitlines()
+    table_indexes = [index for index, line in enumerate(lines) if "|" in line]
+    if not table_indexes:
+        return {"title": "", "notes": [], "footnotes": []}
+
+    first = table_indexes[0]
+    last = first
+    for index in table_indexes[1:]:
+        if all(not lines[gap].strip() for gap in range(last + 1, index)):
+            last = index
+            continue
+        break
+
+    title = ""
+    for index in range(first - 1, -1, -1):
+        candidate = _strip_markdown_heading(lines[index])
+        if not candidate:
+            continue
+        if re.match(r"^(表|Table)\s*\S+", candidate, flags=re.IGNORECASE):
+            title = candidate[:120]
+        break
+
+    notes: List[str] = []
+    footnotes: List[str] = []
+    active_footnote = -1
+    for line in lines[last + 1:]:
+        candidate = line.strip()
+        if _is_following_section_heading(candidate):
+            break
+        if not candidate:
+            active_footnote = -1
+            continue
+        candidate = re.sub(r"^>\s*", "", candidate).strip()
+        marker = re.match(
+            r"^(?:[-*+]\s+)?(?:\$\^\{?([a-z])\}?\$|\^?\{?([a-z])\}?|<sup>\s*([a-z])\s*</sup>)[\s.)、:：]+(.+)$",
+            candidate,
+            flags=re.IGNORECASE,
+        )
+        if marker:
+            footnotes.append(candidate)
+            active_footnote = len(footnotes) - 1
+        elif active_footnote >= 0:
+            footnotes[active_footnote] = f"{footnotes[active_footnote]} {candidate}"
+        else:
+            notes.append(candidate)
+    return {"title": title, "notes": notes, "footnotes": footnotes}
+
+
+def _strip_markdown_heading(value: str) -> str:
+    text = re.sub(r"^\s*#{1,6}\s*", "", str(value or "").strip())
+    text = re.sub(r"^\*\*(.*?)\**$", r"\1", text).strip()
+    return text
+
+
+def _is_following_section_heading(value: str) -> bool:
+    text = str(value or "").strip()
+    return bool(
+        re.match(r"^#{1,6}\s+\d+(?:\.\d+)+\b", text)
+        or re.match(r"^\d+(?:\.\d+)+\s+\S", text)
+    )
+
+
+def _string_list(value: Any) -> List[str]:
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _table_title_from_markdown(markdown: str) -> str:
