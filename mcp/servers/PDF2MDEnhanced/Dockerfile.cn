@@ -29,7 +29,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
     && pip install --no-cache-dir -r requirements.txt
 
 RUN mkdir -p /app/PDF2MDEnhanced
-COPY __init__.py __main__.py models.py page_processor.py server.py single_page_tools.py source_resolver.py task_manager.py vlm_client.py /app/PDF2MDEnhanced/
+COPY __init__.py __main__.py http_transport.py models.py page_processor.py server.py single_page_tools.py source_resolver.py task_manager.py vlm_client.py /app/PDF2MDEnhanced/
 COPY ocr_clients/ /app/PDF2MDEnhanced/ocr_clients/
 
 RUN mkdir -p /app/data/input /app/data/output /app/data/tasks

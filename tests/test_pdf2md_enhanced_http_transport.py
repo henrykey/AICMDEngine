@@ -8,6 +8,10 @@ from starlette.testclient import TestClient
 
 ROOT = Path(__file__).resolve().parents[1]
 TRANSPORT_PATH = ROOT / "mcp/servers/PDF2MDEnhanced/http_transport.py"
+DOCKERFILE_PATHS = [
+    ROOT / "mcp/servers/PDF2MDEnhanced/Dockerfile",
+    ROOT / "mcp/servers/PDF2MDEnhanced/Dockerfile.cn",
+]
 
 
 def _load_transport_module():
@@ -42,3 +46,9 @@ def test_pdf2md_streamable_http_accepts_10_mib_and_rejects_over_16_mib():
         assert rejected.status_code == 413
     finally:
         fastmcp_http.FastMCPStreamableHTTPSessionManager = original_manager
+
+
+def test_all_pdf2md_images_copy_the_http_transport_module():
+    for dockerfile_path in DOCKERFILE_PATHS:
+        dockerfile = dockerfile_path.read_text(encoding="utf-8")
+        assert "COPY __init__.py __main__.py http_transport.py" in dockerfile
