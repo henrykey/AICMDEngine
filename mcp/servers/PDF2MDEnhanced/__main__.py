@@ -21,6 +21,11 @@ async def async_main() -> None:
     env_path = Path(__file__).parent / ".env"
     load_dotenv(env_path)
 
+    if args.http:
+        from .http_transport import configure_pdf2md_http_request_limit
+
+        configure_pdf2md_http_request_limit()
+
     from .server import mcp
 
     if args.http:
