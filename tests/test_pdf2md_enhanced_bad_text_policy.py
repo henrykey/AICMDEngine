@@ -4,6 +4,7 @@ import types
 from pathlib import Path
 
 import fitz
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -890,6 +891,8 @@ def test_finalize_markdown_excludes_bad_text_sample(tmp_path):
 
 class LayoutLedgerGLMOcrClient:
     raw = {}
+    crop_raw = {"layout_details": []}
+    calls = []
 
     def __init__(self, cfg, source="glm_ocr"):
         self.enabled = bool((cfg or {}).get("enabled"))
@@ -897,9 +900,11 @@ class LayoutLedgerGLMOcrClient:
         self.source = source
 
     def parse_layout(self, image_path, return_crop_images=False, need_layout_visualization=False):
-        _ = image_path
+        type(self).calls.append(str(image_path))
         _ = return_crop_images
         _ = need_layout_visualization
+        if "layout-recovery-" in str(image_path):
+            return self.crop_raw
         return self.raw
 
     def extract_page(self, image_path):
@@ -911,6 +916,7 @@ class LayoutLedgerVLMClient:
     recovered = {"tables": [], "formulas": [], "figures": []}
     calls = 0
     last_blocks = []
+    last_image_paths = []
 
     def __init__(self, cfg):
         self.enabled = bool(cfg)
@@ -923,17 +929,17 @@ class LayoutLedgerVLMClient:
         self.last_dual_output_budget = {}
 
     def extract_layout_structured(self, image_path, layout_blocks):
-        _ = image_path
         assert layout_blocks
         type(self).calls += 1
         type(self).last_blocks = layout_blocks
+        type(self).last_image_paths.append(str(image_path))
         return self.recovered
 
     def cleanup_markdown_table_noise(self, markdown_text):
         return markdown_text
 
 
-def _run_layout_ledger_page(monkeypatch, raw, recovered=None):
+def _run_layout_ledger_page(monkeypatch, raw, recovered=None, crop_raw=None):
     page = FakePage(
         text="fixture text layer",
         blocks=[(0, 0, 100, 100, "fixture text layer", 0, 0)],
@@ -944,11 +950,28 @@ def _run_layout_ledger_page(monkeypatch, raw, recovered=None):
     monkeypatch.setattr(page_processor, "_render_page_image", lambda *args, **kwargs: Path("/tmp/layout-page.png"))
     monkeypatch.setattr(page_processor, "OpenAICompatibleOcrClient", LayoutLedgerGLMOcrClient)
     monkeypatch.setattr(page_processor, "DynamicVLMClient", LayoutLedgerVLMClient)
+    crop_calls = []
+
+    def fake_crop(image_path, block, output_dir, padding_ratio=0.02):
+        _ = image_path
+        _ = output_dir
+        crop_calls.append({"layout_id": block["layout_id"], "bbox": list(block["bbox"])})
+        return Path(f"/tmp/layout-recovery-{block['layout_id']}.png"), {
+            "pixel_bbox": [8, 8, 92, 92],
+            "width": 84,
+            "height": 84,
+            "padding_ratio": padding_ratio,
+        }
+
+    monkeypatch.setattr(page_processor, "_crop_layout_block_image", fake_crop, raising=False)
     LayoutLedgerGLMOcrClient.raw = raw
+    LayoutLedgerGLMOcrClient.crop_raw = crop_raw or {"layout_details": []}
+    LayoutLedgerGLMOcrClient.calls = []
     LayoutLedgerVLMClient.recovered = recovered or {"tables": [], "formulas": [], "figures": []}
     LayoutLedgerVLMClient.calls = 0
     LayoutLedgerVLMClient.last_blocks = []
-    return page_processor.process_page(
+    LayoutLedgerVLMClient.last_image_paths = []
+    result = page_processor.process_page(
         source_path="/tmp/layout-fixture.pdf",
         page_no=1,
         policy="force_direct",
@@ -966,6 +989,8 @@ def _run_layout_ledger_page(monkeypatch, raw, recovered=None):
         },
         prev_context=None,
     )
+    result["_fixture_crop_calls"] = crop_calls
+    return result
 
 
 def _layout_raw(blocks, markdown="fixture markdown"):
@@ -1039,6 +1064,120 @@ def test_process_page_layout_complete_html_tables_do_not_trigger_recovery(monkey
     assert [item["markdown"] for item in result["elements"]["tables"]] == tables
     assert result["reconciliation"]["complete"] is True
     assert LayoutLedgerVLMClient.calls == 0
+    assert result["_fixture_crop_calls"] == []
+
+
+def test_layout_recovery_crop_clamps_bbox_and_keeps_small_padding(tmp_path):
+    source = tmp_path / "page.png"
+    pixmap = page_processor.fitz.Pixmap(page_processor.fitz.csRGB, page_processor.fitz.IRect(0, 0, 100, 80), False)
+    pixmap.clear_with(255)
+    pixmap.save(str(source))
+
+    cropped, crop_info = page_processor._crop_layout_block_image(
+        source,
+        {"layout_id": "p1-o002-table", "bbox": [0.0, 0.0, 0.2, 0.2]},
+        tmp_path,
+        padding_ratio=0.02,
+    )
+
+    cropped_pixmap = page_processor.fitz.Pixmap(str(cropped))
+    assert crop_info == {
+        "pixel_bbox": [0, 0, 22, 18],
+        "width": 22,
+        "height": 18,
+        "padding_ratio": 0.02,
+    }
+    assert (cropped_pixmap.width, cropped_pixmap.height) == (22, 18)
+
+
+def test_process_page_layout_uses_unique_glm_crop_result_for_original_layout_id(monkeypatch):
+    complete = "<table><tr><td>A</td><td>B</td></tr><tr><td>1</td><td>2</td></tr></table>"
+    incomplete = "<table><tr><td>C</td><td>D</td></tr><tr><td>3</td><td>"
+    recovered = "<table><tr><td>C</td><td>D</td></tr><tr><td>3</td><td>4</td></tr></table>"
+    result = _run_layout_ledger_page(
+        monkeypatch,
+        _layout_raw(
+            [
+                {"index": 10, "label": "table", "bbox_2d": [10, 10, 90, 40], "content": complete},
+                {"index": 20, "label": "table", "bbox_2d": [10, 50, 90, 90], "content": incomplete},
+            ]
+        ),
+        recovered={"tables": [], "formulas": [], "figures": []},
+        crop_raw={
+            "layout_details": [
+                [{"index": 900, "label": "table", "bbox_2d": [0, 0, 1, 1], "content": recovered}]
+            ]
+        },
+    )
+
+    assert result["_fixture_crop_calls"] == [
+        {"layout_id": "p1-o002-table", "bbox": [0.1, 0.5, 0.9, 0.9]}
+    ]
+    assert LayoutLedgerVLMClient.calls == 0
+    assert result["layout"][1]["layout_id"] == "p1-o002-table"
+    assert result["layout"][1]["reading_order"] == 2
+    assert result["layout"][1]["bbox"] == [0.1, 0.5, 0.9, 0.9]
+    assert result["layout"][1]["status"] == "EXTRACTED"
+    assert result["layout"][1]["review_required"] is False
+    assert result["elements"]["tables"][1]["layout_id"] == "p1-o002-table"
+    assert result["elements"]["tables"][1]["markdown"] == recovered
+    assert result["elements"]["tables"][1]["source"] == "glm_ocr_layout+glm_ocr_crop"
+    assert result["layout_recovery"]["objects"] == [
+        {
+            "layout_id": "p1-o002-table",
+            "type": "table",
+            "crop": {
+                "pixel_bbox": [8, 8, 92, 92],
+                "width": 84,
+                "height": 84,
+                "padding_ratio": 0.02,
+            },
+            "attempts": [
+                {"provider": "glm_ocr", "outcome": "recovered", "reason": "unique_target_type"}
+            ],
+            "outcome": "recovered",
+            "provider": "glm_ocr",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "truncated_tail",
+    [
+        "<tr><td>0.00</td><td>1.000</td><td>1.000</td><td>0.980</td><td>0.95",
+        "<tr><td>0.00</td><td>1.000</td><td>1.000</td><td>0.980</td><td>0.950</td><td>0.90",
+    ],
+)
+def test_process_page_layout_recovers_generic_large_table_crop(monkeypatch, truncated_tail):
+    first = "<table><tr><td>A</td><td>B</td></tr><tr><td>1</td><td>2</td></tr></table>"
+    incomplete = (
+        "<table><tr><td rowspan=\"2\">ratio</td><td colspan=\"6\">coefficients</td></tr>"
+        "<tr><td>0.2</td><td>0.4</td><td>0.6</td><td>0.8</td><td>1.0</td><td>1.2</td></tr>"
+        + truncated_tail
+    )
+    recovered = incomplete + "</td></tr></table>"
+    result = _run_layout_ledger_page(
+        monkeypatch,
+        _layout_raw(
+            [
+                {"index": 1, "label": "table", "bbox_2d": [8, 8, 92, 42], "content": first},
+                {"index": 2, "label": "table", "bbox_2d": [8, 48, 92, 98], "content": incomplete},
+            ]
+        ),
+        recovered={"tables": [], "formulas": [], "figures": []},
+        crop_raw={
+            "layout_details": [
+                [{"index": 7, "label": "table", "bbox_2d": [0, 0, 1, 1], "content": recovered}]
+            ]
+        },
+    )
+
+    assert [item["status"] for item in result["layout"]] == ["EXTRACTED", "EXTRACTED"]
+    assert result["elements"]["tables"][1]["layout_id"] == "p1-o002-table"
+    assert result["elements"]["tables"][1]["markdown"] == recovered
+    assert result["_fixture_crop_calls"] == [
+        {"layout_id": "p1-o002-table", "bbox": [0.08, 0.48, 0.92, 0.98]}
+    ]
 
 
 def test_process_page_layout_recovers_only_incomplete_second_html_table(monkeypatch):
@@ -1075,6 +1214,7 @@ def test_process_page_layout_recovers_only_incomplete_second_html_table(monkeypa
     )
 
     assert LayoutLedgerVLMClient.calls == 1
+    assert LayoutLedgerVLMClient.last_image_paths == ["/tmp/layout-recovery-p1-o002-table.png"]
     assert [block["layout_id"] for block in LayoutLedgerVLMClient.last_blocks] == ["p1-o002-table"]
     assert [item["status"] for item in result["layout"]] == ["EXTRACTED", "EXTRACTED"]
     assert [item["reading_order"] for item in result["layout"]] == [1, 2]
@@ -1124,9 +1264,14 @@ def test_process_page_layout_incomplete_table_recovery_failure_is_isolated(monke
         "stage": "layout_content",
         "retryable": True,
     }
+    assert result["layout"][1]["review_required"] is True
+    assert result["layout"][1]["content"] == incomplete_second
+    assert result["layout_recovery"]["objects"][0]["outcome"] == "failed"
+    assert result["layout_recovery"]["objects"][0]["review_required"] is True
     assert [item["markdown"] for item in result["elements"]["tables"]] == [first]
     assert result["reconciliation"]["accounted_for"] is True
     assert result["reconciliation"]["complete"] is False
+    assert result["reconciliation"]["review_required_layout_ids"] == ["p1-o002-table"]
     assert result["reconciliation"]["by_type"]["table"] == {
         "identified": 2,
         "extracted": 1,
@@ -1151,6 +1296,7 @@ def test_process_page_layout_ledger_covers_figure_and_table(monkeypatch):
             "formulas": [],
             "figures": [
                 {
+                    "layout_id": "p1-o002-figure",
                     "source_block_index": 2,
                     "caption": "Figure 1",
                     "description": "A local mocked schematic.",
@@ -1183,6 +1329,7 @@ def test_process_page_layout_ledger_covers_figure_and_formula(monkeypatch):
             "formulas": [],
             "figures": [
                 {
+                    "layout_id": "p1-o002-figure",
                     "source_block_index": 2,
                     "caption": "Figure 1",
                     "description": "A mocked diagram beside a formula.",
@@ -1215,6 +1362,7 @@ def test_process_page_layout_failure_does_not_stop_other_mixed_objects(monkeypat
             "formulas": [],
             "figures": [
                 {
+                    "layout_id": "p1-o003-figure",
                     "source_block_index": 3,
                     "caption": "Figure 1",
                     "description": "Recovered figure while the table remains failed.",

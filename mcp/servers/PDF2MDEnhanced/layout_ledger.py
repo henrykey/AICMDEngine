@@ -87,6 +87,7 @@ def build_layout_outcome(
             "bbox": block.get("bbox") or [],
             "bbox_space": "normalized_page",
             "status": "FAILED",
+            "review_required": True,
             "content": content,
             "payload_ref": None,
             "error": None,
@@ -100,6 +101,7 @@ def build_layout_outcome(
                 entry["error"] = _error(f"layout_{object_type}_content_missing", "layout_content", True)
             else:
                 entry["status"] = "EXTRACTED"
+                entry["review_required"] = False
                 if object_type != "text":
                     payloads[_collection_for_type(object_type)].append(payload)
         layout.append(entry)
@@ -155,6 +157,7 @@ def apply_recovered_payloads(outcome: Dict[str, Any], recovered: Any) -> None:
                 continue
             outcome["payloads"][collection].append(payload)
             entry["status"] = "EXTRACTED"
+            entry["review_required"] = False
             entry["content"] = _payload_content(object_type, payload)
             entry["error"] = None
             used_layout_ids.add(str(entry["layout_id"]))
@@ -176,6 +179,7 @@ def reconcile_layout(
             "unmatched_layout_ids": [],
             "unmatched_payload_layout_ids": list(unmatched_recovery_refs or []),
             "duplicate_layout_ids": [],
+            "review_required_layout_ids": [],
             "accounted_for": False,
             "complete": False,
         }
@@ -206,6 +210,7 @@ def reconcile_layout(
             else:
                 unmatched_layout_ids.append(layout_id)
                 item["status"] = "FAILED"
+                item["review_required"] = True
                 item["payload_ref"] = None
                 item["error"] = _error(
                     "layout_payload_missing" if not refs else "layout_payload_ambiguous",
@@ -227,8 +232,10 @@ def reconcile_layout(
         stats["identified"] += 1
         status = item.get("status")
         if status == "EXTRACTED":
+            item["review_required"] = False
             stats["extracted"] += 1
         elif status == "FAILED":
+            item["review_required"] = True
             stats["failed"] += 1
         else:
             terminal = False
@@ -251,6 +258,11 @@ def reconcile_layout(
         "unmatched_layout_ids": sorted(_unique(unmatched_layout_ids)),
         "unmatched_payload_layout_ids": sorted(_unique(unmatched_payloads)),
         "duplicate_layout_ids": duplicate_ids,
+        "review_required_layout_ids": sorted(
+            str(item.get("layout_id") or "")
+            for item in layout
+            if item.get("status") == "FAILED" or item.get("review_required") is True
+        ),
         "accounted_for": accounted_for,
         "complete": accounted_for and failed == 0,
     }
@@ -401,7 +413,7 @@ def _recovered_payload(entry: Dict[str, Any], candidate: Dict[str, Any]) -> Opti
         return {
             **candidate,
             **common,
-            "source": "glm_ocr_layout+vlm_ocr",
+            "source": _first_text(candidate, "source") or "glm_ocr_layout+vlm_ocr",
             "markdown": markdown,
             "title": _first_text(candidate, "title", "table_title", "tableName", "table_name"),
         }
@@ -409,7 +421,12 @@ def _recovered_payload(entry: Dict[str, Any], candidate: Dict[str, Any]) -> Opti
         latex = _first_text(candidate, "latex", "formula", "content", "text")
         if not latex:
             return None
-        return {**candidate, **common, "source": "glm_ocr_layout+vlm_ocr", "latex": latex}
+        return {
+            **candidate,
+            **common,
+            "source": _first_text(candidate, "source") or "glm_ocr_layout+vlm_ocr",
+            "latex": latex,
+        }
     if object_type == "figure":
         description = _first_text(candidate, "description", "semanticDesc", "summary")
         caption = _first_text(candidate, "caption", "capture", "figureName", "name", "title")
@@ -418,7 +435,7 @@ def _recovered_payload(entry: Dict[str, Any], candidate: Dict[str, Any]) -> Opti
         return {
             **candidate,
             **common,
-            "source": "glm_ocr_layout+vlm_ocr",
+            "source": _first_text(candidate, "source") or "glm_ocr_layout+vlm_ocr",
             "caption": caption,
             "description": description or caption,
         }

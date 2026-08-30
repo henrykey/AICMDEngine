@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import re
 import tempfile
 from pathlib import Path
@@ -16,6 +17,7 @@ from .layout_ledger import (
     apply_recovered_payloads,
     blank_layout_outcome,
     build_layout_outcome,
+    canonical_layout_type,
     failed_layout_outcome,
     reconcile_layout,
     recovery_blocks,
@@ -129,18 +131,21 @@ def process_page(
                     )
                     layout_driven = layout_outcome["layout_status"] == "EXTRACTED"
                     pending_blocks = recovery_blocks(layout_outcome)
-                    if layout_driven and pending_blocks and rc.get("vlm_ocr_enabled") and vlm.enabled:
-                        try:
-                            vlm_calls += 1
-                            recovered = vlm.extract_layout_structured(str(image_path), pending_blocks)
-                            apply_recovered_payloads(layout_outcome, recovered)
-                        except Exception as exc:
-                            logger.warning(
-                                "layout object recovery failed: sourcePageNo=%s pending=%s error_type=%s",
-                                page_no,
-                                len(pending_blocks),
-                                type(exc).__name__,
-                            )
+                    if layout_driven and pending_blocks:
+                        recovery_glm_calls, recovery_vlm_calls, recovery_diagnostics = _recover_layout_objects(
+                            image_path=image_path,
+                            output_dir=Path(work_dir),
+                            layout_outcome=layout_outcome,
+                            pending_blocks=pending_blocks,
+                            glm_ocr=glm_ocr,
+                            vlm=vlm,
+                            vlm_enabled=bool(rc.get("vlm_ocr_enabled") and vlm.enabled),
+                            max_objects=rc["layout_recovery_max_objects"],
+                            padding_ratio=rc["layout_recovery_crop_padding_ratio"],
+                        )
+                        glm_calls += recovery_glm_calls
+                        vlm_calls += recovery_vlm_calls
+                        layout_outcome["recovery"] = recovery_diagnostics
                 except Exception as exc:
                     layout_outcome = failed_layout_outcome("layout_analysis_failed")
                     logger.warning(
@@ -403,8 +408,15 @@ def process_page(
                 "page_height": 1.0,
                 "layout": layout_outcome.get("layout") or [],
                 "reconciliation": reconciliation,
+                "layout_recovery": layout_outcome.get("recovery") or {
+                    "pending": 0,
+                    "attempted": 0,
+                    "limit": rc["layout_recovery_max_objects"],
+                    "objects": [],
+                },
             }
         )
+        result["decision"]["layout_recovery"] = result["layout_recovery"]
         result["decision"]["layout_status"] = layout_outcome.get("layout_status") or "FAILED"
         result["decision"]["layout_error"] = layout_outcome.get("layout_error") or ""
         if layout_outcome.get("layout_error"):
@@ -432,6 +444,11 @@ def _routing_defaults(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "chunk_policy": str(c.get("chunk_policy", "disabled")),
         "task_total_pages": int(c.get("__task_total_pages", 1)),
         "layout_ledger_enabled": bool(c.get("layout_ledger_enabled", True)),
+        "layout_recovery_max_objects": max(0, min(int(c.get("layout_recovery_max_objects", 8)), 16)),
+        "layout_recovery_crop_padding_ratio": max(
+            0.0,
+            min(float(c.get("layout_recovery_crop_padding_ratio", 0.02)), 0.1),
+        ),
         "debug_layout_probe": bool(c.get("debug_layout_probe", False)),
         "full_vlm_split_extract": bool(c.get("full_vlm_split_extract", False)),
         # Default ON: complex pages often return invalid/empty dual JSON.
@@ -835,6 +852,283 @@ def _render_page_image(
         mat = fitz.Matrix(dpi / 72.0, dpi / 72.0).prerotate(int(rotate_deg))
         page.get_pixmap(matrix=mat).save(str(out))
     return out
+
+
+def _recover_layout_objects(
+    image_path: Path,
+    output_dir: Path,
+    layout_outcome: Dict[str, Any],
+    pending_blocks: list[Dict[str, Any]],
+    glm_ocr: OpenAICompatibleOcrClient,
+    vlm: DynamicVLMClient,
+    vlm_enabled: bool,
+    max_objects: int,
+    padding_ratio: float,
+) -> tuple[int, int, Dict[str, Any]]:
+    glm_calls = 0
+    vlm_calls = 0
+    limit = max(0, int(max_objects))
+    selected = pending_blocks[:limit]
+    diagnostics: Dict[str, Any] = {
+        "pending": len(pending_blocks),
+        "attempted": len(selected),
+        "limit": limit,
+        "objects": [],
+    }
+
+    for block in selected:
+        layout_id = str(block.get("layout_id") or "")
+        object_type = str(block.get("type") or "unknown")
+        item_diagnostics: Dict[str, Any] = {
+            "layout_id": layout_id,
+            "type": object_type,
+            "crop": None,
+            "attempts": [],
+            "outcome": "failed",
+        }
+        try:
+            crop_path, crop_info = _crop_layout_block_image(
+                image_path,
+                block,
+                output_dir,
+                padding_ratio=padding_ratio,
+            )
+            item_diagnostics["crop"] = crop_info
+        except Exception as exc:
+            item_diagnostics["attempts"].append(
+                {"provider": "crop", "outcome": "failed", "reason": type(exc).__name__}
+            )
+            item_diagnostics["review_required"] = True
+            diagnostics["objects"].append(item_diagnostics)
+            continue
+
+        if object_type in {"table", "formula"} and glm_ocr.enabled:
+            glm_calls += 1
+            try:
+                crop_raw = glm_ocr.parse_layout(str(crop_path))
+                candidate, reason = _glm_crop_recovery_candidate(crop_raw, block)
+                if candidate is not None:
+                    apply_recovered_payloads(layout_outcome, _single_recovery_result(object_type, candidate))
+                    if _layout_entry_recovered(layout_outcome, layout_id):
+                        item_diagnostics["attempts"].append(
+                            {"provider": "glm_ocr", "outcome": "recovered", "reason": reason}
+                        )
+                        item_diagnostics["outcome"] = "recovered"
+                        item_diagnostics["provider"] = "glm_ocr"
+                        diagnostics["objects"].append(item_diagnostics)
+                        continue
+                    reason = "invalid_recovered_content"
+                item_diagnostics["attempts"].append(
+                    {"provider": "glm_ocr", "outcome": "not_recovered", "reason": reason}
+                )
+            except Exception as exc:
+                item_diagnostics["attempts"].append(
+                    {"provider": "glm_ocr", "outcome": "failed", "reason": type(exc).__name__}
+                )
+
+        if vlm_enabled:
+            vlm_calls += 1
+            try:
+                raw_recovered = vlm.extract_layout_structured(str(crop_path), [block])
+                recovered, reason = _explicit_vlm_recovery_for_block(raw_recovered, block)
+                if recovered is not None:
+                    apply_recovered_payloads(layout_outcome, recovered)
+                    if _layout_entry_recovered(layout_outcome, layout_id):
+                        item_diagnostics["attempts"].append(
+                            {"provider": "vlm_ocr", "outcome": "recovered", "reason": reason}
+                        )
+                        item_diagnostics["outcome"] = "recovered"
+                        item_diagnostics["provider"] = "vlm_ocr"
+                        diagnostics["objects"].append(item_diagnostics)
+                        continue
+                    reason = "invalid_recovered_content"
+                elif reason in {"explicit_layout_id_missing", "explicit_layout_id_ambiguous"}:
+                    _record_unmatched_vlm_recovery_refs(layout_outcome, raw_recovered, object_type)
+                item_diagnostics["attempts"].append(
+                    {"provider": "vlm_ocr", "outcome": "not_recovered", "reason": reason}
+                )
+            except Exception as exc:
+                item_diagnostics["attempts"].append(
+                    {"provider": "vlm_ocr", "outcome": "failed", "reason": type(exc).__name__}
+                )
+
+        item_diagnostics["review_required"] = True
+        diagnostics["objects"].append(item_diagnostics)
+
+    for block in pending_blocks[len(selected) :]:
+        diagnostics["objects"].append(
+            {
+                "layout_id": str(block.get("layout_id") or ""),
+                "type": str(block.get("type") or "unknown"),
+                "crop": None,
+                "attempts": [],
+                "outcome": "not_attempted",
+                "reason": "recovery_limit_exceeded",
+                "review_required": True,
+            }
+        )
+    return glm_calls, vlm_calls, diagnostics
+
+
+def _crop_layout_block_image(
+    image_path: Path,
+    block: Dict[str, Any],
+    output_dir: Path,
+    padding_ratio: float = 0.02,
+) -> tuple[Path, Dict[str, Any]]:
+    source = fitz.Pixmap(str(image_path))
+    bbox = block.get("bbox")
+    if not isinstance(bbox, list) or len(bbox) != 4:
+        raise ValueError("layout recovery bbox missing")
+    try:
+        x0, y0, x1, y1 = [float(value) for value in bbox]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("layout recovery bbox invalid") from exc
+    x0, y0 = max(0.0, min(x0, 1.0)), max(0.0, min(y0, 1.0))
+    x1, y1 = max(0.0, min(x1, 1.0)), max(0.0, min(y1, 1.0))
+    if x1 <= x0 or y1 <= y0:
+        raise ValueError("layout recovery bbox invalid")
+
+    pad_x = max(2.0, (x1 - x0) * source.width * max(0.0, float(padding_ratio)))
+    pad_y = max(2.0, (y1 - y0) * source.height * max(0.0, float(padding_ratio)))
+    left = max(0, math.floor(x0 * source.width - pad_x))
+    top = max(0, math.floor(y0 * source.height - pad_y))
+    right = min(source.width, math.ceil(x1 * source.width + pad_x))
+    bottom = min(source.height, math.ceil(y1 * source.height + pad_y))
+    if right <= left or bottom <= top:
+        raise ValueError("layout recovery crop empty")
+
+    crop_width = right - left
+    crop_height = bottom - top
+    samples = memoryview(source.samples)
+    rows = [
+        samples[row * source.stride + left * source.n : row * source.stride + right * source.n]
+        for row in range(top, bottom)
+    ]
+    crop = fitz.Pixmap(
+        source.colorspace,
+        crop_width,
+        crop_height,
+        b"".join(bytes(row) for row in rows),
+        source.alpha,
+    )
+    safe_layout_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(block.get("layout_id") or "object"))
+    output_path = output_dir / f"layout-recovery-{safe_layout_id}.png"
+    crop.save(str(output_path))
+    return output_path, {
+        "pixel_bbox": [left, top, right, bottom],
+        "width": crop_width,
+        "height": crop_height,
+        "padding_ratio": float(padding_ratio),
+    }
+
+
+def _glm_crop_recovery_candidate(
+    raw: Any,
+    block: Dict[str, Any],
+) -> tuple[Optional[Dict[str, Any]], str]:
+    object_type = str(block.get("type") or "unknown")
+    if object_type not in {"table", "formula"}:
+        return None, "provider_not_safe_for_type"
+    matches: list[Dict[str, Any]] = []
+    if isinstance(raw, dict):
+        for page in raw.get("layout_details") or []:
+            if not isinstance(page, list):
+                continue
+            for item in page:
+                if not isinstance(item, dict):
+                    continue
+                if canonical_layout_type(item.get("label") or item.get("type")) != object_type:
+                    continue
+                if str(item.get("content") or "").strip():
+                    matches.append(item)
+    if not matches:
+        return None, "target_type_missing"
+    if len(matches) != 1:
+        return None, "target_type_ambiguous"
+
+    item = matches[0]
+    content = str(item.get("content") or "").strip()
+    candidate: Dict[str, Any] = {
+        "layout_id": str(block.get("layout_id") or ""),
+        "source_block_index": block.get("source_block_index"),
+        "bbox": list(block.get("bbox") or []),
+        "bbox_space": "normalized_page",
+        "source": "glm_ocr_layout+glm_ocr_crop",
+    }
+    if object_type == "table":
+        candidate.update(
+            {
+                "markdown": content,
+                "title": str(
+                    item.get("table_title")
+                    or item.get("tableName")
+                    or item.get("table_name")
+                    or item.get("caption")
+                    or item.get("title")
+                    or ""
+                ).strip(),
+            }
+        )
+    else:
+        candidate["latex"] = content
+    return candidate, "unique_target_type"
+
+
+def _single_recovery_result(object_type: str, candidate: Dict[str, Any]) -> Dict[str, Any]:
+    result = {"tables": [], "formulas": [], "figures": []}
+    collection = {"table": "tables", "formula": "formulas", "figure": "figures"}.get(object_type)
+    if collection:
+        result[collection] = [candidate]
+    return result
+
+
+def _explicit_vlm_recovery_for_block(
+    raw: Any,
+    block: Dict[str, Any],
+) -> tuple[Optional[Dict[str, Any]], str]:
+    object_type = str(block.get("type") or "unknown")
+    collection = {"table": "tables", "formula": "formulas", "figure": "figures"}.get(object_type)
+    if collection is None or not isinstance(raw, dict):
+        return None, "response_invalid"
+    values = raw.get(collection)
+    if not isinstance(values, list) or not values:
+        return None, "candidate_missing"
+    layout_id = str(block.get("layout_id") or "")
+    exact = [
+        candidate
+        for candidate in values
+        if isinstance(candidate, dict) and str(candidate.get("layout_id") or "") == layout_id
+    ]
+    if not exact:
+        return None, "explicit_layout_id_missing"
+    if len(exact) != 1:
+        return None, "explicit_layout_id_ambiguous"
+    return _single_recovery_result(object_type, exact[0]), "explicit_layout_id"
+
+
+def _layout_entry_recovered(layout_outcome: Dict[str, Any], layout_id: str) -> bool:
+    return any(
+        str(item.get("layout_id") or "") == layout_id and item.get("status") == "EXTRACTED"
+        for item in layout_outcome.get("layout") or []
+    )
+
+
+def _record_unmatched_vlm_recovery_refs(
+    layout_outcome: Dict[str, Any],
+    raw: Any,
+    object_type: str,
+) -> None:
+    collection = {"table": "tables", "formula": "formulas", "figure": "figures"}.get(object_type)
+    if collection is None or not isinstance(raw, dict) or not isinstance(raw.get(collection), list):
+        return
+    refs = list(layout_outcome.get("unmatched_recovery_refs") or [])
+    for index, candidate in enumerate(raw[collection]):
+        if isinstance(candidate, dict):
+            refs.append(str(candidate.get("layout_id") or f"{collection}:{index}"))
+        else:
+            refs.append(f"{collection}:{index}")
+    layout_outcome["unmatched_recovery_refs"] = list(dict.fromkeys(refs))
 
 
 def _build_direct_markdown(page: fitz.Page) -> str:
