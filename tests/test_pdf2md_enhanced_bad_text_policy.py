@@ -910,6 +910,7 @@ class LayoutLedgerGLMOcrClient:
 class LayoutLedgerVLMClient:
     recovered = {"tables": [], "formulas": [], "figures": []}
     calls = 0
+    last_blocks = []
 
     def __init__(self, cfg):
         self.enabled = bool(cfg)
@@ -925,6 +926,7 @@ class LayoutLedgerVLMClient:
         _ = image_path
         assert layout_blocks
         type(self).calls += 1
+        type(self).last_blocks = layout_blocks
         return self.recovered
 
     def cleanup_markdown_table_noise(self, markdown_text):
@@ -945,6 +947,7 @@ def _run_layout_ledger_page(monkeypatch, raw, recovered=None):
     LayoutLedgerGLMOcrClient.raw = raw
     LayoutLedgerVLMClient.recovered = recovered or {"tables": [], "formulas": [], "figures": []}
     LayoutLedgerVLMClient.calls = 0
+    LayoutLedgerVLMClient.last_blocks = []
     return page_processor.process_page(
         source_path="/tmp/layout-fixture.pdf",
         page_no=1,
@@ -1007,6 +1010,128 @@ def test_process_page_layout_ledger_is_authoritative_for_two_tables(monkeypatch)
     assert result["reconciliation"]["accounted_for"] is True
     assert result["reconciliation"]["complete"] is True
     assert LayoutLedgerVLMClient.calls == 0
+
+
+def test_process_page_layout_complete_html_tables_do_not_trigger_recovery(monkeypatch):
+    tables = [
+        "<table><tr><td>A</td><td>B</td></tr><tr><td>1</td><td>2</td></tr></table>",
+        "<table><tr><td>C</td><td>D</td></tr><tr><td>3</td><td>4</td></tr></table>",
+        "<table><tr><td>E</td><td>F</td></tr><tr><td>5</td><td>6</td></tr></table>",
+    ]
+    result = _run_layout_ledger_page(
+        monkeypatch,
+        _layout_raw(
+            [
+                {
+                    "index": index,
+                    "label": "table",
+                    "bbox_2d": [10, 10 + offset, 90, 25 + offset],
+                    "content": table,
+                }
+                for index, offset, table in zip((10, 20, 30), (0, 30, 60), tables)
+            ],
+            markdown="\n\n".join(tables),
+        ),
+        recovered={"tables": [], "formulas": [], "figures": []},
+    )
+
+    assert [item["status"] for item in result["layout"]] == ["EXTRACTED"] * 3
+    assert [item["markdown"] for item in result["elements"]["tables"]] == tables
+    assert result["reconciliation"]["complete"] is True
+    assert LayoutLedgerVLMClient.calls == 0
+
+
+def test_process_page_layout_recovers_only_incomplete_second_html_table(monkeypatch):
+    first = "<table><tr><td>A</td><td>B</td></tr><tr><td>1</td><td>2</td></tr></table>"
+    incomplete_second = "<table><tr><td>C</td><td>D</td></tr><tr><td>3</td><td>"
+    recovered_second = "<table><tr><td>C</td><td>D</td></tr><tr><td>3</td><td>4</td></tr></table>"
+    first_bbox = [0.1, 0.1, 0.9, 0.4]
+    second_bbox = [0.1, 0.5, 0.9, 0.9]
+    result = _run_layout_ledger_page(
+        monkeypatch,
+        _layout_raw(
+            [
+                {"index": 10, "label": "table", "bbox_2d": [10, 10, 90, 40], "content": first},
+                {
+                    "index": 20,
+                    "label": "table",
+                    "bbox_2d": [10, 50, 90, 90],
+                    "content": incomplete_second,
+                },
+            ],
+            markdown=f"{first}\n\n{incomplete_second}",
+        ),
+        recovered={
+            "tables": [
+                {
+                    "layout_id": "p1-o002-table",
+                    "source_block_index": 20,
+                    "markdown": recovered_second,
+                }
+            ],
+            "formulas": [],
+            "figures": [],
+        },
+    )
+
+    assert LayoutLedgerVLMClient.calls == 1
+    assert [block["layout_id"] for block in LayoutLedgerVLMClient.last_blocks] == ["p1-o002-table"]
+    assert [item["status"] for item in result["layout"]] == ["EXTRACTED", "EXTRACTED"]
+    assert [item["reading_order"] for item in result["layout"]] == [1, 2]
+    assert [item["bbox"] for item in result["layout"]] == [first_bbox, second_bbox]
+    assert result["elements"]["tables"][0]["markdown"] == first
+    assert result["elements"]["tables"][0]["source"] == "glm_ocr_layout"
+    assert result["elements"]["tables"][1]["markdown"] == recovered_second
+    assert result["elements"]["tables"][1]["source"] == "glm_ocr_layout+vlm_ocr"
+    assert result["elements"]["tables"][1]["layout_id"] == "p1-o002-table"
+    assert result["reconciliation"]["complete"] is True
+
+
+def test_process_page_layout_incomplete_table_recovery_failure_is_isolated(monkeypatch):
+    first = "<table><tr><td>A</td><td>B</td></tr><tr><td>1</td><td>2</td></tr></table>"
+    incomplete_second = "<table><tr><td>C</td><td>D</td></tr><tr><td>3</td><td>"
+    result = _run_layout_ledger_page(
+        monkeypatch,
+        _layout_raw(
+            [
+                {"index": 10, "label": "table", "bbox_2d": [10, 10, 90, 40], "content": first},
+                {
+                    "index": 20,
+                    "label": "table",
+                    "bbox_2d": [10, 50, 90, 90],
+                    "content": incomplete_second,
+                },
+            ]
+        ),
+        recovered={
+            "tables": [
+                {
+                    "layout_id": "p1-o002-table",
+                    "source_block_index": 20,
+                    "markdown": incomplete_second,
+                }
+            ],
+            "formulas": [],
+            "figures": [],
+        },
+    )
+
+    assert LayoutLedgerVLMClient.calls == 1
+    assert [block["layout_id"] for block in LayoutLedgerVLMClient.last_blocks] == ["p1-o002-table"]
+    assert [item["status"] for item in result["layout"]] == ["EXTRACTED", "FAILED"]
+    assert result["layout"][1]["error"] == {
+        "code": "layout_table_content_incomplete",
+        "stage": "layout_content",
+        "retryable": True,
+    }
+    assert [item["markdown"] for item in result["elements"]["tables"]] == [first]
+    assert result["reconciliation"]["accounted_for"] is True
+    assert result["reconciliation"]["complete"] is False
+    assert result["reconciliation"]["by_type"]["table"] == {
+        "identified": 2,
+        "extracted": 1,
+        "failed": 1,
+    }
 
 
 def test_process_page_layout_ledger_covers_figure_and_table(monkeypatch):

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -341,7 +343,16 @@ def _entry_error(entry: Dict[str, Any], bbox_error: str) -> Optional[Dict[str, A
     if not str(entry.get("content") or "").strip():
         object_type = str(entry.get("type") or "unknown")
         return _error(f"layout_{object_type}_content_missing", "layout_content", object_type != "text")
+    if entry.get("type") == "table" and _html_table_incomplete(str(entry.get("content") or "")):
+        return _error("layout_table_content_incomplete", "layout_content", True)
     return None
+
+
+def _html_table_incomplete(content: str) -> bool:
+    opening = re.search(r"<table\b", content, flags=re.IGNORECASE)
+    if opening is None:
+        return False
+    return re.search(r"</table\s*>", content[opening.end() :], flags=re.IGNORECASE) is None
 
 
 def _payload_from_entry(entry: Dict[str, Any], block: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -385,7 +396,7 @@ def _recovered_payload(entry: Dict[str, Any], candidate: Dict[str, Any]) -> Opti
     common = _payload_common(entry)
     if object_type == "table":
         markdown = _first_text(candidate, "markdown", "table_markdown", "content", "text")
-        if not markdown:
+        if not markdown or _html_table_incomplete(markdown):
             return None
         return {
             **candidate,
