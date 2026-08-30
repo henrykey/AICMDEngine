@@ -11,6 +11,15 @@ from typing import Any, Dict, Optional, Tuple
 import fitz
 
 from .ocr_clients import OpenAICompatibleOcrClient, OcrResult
+from .layout_ledger import (
+    LAYOUT_VERSION,
+    apply_recovered_payloads,
+    blank_layout_outcome,
+    build_layout_outcome,
+    failed_layout_outcome,
+    reconcile_layout,
+    recovery_blocks,
+)
 from .vlm_client import DynamicVLMClient
 
 logger = logging.getLogger(__name__)
@@ -83,6 +92,9 @@ def process_page(
         vlm_calls = 0
         glm_calls = 0
         glm_ocr = OpenAICompatibleOcrClient(rc.get("glm_ocr") or {}, source="glm_ocr")
+        layout_enabled = bool(rc.get("layout_ledger_enabled", True))
+        layout_driven = False
+        layout_outcome = None
 
         layout_probe = None
         if rc.get("debug_layout_probe"):
@@ -91,10 +103,65 @@ def process_page(
             except Exception as exc:
                 layout_probe = {"error": str(exc)}
 
+        if layout_enabled:
+            if route_selected == "blank":
+                layout_outcome = blank_layout_outcome()
+            elif not (
+                glm_ocr.enabled
+                and bool(getattr(glm_ocr, "use_layout_parsing", False))
+                and callable(getattr(glm_ocr, "parse_layout", None))
+            ):
+                layout_outcome = failed_layout_outcome("layout_analysis_unavailable")
+            else:
+                try:
+                    glm_calls += 1
+                    raw_layout = glm_ocr.parse_layout(str(image_path))
+                    render_scale = max(float(rc["render_dpi"]) / 72.0, 0.01)
+                    fallback_width = float(page.rect.width) * render_scale
+                    fallback_height = float(page.rect.height) * render_scale
+                    if int(rc.get("render_rotate_deg", 0)) % 180:
+                        fallback_width, fallback_height = fallback_height, fallback_width
+                    layout_outcome = build_layout_outcome(
+                        raw_layout,
+                        display_page_no,
+                        fallback_width,
+                        fallback_height,
+                    )
+                    layout_driven = layout_outcome["layout_status"] == "EXTRACTED"
+                    pending_blocks = recovery_blocks(layout_outcome)
+                    if layout_driven and pending_blocks and rc.get("vlm_ocr_enabled") and vlm.enabled:
+                        try:
+                            vlm_calls += 1
+                            recovered = vlm.extract_layout_structured(str(image_path), pending_blocks)
+                            apply_recovered_payloads(layout_outcome, recovered)
+                        except Exception as exc:
+                            logger.warning(
+                                "layout object recovery failed: sourcePageNo=%s pending=%s error_type=%s",
+                                page_no,
+                                len(pending_blocks),
+                                type(exc).__name__,
+                            )
+                except Exception as exc:
+                    layout_outcome = failed_layout_outcome("layout_analysis_failed")
+                    logger.warning(
+                        "layout analysis failed: sourcePageNo=%s error_type=%s",
+                        page_no,
+                        type(exc).__name__,
+                    )
+
         if route_selected == "blank":
             markdown = ""
             structured = {"formulas": [], "tables": [], "figures": []}
             rag_page_text = ""
+        elif layout_driven:
+            markdown = _clean_markdown(layout_outcome.get("markdown") or "")
+            structured = _normalize_structured(layout_outcome.get("payloads") or {})
+            rag_page_text = markdown
+            route_selected = "full_glm_ocr"
+            route_decision["engine_selected"] = "glm_ocr_layout"
+            route_decision["reasons"] = _unique_keep_order(
+                list(route_decision.get("reasons") or []) + ["layout_ledger"]
+            )
         elif mode == "DIRECT":
             markdown = _build_direct_markdown(page)
             structured = {"formulas": [], "tables": [], "figures": []}
@@ -247,11 +314,39 @@ def process_page(
 
     # Table reliability strategy:
     # prefer parsing from render markdown; fallback to VLM tables; final fallback to placeholders.
-    structured["tables"] = _select_rag_tables(markdown, structured.get("tables") or [])
+    if not layout_driven:
+        structured["tables"] = _select_rag_tables(markdown, structured.get("tables") or [])
     rag_content = _build_rag_content(markdown, structured, rag_page_text=rag_page_text)
     table_source = _detect_table_source(markdown, structured)
     semantic_status = _semantic_status(route_selected, metrics, structured, rc, route_decision.get("fallback_reason"))
-    output_elements = _build_output_elements(markdown, structured, route_selected)
+    if layout_driven:
+        output_elements = _build_layout_output_elements(
+            markdown,
+            layout_outcome.get("payloads") or {},
+            route_selected,
+        )
+    else:
+        output_elements = _build_output_elements(markdown, structured, route_selected)
+
+    reconciliation = None
+    if layout_enabled and layout_outcome is not None:
+        reconciliation = reconcile_layout(
+            layout_outcome.get("layout_status") or "FAILED",
+            layout_outcome.get("layout") or [],
+            output_elements,
+            layout_outcome.get("unmatched_recovery_refs") or [],
+        )
+        if layout_driven:
+            failed_layout_ids = [
+                item["layout_id"]
+                for item in layout_outcome.get("layout") or []
+                if item.get("status") == "FAILED"
+            ]
+            semantic_status = {
+                "complete": reconciliation["complete"],
+                "missing": failed_layout_ids,
+                "reason": "" if reconciliation["complete"] else "layout_objects_incomplete",
+            }
 
     rag_obj = {
         "content": rag_content,
@@ -261,7 +356,7 @@ def process_page(
     if _should_emit_chunks(rc):
         rag_obj["chunks"] = _build_chunks(rag_content, chunk_size=rc["chunk_size"])
 
-    legacy_route_selected = "text_layer" if mode == "DIRECT" else "vlm"
+    legacy_route_selected = "vlm" if layout_driven else ("text_layer" if mode == "DIRECT" else "vlm")
 
     result = {
         "task_page_id": hashlib.sha1(f"{source_path}:{page_no}".encode("utf-8")).hexdigest()[:16],
@@ -298,6 +393,22 @@ def process_page(
         "next_context": next_context,
         "page_type": "blank" if route_selected == "blank" else "normal",
     }
+    if layout_enabled and layout_outcome is not None:
+        result.update(
+            {
+                "layout_version": LAYOUT_VERSION,
+                "layout_status": layout_outcome.get("layout_status") or "FAILED",
+                "bbox_space": "normalized_page",
+                "page_width": 1.0,
+                "page_height": 1.0,
+                "layout": layout_outcome.get("layout") or [],
+                "reconciliation": reconciliation,
+            }
+        )
+        result["decision"]["layout_status"] = layout_outcome.get("layout_status") or "FAILED"
+        result["decision"]["layout_error"] = layout_outcome.get("layout_error") or ""
+        if layout_outcome.get("layout_error"):
+            result["layout_error"] = layout_outcome["layout_error"]
     return result
 
 
@@ -320,6 +431,7 @@ def _routing_defaults(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "enable_chunks": bool(c.get("enable_chunks", False)),
         "chunk_policy": str(c.get("chunk_policy", "disabled")),
         "task_total_pages": int(c.get("__task_total_pages", 1)),
+        "layout_ledger_enabled": bool(c.get("layout_ledger_enabled", True)),
         "debug_layout_probe": bool(c.get("debug_layout_probe", False)),
         "full_vlm_split_extract": bool(c.get("full_vlm_split_extract", False)),
         # Default ON: complex pages often return invalid/empty dual JSON.
@@ -1248,6 +1360,30 @@ def _build_output_elements(markdown: str, structured: Dict[str, Any], route_sele
     return {"tables": tables, "formulas": formulas, "figures": figures}
 
 
+def _build_layout_output_elements(
+    markdown: str,
+    payloads: Dict[str, Any],
+    route_selected: str,
+) -> Dict[str, Any]:
+    output: Dict[str, list[Dict[str, Any]]] = {"tables": [], "formulas": [], "figures": []}
+    for collection in ("tables", "formulas", "figures"):
+        values = payloads.get(collection)
+        if not isinstance(values, list):
+            continue
+        for payload in values:
+            if not isinstance(payload, dict):
+                continue
+            normalized = _normalize_structured({collection: [payload]})
+            built = _build_output_elements(markdown, normalized, route_selected).get(collection) or []
+            if not built:
+                continue
+            item = built[0]
+            if payload.get("source"):
+                item["source"] = payload["source"]
+            output[collection].append(item)
+    return output
+
+
 def _copy_optional_element_metadata(item: Dict[str, Any], metadata: Dict[str, Any]) -> None:
     bbox = metadata.get("bbox")
     if isinstance(bbox, list) and len(bbox) == 4:
@@ -1262,6 +1398,8 @@ def _copy_optional_element_metadata(item: Dict[str, Any], metadata: Dict[str, An
     if bbox_space:
         item["bbox_space"] = bbox_space
     for key in (
+        "layout_id",
+        "reading_order",
         "columns",
         "normalized_rows",
         "source_cells",
@@ -1697,6 +1835,12 @@ def _structured_metadata(item: Any, **text_fields: tuple[str, ...]) -> Dict[str,
     source_block_index = item.get("source_block_index", item.get("block_index"))
     if isinstance(source_block_index, int) and not isinstance(source_block_index, bool):
         metadata["source_block_index"] = source_block_index
+    layout_id = item.get("layout_id")
+    if isinstance(layout_id, str) and layout_id.strip():
+        metadata["layout_id"] = layout_id.strip()
+    reading_order = item.get("reading_order")
+    if isinstance(reading_order, int) and not isinstance(reading_order, bool):
+        metadata["reading_order"] = reading_order
     return metadata
 
 

@@ -94,6 +94,17 @@ Each page result includes:
 - `elements.tables`, `elements.formulas`, `elements.figures`: structured RAG elements with explicit `source` such as `pymupdf`, `glm_ocr`, or `vlm_ocr`.
 - `rag.page_text`, `rag.content`, and `rag.elements`: retrieval-friendly page payload.
 
+Normal task uploads now add an authoritative page layout ledger when GLM-OCR layout parsing is available:
+
+- `layout_version`: `pdf2md-layout-ledger-v1`.
+- `layout_status`: `EXTRACTED` or `FAILED`. A failed layout pass does not turn an empty legacy array into evidence that the page had no object.
+- `bbox_space=normalized_page`, `page_width=1.0`, and `page_height=1.0` make the authoritative coordinate space explicit.
+- `layout`: every text, table, figure, formula, or unknown block in reading order. Each item has `layout_id`, `source_block_index`, `reading_order`, normalized-page `bbox`, and terminal `EXTRACTED`/`FAILED` status. Failures retain a stable structured error.
+- `reconciliation`: counts identified/extracted/failed objects by type, checks ledger-to-payload links, and distinguishes `accounted_for` from `complete`.
+- `elements` and `rag.elements` remain backward-compatible successful-object views. Successful semantic items add `layout_id`, `reading_order`, `bbox`, and `bbox_space=normalized_page`; failed items remain in `layout` and do not block later objects.
+
+Set `routing_config.layout_ledger_enabled=false` only as a rollback switch to omit the additive ledger fields and use the previous task-page behavior. This switch does not change the single-page repair tools.
+
 ## Single-page repair tools
 
 These tools are direct补漏 tools for one page or one page image. They do not create tasks, do not update task status, and do not write page results to `data/tasks`.

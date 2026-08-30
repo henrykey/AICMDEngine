@@ -841,6 +841,11 @@ def test_blank_page_completes_placeholder_without_vlm(monkeypatch):
     assert result["render"]["markdown"] == ""
     assert result["semantic_status"]["complete"] is True
     assert result["page_type"] == "blank"
+    assert result["layout_status"] == "EXTRACTED"
+    assert result["page_width"] == result["page_height"] == 1.0
+    assert result["layout"] == []
+    assert result["reconciliation"]["accounted_for"] is True
+    assert result["reconciliation"]["complete"] is True
 
 
 def test_finalize_markdown_excludes_bad_text_sample(tmp_path):
@@ -881,3 +886,370 @@ def test_finalize_markdown_excludes_bad_text_sample(tmp_path):
     assert "Recovered VLM markdown" in merged
     assert "%&!'" not in merged
     assert "!!!!!" not in merged
+
+
+class LayoutLedgerGLMOcrClient:
+    raw = {}
+
+    def __init__(self, cfg, source="glm_ocr"):
+        self.enabled = bool((cfg or {}).get("enabled"))
+        self.use_layout_parsing = True
+        self.source = source
+
+    def parse_layout(self, image_path, return_crop_images=False, need_layout_visualization=False):
+        _ = image_path
+        _ = return_crop_images
+        _ = need_layout_visualization
+        return self.raw
+
+    def extract_page(self, image_path):
+        _ = image_path
+        return OcrResult(markdown=str(self.raw.get("md_results") or ""))
+
+
+class LayoutLedgerVLMClient:
+    recovered = {"tables": [], "formulas": [], "figures": []}
+    calls = 0
+
+    def __init__(self, cfg):
+        self.enabled = bool(cfg)
+        self.provider = "fixture"
+        self.model = "fixture-vlm"
+        self.base_url = "local://fixture"
+        self.timeout_sec = 5
+        self.max_retries = 0
+        self.last_call_info = {}
+        self.last_dual_output_budget = {}
+
+    def extract_layout_structured(self, image_path, layout_blocks):
+        _ = image_path
+        assert layout_blocks
+        type(self).calls += 1
+        return self.recovered
+
+    def cleanup_markdown_table_noise(self, markdown_text):
+        return markdown_text
+
+
+def _run_layout_ledger_page(monkeypatch, raw, recovered=None):
+    page = FakePage(
+        text="fixture text layer",
+        blocks=[(0, 0, 100, 100, "fixture text layer", 0, 0)],
+        dict_payload=_text_block_payload("fixture text layer"),
+        rawdict_payload=_text_block_payload("fixture text layer"),
+    )
+    monkeypatch.setattr(page_processor.fitz, "open", lambda source_path: FakeDoc([page]))
+    monkeypatch.setattr(page_processor, "_render_page_image", lambda *args, **kwargs: Path("/tmp/layout-page.png"))
+    monkeypatch.setattr(page_processor, "OpenAICompatibleOcrClient", LayoutLedgerGLMOcrClient)
+    monkeypatch.setattr(page_processor, "DynamicVLMClient", LayoutLedgerVLMClient)
+    LayoutLedgerGLMOcrClient.raw = raw
+    LayoutLedgerVLMClient.recovered = recovered or {"tables": [], "formulas": [], "figures": []}
+    LayoutLedgerVLMClient.calls = 0
+    return page_processor.process_page(
+        source_path="/tmp/layout-fixture.pdf",
+        page_no=1,
+        policy="force_direct",
+        vlm_config={"provider": "fixture"} if recovered is not None else None,
+        routing_config={
+            "ocr_config": {
+                "glm_ocr": {
+                    "enabled": True,
+                    "model": "glm-ocr",
+                    "api_key": "unused",
+                    "base_url": "local://fixture",
+                }
+            },
+            "render_cleanup_with_llm": False,
+        },
+        prev_context=None,
+    )
+
+
+def _layout_raw(blocks, markdown="fixture markdown"):
+    return {
+        "md_results": markdown,
+        "data_info": {"width": 100, "height": 100},
+        "layout_details": [blocks],
+    }
+
+
+def test_process_page_layout_ledger_is_authoritative_for_two_tables(monkeypatch):
+    first = "| A | B |\n| --- | --- |\n| 1 | 2 |"
+    second = "| C | D |\n| --- | --- |\n| 3 | 4 |"
+    result = _run_layout_ledger_page(
+        monkeypatch,
+        _layout_raw(
+            [
+                {"index": 10, "label": "text", "bbox_2d": [10, 5, 90, 15], "content": "before"},
+                {"index": 20, "label": "table", "bbox_2d": [10, 20, 90, 40], "content": first},
+                {"index": 30, "label": "text", "bbox_2d": [10, 45, 90, 55], "content": "between"},
+                {"index": 40, "label": "table", "bbox_2d": [10, 60, 90, 85], "content": second},
+                {"index": 50, "label": "text", "bbox_2d": [10, 90, 90, 98], "content": "after"},
+            ],
+            markdown=f"before\n\n{first}\n\nbetween\n\n{second}\n\nafter",
+        ),
+    )
+
+    assert result["layout_status"] == "EXTRACTED"
+    assert [item["type"] for item in result["layout"]] == ["text", "table", "text", "table", "text"]
+    assert [item["reading_order"] for item in result["layout"]] == [1, 2, 3, 4, 5]
+    assert result["layout"][1]["bbox"] == [0.1, 0.2, 0.9, 0.4]
+    assert [item["source_block_index"] for item in result["elements"]["tables"]] == [20, 40]
+    assert all(item["bbox_space"] == "normalized_page" for item in result["elements"]["tables"])
+    assert all(item["layout_id"] for item in result["elements"]["tables"])
+    assert result["layout"][1]["payload_ref"] == {"collection": "tables", "index": 0}
+    assert result["layout"][3]["payload_ref"] == {"collection": "tables", "index": 1}
+    assert result["reconciliation"]["by_type"]["table"] == {
+        "identified": 2,
+        "extracted": 2,
+        "failed": 0,
+    }
+    assert result["reconciliation"]["accounted_for"] is True
+    assert result["reconciliation"]["complete"] is True
+    assert LayoutLedgerVLMClient.calls == 0
+
+
+def test_process_page_layout_ledger_covers_figure_and_table(monkeypatch):
+    table = "| A | B |\n| --- | --- |\n| 1 | 2 |"
+    result = _run_layout_ledger_page(
+        monkeypatch,
+        _layout_raw(
+            [
+                {"index": 1, "label": "text", "bbox_2d": [5, 5, 95, 15], "content": "before"},
+                {"index": 2, "label": "image", "bbox_2d": [5, 20, 45, 55], "content": ""},
+                {"index": 3, "label": "table", "bbox_2d": [50, 20, 95, 55], "content": table},
+                {"index": 4, "label": "text", "bbox_2d": [5, 60, 95, 75], "content": "after"},
+            ]
+        ),
+        recovered={
+            "tables": [],
+            "formulas": [],
+            "figures": [
+                {
+                    "source_block_index": 2,
+                    "caption": "Figure 1",
+                    "description": "A local mocked schematic.",
+                }
+            ],
+        },
+    )
+
+    assert [item["type"] for item in result["layout"]] == ["text", "figure", "table", "text"]
+    assert [item["status"] for item in result["layout"]] == ["EXTRACTED"] * 4
+    assert result["elements"]["figures"][0]["description"] == "A local mocked schematic."
+    assert result["elements"]["figures"][0]["layout_id"] == result["layout"][1]["layout_id"]
+    assert len(result["elements"]["tables"]) == 1
+    assert result["reconciliation"]["complete"] is True
+
+
+def test_process_page_layout_ledger_covers_figure_and_formula(monkeypatch):
+    result = _run_layout_ledger_page(
+        monkeypatch,
+        _layout_raw(
+            [
+                {"index": 1, "label": "text", "bbox_2d": [5, 5, 95, 15], "content": "before"},
+                {"index": 2, "label": "image", "bbox_2d": [5, 20, 45, 55], "content": ""},
+                {"index": 3, "label": "formula", "bbox_2d": [50, 20, 95, 35], "content": "x=y+z"},
+                {"index": 4, "label": "text", "bbox_2d": [5, 60, 95, 75], "content": "after"},
+            ]
+        ),
+        recovered={
+            "tables": [],
+            "formulas": [],
+            "figures": [
+                {
+                    "source_block_index": 2,
+                    "caption": "Figure 1",
+                    "description": "A mocked diagram beside a formula.",
+                }
+            ],
+        },
+    )
+
+    assert [item["type"] for item in result["layout"]] == ["text", "figure", "formula", "text"]
+    assert result["elements"]["formulas"][0]["latex"] == "x=y+z"
+    assert result["elements"]["formulas"][0]["reading_order"] == 3
+    assert result["elements"]["figures"][0]["description"] == "A mocked diagram beside a formula."
+    assert result["reconciliation"]["complete"] is True
+
+
+def test_process_page_layout_failure_does_not_stop_other_mixed_objects(monkeypatch):
+    result = _run_layout_ledger_page(
+        monkeypatch,
+        _layout_raw(
+            [
+                {"index": 1, "label": "text", "bbox_2d": [5, 5, 95, 15], "content": "before"},
+                {"index": 2, "label": "table", "bbox_2d": [5, 20, 95, 40], "content": ""},
+                {"index": 3, "label": "image", "bbox_2d": [5, 45, 45, 70], "content": ""},
+                {"index": 4, "label": "formula", "bbox_2d": [50, 45, 95, 60], "content": "x=y"},
+                {"index": 5, "label": "text", "bbox_2d": [5, 75, 95, 90], "content": "after"},
+            ]
+        ),
+        recovered={
+            "tables": [],
+            "formulas": [],
+            "figures": [
+                {
+                    "source_block_index": 3,
+                    "caption": "Figure 1",
+                    "description": "Recovered figure while the table remains failed.",
+                }
+            ],
+        },
+    )
+
+    assert [item["status"] for item in result["layout"]] == [
+        "EXTRACTED",
+        "FAILED",
+        "EXTRACTED",
+        "EXTRACTED",
+        "EXTRACTED",
+    ]
+    assert result["layout"][1]["error"] == {
+        "code": "layout_table_content_missing",
+        "stage": "layout_content",
+        "retryable": True,
+    }
+    assert result["elements"]["tables"] == []
+    assert len(result["elements"]["figures"]) == 1
+    assert len(result["elements"]["formulas"]) == 1
+    assert result["layout"][-1]["content"] == "after"
+    assert result["reconciliation"]["accounted_for"] is True
+    assert result["reconciliation"]["complete"] is False
+    assert result["reconciliation"]["failed"] == 1
+
+
+def test_process_page_layout_recovery_rejects_wrong_explicit_layout_id(monkeypatch):
+    result = _run_layout_ledger_page(
+        monkeypatch,
+        _layout_raw(
+            [
+                {"index": 1, "label": "text", "bbox_2d": [5, 5, 95, 15], "content": "before"},
+                {"index": 2, "label": "image", "bbox_2d": [5, 20, 45, 55], "content": ""},
+                {"index": 3, "label": "formula", "bbox_2d": [50, 20, 95, 35], "content": "x=y"},
+            ]
+        ),
+        recovered={
+            "tables": [],
+            "formulas": [],
+            "figures": [
+                {
+                    "layout_id": "p1-o999-figure",
+                    "source_block_index": 2,
+                    "caption": "Wrong correlation",
+                    "description": "Must not attach by the weaker block index.",
+                }
+            ],
+        },
+    )
+
+    assert result["layout"][1]["status"] == "FAILED"
+    assert result["elements"]["figures"] == []
+    assert result["reconciliation"]["unmatched_payload_layout_ids"] == ["p1-o999-figure"]
+    assert result["layout"][2]["status"] == "EXTRACTED"
+
+
+def test_process_page_layout_unknown_and_invalid_bbox_are_explicit_failures(monkeypatch):
+    result = _run_layout_ledger_page(
+        monkeypatch,
+        _layout_raw(
+            [
+                {"index": 1, "label": "mystery", "bbox_2d": [5, 5, 95, 15], "content": "unknown"},
+                {"index": 2, "label": "text", "bbox_2d": [], "content": "missing bbox"},
+                {"index": 3, "label": "formula", "bbox_2d": [95, 20, 5, 30], "content": "x=y"},
+                {"index": 4, "label": "text", "bbox_2d": [5, 35, 95, 45], "content": "after"},
+            ]
+        ),
+    )
+
+    assert [item["type"] for item in result["layout"]] == ["unknown", "text", "formula", "text"]
+    assert result["layout"][0]["error"]["code"] == "unsupported_layout_type"
+    assert result["layout"][1]["error"]["code"] == "layout_bbox_missing"
+    assert result["layout"][2]["error"]["code"] == "layout_bbox_invalid"
+    assert result["layout"][3]["status"] == "EXTRACTED"
+    assert result["reconciliation"]["accounted_for"] is True
+    assert result["reconciliation"]["complete"] is False
+
+
+def test_process_page_layout_unavailable_preserves_legacy_output_but_is_not_complete(monkeypatch):
+    text = "legacy fallback remains available"
+    page = FakePage(
+        text=text,
+        blocks=[(0, 0, 100, 20, text, 0, 0)],
+        dict_payload=_text_block_payload(text),
+        rawdict_payload=_text_block_payload(text),
+    )
+    _patch_page_runtime(monkeypatch, page)
+
+    result = page_processor.process_page(
+        source_path="/tmp/legacy-fallback.pdf",
+        page_no=1,
+        policy="force_direct",
+        vlm_config=None,
+        routing_config={"render_cleanup_with_llm": False},
+        prev_context=None,
+    )
+
+    assert result["render"]["markdown"]
+    assert result["rag"]["elements"] == result["elements"]
+    assert result["layout_status"] == "FAILED"
+    assert result["layout_error"] == "layout_analysis_unavailable"
+    assert result["reconciliation"]["identified"] is None
+    assert result["reconciliation"]["accounted_for"] is False
+    assert result["reconciliation"]["complete"] is False
+
+
+def test_process_page_layout_ledger_can_be_disabled_for_rollback(monkeypatch):
+    text = "legacy rollback path"
+    page = FakePage(
+        text=text,
+        blocks=[(0, 0, 100, 20, text, 0, 0)],
+        dict_payload=_text_block_payload(text),
+        rawdict_payload=_text_block_payload(text),
+    )
+    _patch_page_runtime(monkeypatch, page)
+
+    result = page_processor.process_page(
+        source_path="/tmp/layout-disabled.pdf",
+        page_no=1,
+        policy="force_direct",
+        vlm_config=None,
+        routing_config={"layout_ledger_enabled": False, "render_cleanup_with_llm": False},
+        prev_context=None,
+    )
+
+    assert result["render"]["markdown"]
+    assert "layout" not in result
+    assert "reconciliation" not in result
+    assert "layout_status" not in result["decision"]
+    assert "layout_error" not in result["decision"]
+
+
+def test_layout_reconciliation_turns_missing_success_payload_into_explicit_failure():
+    layout = [
+        {
+            "layout_id": "p1-o001-table",
+            "type": "table",
+            "status": "EXTRACTED",
+            "payload_ref": None,
+            "error": None,
+        }
+    ]
+
+    reconciliation = page_processor.reconcile_layout(
+        "EXTRACTED",
+        layout,
+        {"tables": [], "formulas": [], "figures": []},
+    )
+
+    assert layout[0]["status"] == "FAILED"
+    assert layout[0]["error"] == {
+        "code": "layout_payload_missing",
+        "stage": "reconciliation",
+        "retryable": True,
+    }
+    assert reconciliation["identified"] == 1
+    assert reconciliation["extracted"] == 0
+    assert reconciliation["failed"] == 1
+    assert reconciliation["unmatched_layout_ids"] == ["p1-o001-table"]
+    assert reconciliation["accounted_for"] is False

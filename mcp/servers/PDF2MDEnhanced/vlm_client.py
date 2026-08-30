@@ -240,6 +240,46 @@ class DynamicVLMClient:
             return data
         return {"formulas": [], "tables": [], "figures": []}
 
+    def extract_layout_structured(self, image_path: str, layout_blocks: list[Dict[str, Any]]) -> Dict[str, Any]:
+        bounded_blocks = []
+        for block in layout_blocks:
+            if not isinstance(block, dict):
+                continue
+            bounded_blocks.append(
+                {
+                    "layout_id": block.get("layout_id"),
+                    "source_block_index": block.get("source_block_index"),
+                    "type": block.get("type"),
+                    "reading_order": block.get("reading_order"),
+                    "bbox": block.get("bbox") or [],
+                    "bbox_space": "normalized_page",
+                    "content": str(block.get("content") or "")[:1200],
+                }
+            )
+        prompt = (
+            "Recover only the listed failed semantic layout blocks from this page. "
+            "Do not discover, merge, reorder, or omit other page objects. Return at most one object per input block, "
+            "and copy layout_id, source_block_index, and normalized bbox exactly. If a block is unreadable, omit it. "
+            "Return strict JSON only with tables, formulas, figures arrays. Schema: "
+            '{"tables":[{"layout_id":"","source_block_index":1,"bbox":[0,0,1,1],'
+            '"bbox_space":"normalized_page","title":"","markdown":"","description":""}],'
+            '"formulas":[{"layout_id":"","source_block_index":2,"bbox":[0,0,1,1],'
+            '"bbox_space":"normalized_page","latex":"","description":"","variables":"","context":""}],'
+            '"figures":[{"layout_id":"","source_block_index":3,"bbox":[0,0,1,1],'
+            '"bbox_space":"normalized_page","caption":"","type":"figure","description":"",'
+            '"labels":[],"context":""}]}. '
+            f"Failed layout blocks: {json.dumps(bounded_blocks, ensure_ascii=False)}"
+        )
+        text = self._call_image_prompt(image_path, prompt, max_tokens=self.max_tokens)
+        data = self._extract_json(text)
+        if not data:
+            return {"formulas": [], "tables": [], "figures": []}
+        return {
+            "tables": data.get("tables") if isinstance(data.get("tables"), list) else [],
+            "formulas": data.get("formulas") if isinstance(data.get("formulas"), list) else [],
+            "figures": data.get("figures") if isinstance(data.get("figures"), list) else [],
+        }
+
     def cleanup_markdown_table_noise(self, markdown_text: str) -> str:
         self.ensure_enabled()
         prompt = (

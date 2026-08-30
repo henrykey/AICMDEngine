@@ -196,6 +196,59 @@ def test_single_page_table_vlm_uses_provider_output_budget(monkeypatch):
     assert len(result.tables) == 1
 
 
+def test_layout_recovery_prompt_keeps_authoritative_ids_and_parses_only_typed_arrays(monkeypatch):
+    observed = {}
+    client = DynamicVLMClient.__new__(DynamicVLMClient)
+    client.max_tokens = 4096
+
+    def fake_call(image_path, prompt, max_tokens):
+        observed.update({"image_path": image_path, "prompt": prompt, "max_tokens": max_tokens})
+        return json.dumps(
+            {
+                "tables": [],
+                "formulas": [],
+                "figures": [
+                    {
+                        "layout_id": "p1-o002-figure",
+                        "source_block_index": 7,
+                        "description": "mocked figure",
+                    }
+                ],
+                "ignored": ["must not leak"],
+            }
+        )
+
+    monkeypatch.setattr(client, "_call_image_prompt", fake_call)
+    result = client.extract_layout_structured(
+        "/tmp/unused.png",
+        [
+            {
+                "layout_id": "p1-o002-figure",
+                "source_block_index": 7,
+                "type": "figure",
+                "reading_order": 2,
+                "bbox": [0.1, 0.2, 0.5, 0.6],
+                "content": "",
+            }
+        ],
+    )
+
+    assert observed["image_path"] == "/tmp/unused.png"
+    assert observed["max_tokens"] == 4096
+    assert "p1-o002-figure" in observed["prompt"]
+    assert result == {
+        "tables": [],
+        "formulas": [],
+        "figures": [
+            {
+                "layout_id": "p1-o002-figure",
+                "source_block_index": 7,
+                "description": "mocked figure",
+            }
+        ],
+    }
+
+
 def test_vlm_stream_response_preserves_finish_reason():
     class Delta:
         content = '{"tables":['
@@ -1295,6 +1348,19 @@ def test_process_task_page_does_not_promote_single_page_table_schema(monkeypatch
         "task_page_id": "page1",
         "page_no": 1,
         "route_selected": "text_only",
+        "layout_version": "pdf2md-layout-ledger-v1",
+        "layout_status": "EXTRACTED",
+        "bbox_space": "normalized_page",
+        "layout": [
+            {
+                "layout_id": "p1-o001-table",
+                "type": "table",
+                "reading_order": 1,
+                "bbox": [0.1, 0.1, 0.9, 0.9],
+                "status": "EXTRACTED",
+            }
+        ],
+        "reconciliation": {"identified": 1, "extracted": 1, "failed": 0, "complete": True},
         "render": {"markdown": "| A | B |\n| --- | --- |\n| 1 | 2 |"},
         "rag": {
             "content": "page text",
@@ -1352,6 +1418,92 @@ def test_process_task_page_does_not_promote_single_page_table_schema(monkeypatch
     assert top_level_forbidden.isdisjoint(result["page_result"].keys())
     assert table_item_forbidden.isdisjoint(result["page_result"]["elements"]["tables"][0].keys())
     assert table_item_forbidden.isdisjoint(result["page_result"]["rag"]["elements"]["tables"][0].keys())
+
+
+def test_local_task_chain_persists_layout_and_finalizes_legacy_rag(monkeypatch, tmp_path):
+    pdf_path = tmp_path / "mixed-page-fixture.pdf"
+    document = fitz.open()
+    document.new_page().insert_text((72, 72), "local mixed-page fixture")
+    document.save(pdf_path)
+    document.close()
+
+    manager = server.TaskManager(str(tmp_path / "output"))
+    monkeypatch.setattr(server, "manager", manager)
+    start_task_fn = getattr(server.start_task, "fn", server.start_task)
+    started = json.loads(
+        asyncio.run(start_task_fn(task_name="layout-local-chain", file_path=str(pdf_path), pages=[1]))
+    )
+
+    page_result = {
+        "task_page_id": "page1",
+        "page_no": 1,
+        "route_selected": "full_glm_ocr",
+        "layout_version": "pdf2md-layout-ledger-v1",
+        "layout_status": "EXTRACTED",
+        "bbox_space": "normalized_page",
+        "page_width": 1.0,
+        "page_height": 1.0,
+        "layout": [
+            {
+                "layout_id": "p1-o001-table",
+                "source_block_index": 4,
+                "type": "table",
+                "reading_order": 1,
+                "bbox": [0.1, 0.2, 0.9, 0.6],
+                "bbox_space": "normalized_page",
+                "status": "EXTRACTED",
+                "payload_ref": {"collection": "tables", "index": 0},
+                "error": None,
+            }
+        ],
+        "reconciliation": {
+            "identified": 1,
+            "extracted": 1,
+            "failed": 0,
+            "accounted_for": True,
+            "complete": True,
+        },
+        "render": {"markdown": "| A | B |\n| --- | --- |\n| 1 | 2 |"},
+        "rag": {
+            "content": "page text",
+            "page_text": "page text",
+            "elements": {
+                "tables": [
+                    {
+                        "layout_id": "p1-o001-table",
+                        "source": "glm_ocr_layout",
+                        "title": "",
+                        "markdown": "| A | B |\n| --- | --- |\n| 1 | 2 |",
+                        "semantic_summary": "table",
+                        "context": "",
+                        "reading_order": 1,
+                        "bbox": [0.1, 0.2, 0.9, 0.6],
+                        "bbox_space": "normalized_page",
+                    }
+                ],
+                "formulas": [],
+                "figures": [],
+            },
+        },
+        "elements": {"tables": [], "formulas": [], "figures": []},
+        "next_context": {},
+    }
+    monkeypatch.setattr(server, "process_page", lambda *args, **kwargs: page_result)
+
+    process_task_page_fn = getattr(server.process_task_page, "fn", server.process_task_page)
+    processed = json.loads(
+        asyncio.run(process_task_page_fn(task_id=started["task_id"], page_no=1, policy="force_direct"))
+    )
+
+    assert processed["page_result"] == page_result
+    assert manager.get_task(started["task_id"]).pages[1].result["layout"] == page_result["layout"]
+    persisted = json.loads(
+        (tmp_path / "output" / "tasks" / started["task_id"] / "page_1.json").read_text(encoding="utf-8")
+    )
+    assert persisted["reconciliation"]["complete"] is True
+    finalized = manager.finalize_task(started["task_id"], merge_mode="both")
+    assert finalized["summary"]["completed_pages"] == [1]
+    assert finalized["merged_rag"][0]["rag"]["elements"] == page_result["rag"]["elements"]
 
 
 def test_single_page_table_schema_is_not_used_by_task_output_elements():
