@@ -891,7 +891,6 @@ def test_finalize_markdown_excludes_bad_text_sample(tmp_path):
 
 class LayoutLedgerGLMOcrClient:
     raw = {}
-    crop_raw = {"layout_details": []}
     calls = []
 
     def __init__(self, cfg, source="glm_ocr"):
@@ -903,8 +902,7 @@ class LayoutLedgerGLMOcrClient:
         type(self).calls.append(str(image_path))
         _ = return_crop_images
         _ = need_layout_visualization
-        if "layout-recovery-" in str(image_path):
-            return self.crop_raw
+        assert "layout-recovery-" not in str(image_path), "layout endpoint is not an object content contract"
         return self.raw
 
     def extract_page(self, image_path):
@@ -928,18 +926,23 @@ class LayoutLedgerVLMClient:
         self.last_call_info = {}
         self.last_dual_output_budget = {}
 
-    def extract_layout_structured(self, image_path, layout_blocks):
-        assert layout_blocks
+    def extract_object_structured(self, image_path, block, compact=False):
+        _ = compact
         type(self).calls += 1
-        type(self).last_blocks = layout_blocks
+        type(self).last_blocks = [block]
         type(self).last_image_paths.append(str(image_path))
-        return self.recovered
+        self.last_object_call_info = {"json_status": "object", "finish_reason": "stop"}
+        collection = {"table": "tables", "formula": "formulas", "figure": "figures"}[block["type"]]
+        values = self.recovered.get(collection, [])
+        if not values:
+            return {"layout_id": block["layout_id"], "type": block["type"], "status": "FAILED", "complete": False}
+        return {**values[0], "type": block["type"], "status": "EXTRACTED", "complete": True}
 
     def cleanup_markdown_table_noise(self, markdown_text):
         return markdown_text
 
 
-def _run_layout_ledger_page(monkeypatch, raw, recovered=None, crop_raw=None):
+def _run_layout_ledger_page(monkeypatch, raw, recovered=None):
     page = FakePage(
         text="fixture text layer",
         blocks=[(0, 0, 100, 100, "fixture text layer", 0, 0)],
@@ -965,7 +968,6 @@ def _run_layout_ledger_page(monkeypatch, raw, recovered=None, crop_raw=None):
 
     monkeypatch.setattr(page_processor, "_crop_layout_block_image", fake_crop, raising=False)
     LayoutLedgerGLMOcrClient.raw = raw
-    LayoutLedgerGLMOcrClient.crop_raw = crop_raw or {"layout_details": []}
     LayoutLedgerGLMOcrClient.calls = []
     LayoutLedgerVLMClient.recovered = recovered or {"tables": [], "formulas": [], "figures": []}
     LayoutLedgerVLMClient.calls = 0
@@ -1090,7 +1092,7 @@ def test_layout_recovery_crop_clamps_bbox_and_keeps_small_padding(tmp_path):
     assert (cropped_pixmap.width, cropped_pixmap.height) == (22, 18)
 
 
-def test_process_page_layout_uses_unique_glm_crop_result_for_original_layout_id(monkeypatch):
+def test_process_page_layout_uses_object_content_contract_for_original_layout_id(monkeypatch):
     complete = "<table><tr><td>A</td><td>B</td></tr><tr><td>1</td><td>2</td></tr></table>"
     incomplete = "<table><tr><td>C</td><td>D</td></tr><tr><td>3</td><td>"
     recovered = "<table><tr><td>C</td><td>D</td></tr><tr><td>3</td><td>4</td></tr></table>"
@@ -1102,18 +1104,14 @@ def test_process_page_layout_uses_unique_glm_crop_result_for_original_layout_id(
                 {"index": 20, "label": "table", "bbox_2d": [10, 50, 90, 90], "content": incomplete},
             ]
         ),
-        recovered={"tables": [], "formulas": [], "figures": []},
-        crop_raw={
-            "layout_details": [
-                [{"index": 900, "label": "table", "bbox_2d": [0, 0, 1, 1], "content": recovered}]
-            ]
-        },
+        recovered={"tables": [{"layout_id": "p1-o002-table", "markdown": recovered}]},
     )
 
     assert result["_fixture_crop_calls"] == [
         {"layout_id": "p1-o002-table", "bbox": [0.1, 0.5, 0.9, 0.9]}
     ]
-    assert LayoutLedgerVLMClient.calls == 0
+    assert LayoutLedgerVLMClient.calls == 1
+    assert LayoutLedgerGLMOcrClient.calls == ["/tmp/layout-page.png"]
     assert result["layout"][1]["layout_id"] == "p1-o002-table"
     assert result["layout"][1]["reading_order"] == 2
     assert result["layout"][1]["bbox"] == [0.1, 0.5, 0.9, 0.9]
@@ -1121,24 +1119,14 @@ def test_process_page_layout_uses_unique_glm_crop_result_for_original_layout_id(
     assert result["layout"][1]["review_required"] is False
     assert result["elements"]["tables"][1]["layout_id"] == "p1-o002-table"
     assert result["elements"]["tables"][1]["markdown"] == recovered
-    assert result["elements"]["tables"][1]["source"] == "glm_ocr_layout+glm_ocr_crop"
-    assert result["layout_recovery"]["objects"] == [
-        {
-            "layout_id": "p1-o002-table",
-            "type": "table",
-            "crop": {
-                "pixel_bbox": [8, 8, 92, 92],
-                "width": 84,
-                "height": 84,
-                "padding_ratio": 0.02,
-            },
-            "attempts": [
-                {"provider": "glm_ocr", "outcome": "recovered", "reason": "unique_target_type"}
-            ],
-            "outcome": "recovered",
-            "provider": "glm_ocr",
-        }
-    ]
+    assert result["elements"]["tables"][1]["source"] == "glm_ocr_layout+vlm_object_crop"
+    diagnostic = result["layout_recovery"]["objects"][0]
+    assert diagnostic["layout_id"] == "p1-o002-table"
+    assert diagnostic["crop"]["pixel_bbox"] == [8, 8, 92, 92]
+    assert diagnostic["outcome"] == "recovered"
+    assert diagnostic["provider"] == "vlm_ocr"
+    assert diagnostic["attempts"][0]["reason"] == "validated_object"
+    assert diagnostic["attempts"][0]["candidate_chars"] == len(recovered)
 
 
 @pytest.mark.parametrize(
@@ -1155,7 +1143,12 @@ def test_process_page_layout_recovers_generic_large_table_crop(monkeypatch, trun
         "<tr><td>0.2</td><td>0.4</td><td>0.6</td><td>0.8</td><td>1.0</td><td>1.2</td></tr>"
         + truncated_tail
     )
-    recovered = incomplete + "</td></tr></table>"
+    recovered = (
+        "<table><tr><td rowspan=\"2\">ratio</td><td colspan=\"6\">coefficients</td></tr>"
+        "<tr><td>0.2</td><td>0.4</td><td>0.6</td><td>0.8</td><td>1.0</td><td>1.2</td></tr>"
+        "<tr><td>0.00</td><td>1.000</td><td>1.000</td><td>0.980</td><td>0.950</td><td>0.900</td><td>0.850</td></tr>"
+        "</table>"
+    )
     result = _run_layout_ledger_page(
         monkeypatch,
         _layout_raw(
@@ -1164,12 +1157,7 @@ def test_process_page_layout_recovers_generic_large_table_crop(monkeypatch, trun
                 {"index": 2, "label": "table", "bbox_2d": [8, 48, 92, 98], "content": incomplete},
             ]
         ),
-        recovered={"tables": [], "formulas": [], "figures": []},
-        crop_raw={
-            "layout_details": [
-                [{"index": 7, "label": "table", "bbox_2d": [0, 0, 1, 1], "content": recovered}]
-            ]
-        },
+        recovered={"tables": [{"layout_id": "p1-o002-table", "markdown": recovered}]},
     )
 
     assert [item["status"] for item in result["layout"]] == ["EXTRACTED", "EXTRACTED"]
@@ -1222,7 +1210,7 @@ def test_process_page_layout_recovers_only_incomplete_second_html_table(monkeypa
     assert result["elements"]["tables"][0]["markdown"] == first
     assert result["elements"]["tables"][0]["source"] == "glm_ocr_layout"
     assert result["elements"]["tables"][1]["markdown"] == recovered_second
-    assert result["elements"]["tables"][1]["source"] == "glm_ocr_layout+vlm_ocr"
+    assert result["elements"]["tables"][1]["source"] == "glm_ocr_layout+vlm_object_crop"
     assert result["elements"]["tables"][1]["layout_id"] == "p1-o002-table"
     assert result["reconciliation"]["complete"] is True
 
@@ -1256,7 +1244,7 @@ def test_process_page_layout_incomplete_table_recovery_failure_is_isolated(monke
         },
     )
 
-    assert LayoutLedgerVLMClient.calls == 1
+    assert LayoutLedgerVLMClient.calls == 2
     assert [block["layout_id"] for block in LayoutLedgerVLMClient.last_blocks] == ["p1-o002-table"]
     assert [item["status"] for item in result["layout"]] == ["EXTRACTED", "FAILED"]
     assert result["layout"][1]["error"] == {
@@ -1418,7 +1406,7 @@ def test_process_page_layout_recovery_rejects_wrong_explicit_layout_id(monkeypat
 
     assert result["layout"][1]["status"] == "FAILED"
     assert result["elements"]["figures"] == []
-    assert result["reconciliation"]["unmatched_payload_layout_ids"] == ["p1-o999-figure"]
+    assert result["reconciliation"]["unmatched_payload_layout_ids"] == ["p1-o002-figure:layout_id_mismatch"]
     assert result["layout"][2]["status"] == "EXTRACTED"
 
 

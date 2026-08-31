@@ -105,6 +105,25 @@ Normal task uploads now add an authoritative page layout ledger when GLM-OCR lay
 
 Set `routing_config.layout_ledger_enabled=false` only as a rollback switch to omit the additive ledger fields and use the previous task-page behavior. This switch does not change the single-page repair tools.
 
+### Object-crop content recovery (normal uploads)
+
+Missing/incomplete table, formula, and figure blocks use the configured VLM image-chat content contract on a temporary padded crop. The full-page GLM layout remains authoritative; the crop is **not** sent through layout parsing again, and original normalized bbox coordinates are metadata only for the crop request. No GLM layout token controls or undocumented chat capabilities are assumed.
+
+- One object per JSON response: exact `layout_id`/`type`, `status=EXTRACTED`, `complete=true`, and `markdown`, `latex`, or `description`. Table structure, LaTeX grouping/environments, nonempty visual descriptions, and provider truncation are checked before promotion. Closing tags and missing data are never fabricated.
+- At most two logical content calls per failed object (initial + compact retry for invalid/incomplete content). Identity/type conflicts and provider exceptions remain failed and do not stop later objects. The existing transport retry and stream fallback limits remain unchanged.
+- Output budget is `min(injected max_tokens, 16384)`, additionally respecting the existing runtime provider cap. `layout_recovery_max_objects` defaults to 8, is capped at 16, and can be set to 0 to disable recovery while retaining the ledger. Without a configured/enabled VLM, objects stay failed with `provider_unavailable`.
+- `layout_recovery.contract=object-crop-content-v1` adds per-attempt JSON status, response/content character counts, HTML tag counts, explicit rejection reason, finish reason, and requested/effective token budget. Only whitelisted metadata is persisted: no raw model responses, prompts, credentials, URLs, or image data. Unknown diagnostics remain unknown rather than being labeled as truncation.
+- Successful recovered objects retain the original ID/order/bbox and use source `glm_ocr_layout+vlm_object_crop`. Failed objects retain partial ledger content, error, and `review_required=true`, and remain absent from legacy success arrays. Diagnostics and reconciliation are persisted by the normal task path.
+- Crops are temporary only: no S3 upload, persisted image asset, or original-image replacement. Membership's independent failed-object/Review consumer integration is not implemented here.
+
+Mock-only regression command (no model calls):
+
+```bash
+python -m pytest -q --no-cov tests/test_pdf2md_enhanced_bad_text_policy.py tests/test_pdf2md_enhanced_single_page_tools.py tests/test_pdf2md_enhanced_object_recovery.py tests/test_mcp_model_config_injection.py
+```
+
+See [the object-crop recovery Goals Loop](../../../docs/plans/2026-08-31-PDF2MD-OBJECT-CROP-STRUCTURED-RECOVERY-GOALS-LOOP.md) for acceptance criteria. Passing local tests does not establish that the original document's pages 16/17 are fixed: image build/recreate, real-provider evaluation against those pages, and Membership Review integration require separate authorization.
+
 ## Single-page repair tools
 
 These tools are direct补漏 tools for one page or one page image. They do not create tasks, do not update task status, and do not write page results to `data/tasks`.

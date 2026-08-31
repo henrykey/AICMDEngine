@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from html.parser import HTMLParser
 
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -139,7 +140,7 @@ def apply_recovered_payloads(outcome: Dict[str, Any], recovered: Any) -> None:
     raw = recovered if isinstance(recovered, dict) else {}
     layout = outcome.get("layout") or []
     used_layout_ids: set[str] = set()
-    unmatched: List[str] = []
+    unmatched: List[str] = list(outcome.get("unmatched_recovery_refs") or [])
     for object_type, collection in (("table", "tables"), ("formula", "formulas"), ("figure", "figures")):
         values = raw.get(collection)
         if not isinstance(values, list):
@@ -440,6 +441,111 @@ def _recovered_payload(entry: Dict[str, Any], candidate: Dict[str, Any]) -> Opti
             "description": description or caption,
         }
     return None
+
+
+def validate_recovered_object(block: Dict[str, Any], candidate: Any) -> Tuple[str, Dict[str, Any]]:
+    """Validate a crop response without modifying content or leaking it in diagnostics."""
+    if not isinstance(candidate, dict):
+        return "response_invalid", {"candidate_chars": 0}
+    if not candidate:
+        return "response_empty", {"candidate_chars": 0}
+    kind = block.get("type")
+    value = candidate.get({"table": "markdown", "formula": "latex", "figure": "description"}.get(kind, ""))
+    content = value.strip() if isinstance(value, str) else ""
+    shape: Dict[str, Any] = {"candidate_chars": len(content)}
+    if kind == "table":
+        for tag in ("table", "tr", "td", "th"):
+            shape[f"{tag}_open_count"] = len(re.findall(rf"<{tag}\b[^>]*>", content, re.IGNORECASE))
+            shape[f"{tag}_close_count"] = len(re.findall(rf"</{tag}\s*>", content, re.IGNORECASE))
+    if candidate.get("layout_id") != block.get("layout_id"):
+        return "layout_id_mismatch", shape
+    if candidate.get("type") != kind:
+        return "object_type_mismatch", shape
+    if candidate.get("status") != "EXTRACTED" or candidate.get("complete") is not True:
+        return "provider_reported_incomplete", shape
+    if not content or content.strip("[]()<> \n\t").lower() in {"unreadable", "unknown", "n/a", "null", "none"}:
+        return f"{kind}_content_empty", shape
+    if kind == "table":
+        if shape["table_open_count"]:
+            if _html_table_incomplete(content):
+                return "table_html_unclosed", shape
+            if shape["table_open_count"] != 1:
+                return "table_count_invalid", shape
+            parser = _TableStructureParser()
+            try:
+                parser.feed(content)
+                parser.close()
+            except Exception:
+                return "table_html_invalid", shape
+            if parser.invalid or parser.stack:
+                return "table_html_invalid", shape
+            if not shape["tr_open_count"] or not (shape["td_open_count"] + shape["th_open_count"]):
+                return "table_cells_missing", shape
+        else:
+            lines = [line.strip() for line in content.splitlines() if line.strip()]
+            rows = [re.split(r"(?<!\\)\|", line.strip("|")) for line in lines]
+            if (len(rows) < 2 or not all("|" in line for line in lines)
+                    or not all(re.fullmatch(r"\s*:?-{3,}:?\s*", cell) for cell in rows[1])
+                    or any(len(row) != len(rows[0]) for row in rows)):
+                return "table_markdown_invalid", shape
+    elif kind == "formula":
+        depth = 0
+        for brace in re.findall(r"(?<!\\)[{}]", content):
+            depth += 1 if brace == "{" else -1
+            if depth < 0:
+                return "formula_unbalanced", shape
+        environments: List[str] = []
+        for action, name in re.findall(r"\\(begin|end)\{([^}]+)\}", content):
+            if action == "begin":
+                environments.append(name)
+            elif not environments or environments.pop() != name:
+                return "formula_unbalanced", shape
+        if depth or environments:
+            return "formula_unbalanced", shape
+    elif kind == "figure":
+        if re.fullmatch(r"(?:fig(?:ure)?\.?|图)\s*[\w.-]+", content, re.IGNORECASE):
+            return "figure_content_empty", shape
+    else:
+        return "unsupported_object_type", shape
+    return "", shape
+
+
+class _TableStructureParser(HTMLParser):
+    """Reject incomplete/misnested table structure; never auto-close model output."""
+    parents = {
+        "table": {None}, "thead": {"table"}, "tbody": {"table"}, "tfoot": {"table"},
+        "tr": {"table", "thead", "tbody", "tfoot"}, "td": {"tr"}, "th": {"tr"},
+        "caption": {"table"}, "colgroup": {"table"},
+    }
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stack: List[str] = []
+        self.invalid = False
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        if tag in {"script", "iframe", "object", "embed", "img", "svg", "style", "link", "meta"}:
+            self.invalid = True
+        if any(name.lower().startswith("on") for name, _ in attrs):
+            self.invalid = True
+        if tag in self.parents:
+            parent = self.stack[-1] if self.stack else None
+            if parent not in self.parents[tag]:
+                self.invalid = True
+            self.stack.append(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self.parents:
+            if not self.stack or self.stack[-1] != tag:
+                self.invalid = True
+            else:
+                self.stack.pop()
+
+    def handle_startendtag(self, tag: str, attrs: Any) -> None:
+        if tag in self.parents:
+            self.invalid = True
+        else:
+            self.handle_starttag(tag, attrs)
 
 
 def _payload_common(entry: Dict[str, Any]) -> Dict[str, Any]:

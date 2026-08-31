@@ -17,10 +17,10 @@ from .layout_ledger import (
     apply_recovered_payloads,
     blank_layout_outcome,
     build_layout_outcome,
-    canonical_layout_type,
     failed_layout_outcome,
     reconcile_layout,
     recovery_blocks,
+    validate_recovered_object,
 )
 from .vlm_client import DynamicVLMClient
 
@@ -137,7 +137,6 @@ def process_page(
                             output_dir=Path(work_dir),
                             layout_outcome=layout_outcome,
                             pending_blocks=pending_blocks,
-                            glm_ocr=glm_ocr,
                             vlm=vlm,
                             vlm_enabled=bool(rc.get("vlm_ocr_enabled") and vlm.enabled),
                             max_objects=rc["layout_recovery_max_objects"],
@@ -409,6 +408,7 @@ def process_page(
                 "layout": layout_outcome.get("layout") or [],
                 "reconciliation": reconciliation,
                 "layout_recovery": layout_outcome.get("recovery") or {
+                    "contract": "object-crop-content-v1",
                     "pending": 0,
                     "attempted": 0,
                     "limit": rc["layout_recovery_max_objects"],
@@ -859,24 +859,22 @@ def _recover_layout_objects(
     output_dir: Path,
     layout_outcome: Dict[str, Any],
     pending_blocks: list[Dict[str, Any]],
-    glm_ocr: OpenAICompatibleOcrClient,
     vlm: DynamicVLMClient,
     vlm_enabled: bool,
     max_objects: int,
     padding_ratio: float,
 ) -> tuple[int, int, Dict[str, Any]]:
-    glm_calls = 0
     vlm_calls = 0
-    limit = max(0, int(max_objects))
-    selected = pending_blocks[:limit]
+    limit = max(0, min(int(max_objects), 16))
     diagnostics: Dict[str, Any] = {
+        "contract": "object-crop-content-v1",
         "pending": len(pending_blocks),
-        "attempted": len(selected),
+        "attempted": 0,
         "limit": limit,
         "objects": [],
     }
 
-    for block in selected:
+    for index, block in enumerate(pending_blocks):
         layout_id = str(block.get("layout_id") or "")
         object_type = str(block.get("type") or "unknown")
         item_diagnostics: Dict[str, Any] = {
@@ -886,6 +884,14 @@ def _recover_layout_objects(
             "attempts": [],
             "outcome": "failed",
         }
+        diagnostics["objects"].append(item_diagnostics)
+        if index >= limit or not vlm_enabled:
+            item_diagnostics.update({
+                "outcome": "not_attempted", "review_required": True,
+                "reason": "recovery_limit_exceeded" if index >= limit else "provider_unavailable",
+            })
+            continue
+        diagnostics["attempted"] += 1
         try:
             crop_path, crop_info = _crop_layout_block_image(
                 image_path,
@@ -899,75 +905,90 @@ def _recover_layout_objects(
                 {"provider": "crop", "outcome": "failed", "reason": type(exc).__name__}
             )
             item_diagnostics["review_required"] = True
-            diagnostics["objects"].append(item_diagnostics)
             continue
 
-        if object_type in {"table", "formula"} and glm_ocr.enabled:
-            glm_calls += 1
-            try:
-                crop_raw = glm_ocr.parse_layout(str(crop_path))
-                candidate, reason = _glm_crop_recovery_candidate(crop_raw, block)
-                if candidate is not None:
-                    apply_recovered_payloads(layout_outcome, _single_recovery_result(object_type, candidate))
-                    if _layout_entry_recovered(layout_outcome, layout_id):
-                        item_diagnostics["attempts"].append(
-                            {"provider": "glm_ocr", "outcome": "recovered", "reason": reason}
-                        )
-                        item_diagnostics["outcome"] = "recovered"
-                        item_diagnostics["provider"] = "glm_ocr"
-                        diagnostics["objects"].append(item_diagnostics)
-                        continue
-                    reason = "invalid_recovered_content"
-                item_diagnostics["attempts"].append(
-                    {"provider": "glm_ocr", "outcome": "not_recovered", "reason": reason}
-                )
-            except Exception as exc:
-                item_diagnostics["attempts"].append(
-                    {"provider": "glm_ocr", "outcome": "failed", "reason": type(exc).__name__}
-                )
-
-        if vlm_enabled:
+        for attempt_no in (1, 2):
             vlm_calls += 1
+            attempt: Dict[str, Any] = {
+                "attempt": attempt_no, "mode": "initial" if attempt_no == 1 else "compact",
+                "provider": "vlm_ocr", "endpoint_kind": "image_chat_completions",
+                "outcome": "not_recovered",
+            }
+            item_diagnostics["attempts"].append(attempt)
+            vlm.last_object_call_info = {}
             try:
-                raw_recovered = vlm.extract_layout_structured(str(crop_path), [block])
-                recovered, reason = _explicit_vlm_recovery_for_block(raw_recovered, block)
-                if recovered is not None:
-                    apply_recovered_payloads(layout_outcome, recovered)
+                candidate = vlm.extract_object_structured(str(crop_path), block, compact=attempt_no == 2)
+                attempt.update(_safe_object_call_info(vlm))
+                reason, shape = validate_recovered_object(block, candidate)
+                attempt.update(shape)
+                if attempt.get("truncated") or attempt.get("finish_reason") == "length":
+                    reason = "provider_output_truncated"
+                elif attempt.get("finish_reason") in {"content_filter", "tool_calls"}:
+                    reason = "provider_content_blocked"
+                elif attempt.get("json_status") in {"empty", "invalid", "non_object"}:
+                    reason = {"empty": "response_empty", "invalid": "response_json_invalid",
+                              "non_object": "response_invalid"}[attempt["json_status"]]
+                if not reason:
+                    payload = _object_success_payload(block, candidate)
+                    apply_recovered_payloads(layout_outcome, _single_recovery_result(object_type, payload))
                     if _layout_entry_recovered(layout_outcome, layout_id):
-                        item_diagnostics["attempts"].append(
-                            {"provider": "vlm_ocr", "outcome": "recovered", "reason": reason}
-                        )
+                        attempt.update({"outcome": "recovered", "reason": "validated_object"})
                         item_diagnostics["outcome"] = "recovered"
                         item_diagnostics["provider"] = "vlm_ocr"
-                        diagnostics["objects"].append(item_diagnostics)
-                        continue
-                    reason = "invalid_recovered_content"
-                elif reason in {"explicit_layout_id_missing", "explicit_layout_id_ambiguous"}:
-                    _record_unmatched_vlm_recovery_refs(layout_outcome, raw_recovered, object_type)
-                item_diagnostics["attempts"].append(
-                    {"provider": "vlm_ocr", "outcome": "not_recovered", "reason": reason}
-                )
+                        break
+                    reason = "ledger_binding_failed"
+                attempt["reason"] = reason
+                if reason in {"layout_id_mismatch", "object_type_mismatch"}:
+                    refs = layout_outcome.setdefault("unmatched_recovery_refs", [])
+                    refs.append(f"{layout_id}:{reason}")
+                if not _object_content_retryable(reason):
+                    break
             except Exception as exc:
-                item_diagnostics["attempts"].append(
-                    {"provider": "vlm_ocr", "outcome": "failed", "reason": type(exc).__name__}
-                )
+                attempt.update(_safe_object_call_info(vlm))
+                attempt.update({"outcome": "failed", "reason": type(exc).__name__})
+                break
 
-        item_diagnostics["review_required"] = True
-        diagnostics["objects"].append(item_diagnostics)
+        if item_diagnostics["outcome"] != "recovered":
+            item_diagnostics["review_required"] = True
 
-    for block in pending_blocks[len(selected) :]:
-        diagnostics["objects"].append(
-            {
-                "layout_id": str(block.get("layout_id") or ""),
-                "type": str(block.get("type") or "unknown"),
-                "crop": None,
-                "attempts": [],
-                "outcome": "not_attempted",
-                "reason": "recovery_limit_exceeded",
-                "review_required": True,
-            }
-        )
-    return glm_calls, vlm_calls, diagnostics
+    return 0, vlm_calls, diagnostics
+
+
+def _object_content_retryable(reason: str) -> bool:
+    return reason in {
+        "response_empty", "response_invalid", "response_json_invalid", "provider_reported_incomplete",
+        "provider_output_truncated", "table_content_empty", "table_html_unclosed", "table_html_invalid",
+        "table_cells_missing", "table_count_invalid", "table_markdown_invalid", "formula_content_empty",
+        "formula_unbalanced", "figure_content_empty",
+    }
+
+
+def _safe_object_call_info(vlm: DynamicVLMClient) -> Dict[str, Any]:
+    raw = getattr(vlm, "last_object_call_info", {}) or {}
+    result: Dict[str, Any] = {}
+    for key in ("response_chars", "requested_max_tokens", "effective_max_tokens"):
+        value = raw.get(key)
+        result[key] = value if type(value) is int and value >= 0 else None
+    for key, allowed in {
+        "finish_reason": {"stop", "length", "content_filter", "tool_calls", "other"},
+        "json_status": {"object", "empty", "invalid", "non_object"},
+        "call_mode": {"stream", "non_stream", "unknown"},
+    }.items():
+        value = raw.get(key)
+        result[key] = value if isinstance(value, str) and value in allowed else None
+    result["truncated"] = raw.get("truncated") is True or result["finish_reason"] == "length"
+    return result
+
+
+def _object_success_payload(block: Dict[str, Any], candidate: Dict[str, Any]) -> Dict[str, Any]:
+    keys = {
+        "table": ("markdown", "title"), "formula": ("latex", "description", "variables", "context"),
+        "figure": ("description", "caption"),
+    }[block["type"]]
+    return {
+        **{key: candidate[key] for key in keys if isinstance(candidate.get(key), str)},
+        "layout_id": block["layout_id"], "source": "glm_ocr_layout+vlm_object_crop",
+    }
 
 
 def _crop_layout_block_image(
@@ -1023,58 +1044,6 @@ def _crop_layout_block_image(
     }
 
 
-def _glm_crop_recovery_candidate(
-    raw: Any,
-    block: Dict[str, Any],
-) -> tuple[Optional[Dict[str, Any]], str]:
-    object_type = str(block.get("type") or "unknown")
-    if object_type not in {"table", "formula"}:
-        return None, "provider_not_safe_for_type"
-    matches: list[Dict[str, Any]] = []
-    if isinstance(raw, dict):
-        for page in raw.get("layout_details") or []:
-            if not isinstance(page, list):
-                continue
-            for item in page:
-                if not isinstance(item, dict):
-                    continue
-                if canonical_layout_type(item.get("label") or item.get("type")) != object_type:
-                    continue
-                if str(item.get("content") or "").strip():
-                    matches.append(item)
-    if not matches:
-        return None, "target_type_missing"
-    if len(matches) != 1:
-        return None, "target_type_ambiguous"
-
-    item = matches[0]
-    content = str(item.get("content") or "").strip()
-    candidate: Dict[str, Any] = {
-        "layout_id": str(block.get("layout_id") or ""),
-        "source_block_index": block.get("source_block_index"),
-        "bbox": list(block.get("bbox") or []),
-        "bbox_space": "normalized_page",
-        "source": "glm_ocr_layout+glm_ocr_crop",
-    }
-    if object_type == "table":
-        candidate.update(
-            {
-                "markdown": content,
-                "title": str(
-                    item.get("table_title")
-                    or item.get("tableName")
-                    or item.get("table_name")
-                    or item.get("caption")
-                    or item.get("title")
-                    or ""
-                ).strip(),
-            }
-        )
-    else:
-        candidate["latex"] = content
-    return candidate, "unique_target_type"
-
-
 def _single_recovery_result(object_type: str, candidate: Dict[str, Any]) -> Dict[str, Any]:
     result = {"tables": [], "formulas": [], "figures": []}
     collection = {"table": "tables", "formula": "formulas", "figure": "figures"}.get(object_type)
@@ -1083,52 +1052,11 @@ def _single_recovery_result(object_type: str, candidate: Dict[str, Any]) -> Dict
     return result
 
 
-def _explicit_vlm_recovery_for_block(
-    raw: Any,
-    block: Dict[str, Any],
-) -> tuple[Optional[Dict[str, Any]], str]:
-    object_type = str(block.get("type") or "unknown")
-    collection = {"table": "tables", "formula": "formulas", "figure": "figures"}.get(object_type)
-    if collection is None or not isinstance(raw, dict):
-        return None, "response_invalid"
-    values = raw.get(collection)
-    if not isinstance(values, list) or not values:
-        return None, "candidate_missing"
-    layout_id = str(block.get("layout_id") or "")
-    exact = [
-        candidate
-        for candidate in values
-        if isinstance(candidate, dict) and str(candidate.get("layout_id") or "") == layout_id
-    ]
-    if not exact:
-        return None, "explicit_layout_id_missing"
-    if len(exact) != 1:
-        return None, "explicit_layout_id_ambiguous"
-    return _single_recovery_result(object_type, exact[0]), "explicit_layout_id"
-
-
 def _layout_entry_recovered(layout_outcome: Dict[str, Any], layout_id: str) -> bool:
     return any(
         str(item.get("layout_id") or "") == layout_id and item.get("status") == "EXTRACTED"
         for item in layout_outcome.get("layout") or []
     )
-
-
-def _record_unmatched_vlm_recovery_refs(
-    layout_outcome: Dict[str, Any],
-    raw: Any,
-    object_type: str,
-) -> None:
-    collection = {"table": "tables", "formula": "formulas", "figure": "figures"}.get(object_type)
-    if collection is None or not isinstance(raw, dict) or not isinstance(raw.get(collection), list):
-        return
-    refs = list(layout_outcome.get("unmatched_recovery_refs") or [])
-    for index, candidate in enumerate(raw[collection]):
-        if isinstance(candidate, dict):
-            refs.append(str(candidate.get("layout_id") or f"{collection}:{index}"))
-        else:
-            refs.append(f"{collection}:{index}")
-    layout_outcome["unmatched_recovery_refs"] = list(dict.fromkeys(refs))
 
 
 def _build_direct_markdown(page: fitz.Page) -> str:

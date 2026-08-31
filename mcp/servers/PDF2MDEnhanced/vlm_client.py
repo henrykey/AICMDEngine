@@ -28,6 +28,7 @@ class DynamicVLMClient:
         self._runtime_max_tokens_cap: Optional[int] = None
         self.last_dual_output_budget: Dict[str, Any] = {}
         self.last_call_info: Dict[str, Any] = {}
+        self.last_object_call_info: Dict[str, Any] = {}
 
         self.enabled = bool(self.model and self.api_key and self.base_url)
         self._client = None
@@ -279,6 +280,68 @@ class DynamicVLMClient:
             "formulas": data.get("formulas") if isinstance(data.get("formulas"), list) else [],
             "figures": data.get("figures") if isinstance(data.get("figures"), list) else [],
         }
+
+    def extract_object_structured(
+        self, image_path: str, block: Dict[str, Any], compact: bool = False,
+    ) -> Dict[str, Any]:
+        """Transcribe one existing layout object's crop, not another layout inventory."""
+        object_type = block.get("type")
+        schemas = {
+            "table": {"markdown": "", "title": ""},
+            "formula": {"latex": "", "description": "", "variables": "", "context": ""},
+            "figure": {"description": "", "caption": ""},
+        }
+        if object_type not in schemas:
+            raise ValueError("unsupported object type")
+        schema = {
+            "layout_id": block.get("layout_id"), "type": object_type,
+            "status": "EXTRACTED", "complete": True, **schemas[object_type],
+        }
+        prompt = (
+            "The input image is already cropped to ONE identified document object, with small padding. "
+            "Transcribe the complete visible object from the IMAGE, not a layout preview or a summary. "
+            "The original page bbox is metadata only: do not apply it again to this crop. "
+            "Return exactly one JSON object, no arrays, code fences or surrounding prose. "
+            "Copy layout_id and type exactly. Do not discover, merge or substitute other objects. "
+            "For a table preserve EVERY visible row, column, value, unit, formula, footnote and merged cell. "
+            "Use complete valid HTML with all table/tr/td/th tags closed for merged cells, otherwise HTML or "
+            "pipe Markdown with a header separator and consistent columns. Do not abbreviate repeated data. "
+            "For a formula return complete LaTeX with balanced groups and environments. "
+            "For a figure describe its visual contents and relationships; a title alone is insufficient. "
+            "Set status=EXTRACTED and complete=true ONLY if the entire object is readable and transcribed. "
+            "Otherwise set status=FAILED, complete=false and leave its payload empty. Never invent missing "
+            "cells or values, and never close a partial table merely to claim completeness. "
+            f"Original page bbox (metadata only): {json.dumps(block.get('bbox') or [])}. "
+            f"Response schema: {json.dumps(schema, ensure_ascii=False)}. "
+        )
+        if compact:
+            prompt += (
+                "This is the single compact retry after an invalid or incomplete response. Re-read the entire "
+                "crop afresh. Minimize whitespace and omit optional title/description/context for tables or "
+                "formulas, but keep every data row and cell; for figures keep the full visual description."
+            )
+        budget = max(1, min(self.max_tokens, 16384))
+        self.last_call_info = {}
+        self.last_object_call_info = {}
+        text = self._call_image_prompt(image_path, prompt, max_tokens=budget)
+        try:
+            data = json.loads(text)
+            json_status = "object" if isinstance(data, dict) else "non_object"
+        except (TypeError, ValueError):
+            data = None
+            json_status = "invalid" if text else "empty"
+        call = self.last_call_info
+        finish = call.get("finish_reason")
+        self.last_object_call_info = {
+            "response_chars": len(text or ""),
+            "json_status": json_status,
+            "finish_reason": finish if finish in {None, "stop", "length", "content_filter", "tool_calls"} else "other",
+            "requested_max_tokens": budget,
+            "effective_max_tokens": call.get("effective_max_tokens"),
+            "truncated": finish == "length",
+            "call_mode": call.get("mode") if call.get("mode") in {"stream", "non_stream"} else "unknown",
+        }
+        return data if isinstance(data, dict) else {}
 
     def cleanup_markdown_table_noise(self, markdown_text: str) -> str:
         self.ensure_enabled()
