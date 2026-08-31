@@ -93,6 +93,8 @@ def build_layout_outcome(
             "payload_ref": None,
             "error": None,
         }
+        if object_type == "table":
+            entry["title"] = _table_caption_before(block, layout)
         error = _entry_error(entry, str(block.get("bbox_error") or ""))
         if error:
             entry["error"] = error
@@ -116,6 +118,27 @@ def build_layout_outcome(
         "markdown": markdown or _markdown_from_layout(layout),
         "unmatched_recovery_refs": [],
     }
+
+
+def _table_caption_before(block: Dict[str, Any], preceding: List[Dict[str, Any]]) -> str:
+    """Bind only an adjacent caption above this table, never across another object."""
+    bbox = block.get("bbox") or []
+    for item in reversed(preceding):
+        if item.get("type") != "text":
+            break
+        text = str(item.get("content") or "").strip()
+        if not text:
+            continue
+        caption_bbox = item.get("bbox") or []
+        is_caption = item.get("layout_type") == "table_caption" or re.match(
+            r"^(?:表\s*[A-Za-z0-9０-９]|Table\s+[A-Za-z0-9])", text, re.IGNORECASE
+        )
+        if (is_caption and len(bbox) == len(caption_bbox) == 4
+                and caption_bbox[3] <= bbox[1]
+                and min(caption_bbox[2], bbox[2]) > max(caption_bbox[0], bbox[0])):
+            return text
+        break
+    return ""
 
 
 def recovery_blocks(outcome: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -358,6 +381,8 @@ def _entry_error(entry: Dict[str, Any], bbox_error: str) -> Optional[Dict[str, A
         return _error(f"layout_{object_type}_content_missing", "layout_content", object_type != "text")
     if entry.get("type") == "table" and _html_table_incomplete(str(entry.get("content") or "")):
         return _error("layout_table_content_incomplete", "layout_content", True)
+    if entry.get("type") == "table" and _markdown_table_has_synthetic_columns(str(entry.get("content") or "")):
+        return _error("layout_table_synthetic_columns", "layout_content", True)
     return None
 
 
@@ -366,6 +391,23 @@ def _html_table_incomplete(content: str) -> bool:
     if opening is None:
         return False
     return re.search(r"</table\s*>", content[opening.end() :], flags=re.IGNORECASE) is None
+
+
+def _markdown_table_has_synthetic_columns(content: str) -> bool:
+    """Reject a generated run such as Col3, Col4 that masks a missing table schema."""
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    if len(lines) < 2 or "|" not in lines[0]:
+        return False
+    headers = [cell.strip() for cell in re.split(r"(?<!\\)\|", lines[0].strip("|"))]
+    run = 0
+    for header in headers:
+        if re.fullmatch(r"(?:col|column)[ _-]?\d+", header, flags=re.IGNORECASE):
+            run += 1
+            if run >= 2:
+                return True
+        else:
+            run = 0
+    return False
 
 
 def _payload_from_entry(entry: Dict[str, Any], block: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -378,7 +420,7 @@ def _payload_from_entry(entry: Dict[str, Any], block: Dict[str, Any]) -> Optiona
     if object_type == "table":
         return {
             **common,
-            "title": _first_text(raw, "table_title", "tableName", "table_name", "caption", "title"),
+            "title": entry.get("title") or _first_text(raw, "table_title", "tableName", "table_name", "caption", "title"),
             "markdown": content,
             "description": _first_text(raw, "description", "semanticDesc", "summary"),
             "context": _first_text(raw, "context", "surrounding_text"),
@@ -416,7 +458,7 @@ def _recovered_payload(entry: Dict[str, Any], candidate: Dict[str, Any]) -> Opti
             **common,
             "source": _first_text(candidate, "source") or "glm_ocr_layout+vlm_ocr",
             "markdown": markdown,
-            "title": _first_text(candidate, "title", "table_title", "tableName", "table_name"),
+            "title": entry.get("title") or _first_text(candidate, "title", "table_title", "tableName", "table_name"),
         }
     if object_type == "formula":
         latex = _first_text(candidate, "latex", "formula", "content", "text")

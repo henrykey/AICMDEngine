@@ -10,6 +10,24 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger(__name__)
 
 
+def _extract_html_table(text: Any) -> str:
+    """Keep the single HTML table from a model response, stripping only a fence."""
+    value = str(text or "").strip()
+    if value.startswith("```"):
+        first_newline = value.find("\n")
+        if first_newline >= 0:
+            value = value[first_newline + 1:]
+        if value.rstrip().endswith("```"):
+            value = value.rstrip()[:-3]
+    start = re.search(r"<table\b[^>]*>", value, flags=re.IGNORECASE)
+    end = list(re.finditer(r"</table\s*>", value, flags=re.IGNORECASE))
+    if not start:
+        return ""
+    if not end:
+        return value[start.start():].strip()
+    return value[start.start():end[-1].end()].strip()
+
+
 class DynamicVLMClient:
     def __init__(self, vlm_config: Optional[Dict[str, Any]]) -> None:
         cfg = vlm_config or {}
@@ -342,6 +360,40 @@ class DynamicVLMClient:
             "call_mode": call.get("mode") if call.get("mode") in {"stream", "non_stream"} else "unknown",
         }
         return data if isinstance(data, dict) else {}
+
+    def extract_table_html(
+        self, image_path: str, block: Dict[str, Any], compact: bool = False,
+    ) -> str:
+        """Transcribe one cropped table as HTML; MCP owns object metadata."""
+        prompt = (
+            "The input image is already cropped to ONE identified table, with small padding. "
+            "Return ONLY one complete valid HTML <table>...</table>, with no JSON, code fence, "
+            "title, explanation, or surrounding prose. Preserve every visible row, column, value, "
+            "formula, footnote, rowspan and colspan. Do not invent cells or abbreviate repeated data. "
+            "The original page bbox is metadata only: do not apply it again to this crop. "
+        )
+        if compact:
+            prompt += (
+                "This is the single compact retry. Re-read the entire crop and minimize whitespace, "
+                "but keep every cell and the complete HTML table."
+            )
+        budget = max(1, min(self.max_tokens, 16384))
+        self.last_call_info = {}
+        self.last_object_call_info = {}
+        text = self._call_image_prompt(image_path, prompt, max_tokens=budget)
+        html = _extract_html_table(text)
+        call = self.last_call_info
+        finish = call.get("finish_reason")
+        self.last_object_call_info = {
+            "response_chars": len(text or ""),
+            "json_status": "html" if html else "invalid",
+            "finish_reason": finish if finish in {None, "stop", "length", "content_filter", "tool_calls"} else "other",
+            "requested_max_tokens": budget,
+            "effective_max_tokens": call.get("effective_max_tokens"),
+            "truncated": finish == "length",
+            "call_mode": call.get("mode") if call.get("mode") in {"stream", "non_stream"} else "unknown",
+        }
+        return html
 
     def cleanup_markdown_table_noise(self, markdown_text: str) -> str:
         self.ensure_enabled()

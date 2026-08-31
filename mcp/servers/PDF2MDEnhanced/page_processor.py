@@ -917,7 +917,17 @@ def _recover_layout_objects(
             item_diagnostics["attempts"].append(attempt)
             vlm.last_object_call_info = {}
             try:
-                candidate = vlm.extract_object_structured(str(crop_path), block, compact=attempt_no == 2)
+                if object_type == "table":
+                    html = vlm.extract_table_html(str(crop_path), block, compact=attempt_no == 2)
+                    candidate = {
+                        "layout_id": layout_id,
+                        "type": "table",
+                        "status": "EXTRACTED",
+                        "complete": True,
+                        "markdown": html,
+                    }
+                else:
+                    candidate = vlm.extract_object_structured(str(crop_path), block, compact=attempt_no == 2)
                 attempt.update(_safe_object_call_info(vlm))
                 reason, shape = validate_recovered_object(block, candidate)
                 attempt.update(shape)
@@ -925,7 +935,7 @@ def _recover_layout_objects(
                     reason = "provider_output_truncated"
                 elif attempt.get("finish_reason") in {"content_filter", "tool_calls"}:
                     reason = "provider_content_blocked"
-                elif attempt.get("json_status") in {"empty", "invalid", "non_object"}:
+                elif object_type != "table" and attempt.get("json_status") in {"empty", "invalid", "non_object"}:
                     reason = {"empty": "response_empty", "invalid": "response_json_invalid",
                               "non_object": "response_invalid"}[attempt["json_status"]]
                 if not reason:
@@ -950,7 +960,6 @@ def _recover_layout_objects(
 
         if item_diagnostics["outcome"] != "recovered":
             item_diagnostics["review_required"] = True
-
     return 0, vlm_calls, diagnostics
 
 
@@ -971,7 +980,7 @@ def _safe_object_call_info(vlm: DynamicVLMClient) -> Dict[str, Any]:
         result[key] = value if type(value) is int and value >= 0 else None
     for key, allowed in {
         "finish_reason": {"stop", "length", "content_filter", "tool_calls", "other"},
-        "json_status": {"object", "empty", "invalid", "non_object"},
+        "json_status": {"object", "html", "empty", "invalid", "non_object"},
         "call_mode": {"stream", "non_stream", "unknown"},
     }.items():
         value = raw.get(key)
@@ -1528,7 +1537,9 @@ def _build_output_elements(markdown: str, structured: Dict[str, Any], route_sele
             continue
         metadata = table_metadata.get(table_text) if isinstance(table_metadata, dict) else None
         metadata = metadata if isinstance(metadata, dict) else {}
-        title = str(metadata.get("title") or "").strip() or _title_for_table(table_text, lines)
+        title = str(metadata.get("title") or "").strip()
+        if not title and not metadata.get("layout_id"):
+            title = _title_for_table(table_text, lines)
         item = {
             "source": table_source if not table_text.startswith("[TABLE_PLACEHOLDER]") else "pymupdf",
             "title": title,
@@ -1677,11 +1688,12 @@ def _title_for_table(table_text: str, lines: list[str]) -> str:
         m = re.match(r"^\[TABLE_PLACEHOLDER\]\s*([^：:]+)", table_text)
         if m:
             return m.group(1).strip()
+    titles = []
     for line in lines:
         t = line.strip()
-        if re.match(r"^(表|Table)\s*", t, flags=re.IGNORECASE):
-            return t[:80]
-    return ""
+        if re.match(r"^(?:表\s*[A-Za-z0-9０-９]|Table\s+[A-Za-z0-9])", t, flags=re.IGNORECASE):
+            titles.append(t[:80])
+    return titles[0] if len(set(titles)) == 1 else ""
 
 
 def _table_summary(title: str, table_text: str) -> str:

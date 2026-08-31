@@ -79,6 +79,25 @@ def test_object_client_never_raises_injected_budget_and_marks_invalid_json():
     assert "SECRET_RESPONSE" not in json.dumps(info)
 
 
+def test_table_client_returns_fenced_html_without_json_wrapper():
+    client = VLMClient.__new__(VLMClient)
+    client.max_tokens = 20000
+    client.last_call_info = {}
+    calls = []
+
+    def mock_call(path, prompt, max_tokens):
+        calls.append((path, prompt, max_tokens))
+        client.last_call_info = {"mode": "stream", "finish_reason": "stop", "effective_max_tokens": max_tokens}
+        return f"```html\n{TABLE}\n```"
+
+    client._call_image_prompt = mock_call
+
+    assert client.extract_table_html("crop.png", block(), compact=False) == TABLE
+    assert calls[0][2] == 16384
+    assert "no JSON" in calls[0][1]
+    assert client.last_object_call_info["json_status"] == "html"
+
+
 @pytest.mark.parametrize("changes,reason", [
     ({"layout_id": "foreign"}, "layout_id_mismatch"),
     ({"type": "figure"}, "object_type_mismatch"),
@@ -140,6 +159,17 @@ class ContentClient:
         self.last_object_call_info = {"response_chars": 42, "json_status": "object", **info}
         return value
 
+    def extract_table_html(self, path, target, compact=False):
+        self.calls.append((path, copy.deepcopy(target), compact))
+        response = next(self.responses)
+        if isinstance(response, Exception):
+            raise response
+        value, info = response if isinstance(response, tuple) else (response, {})
+        self.last_object_call_info = {"response_chars": 42, "json_status": "html", **info}
+        if isinstance(value, dict):
+            return value.get("markdown", "")
+        return value
+
 
 def recover(monkeypatch, responses, kinds=("table",), max_objects=8, enabled=True):
     raw = fixtures._layout_raw([
@@ -183,6 +213,18 @@ def test_incomplete_crop_retries_once_compact_then_recovers_original_object(monk
     assert "SECRET_ORIGINAL_FRAGMENT" not in json.dumps(diagnostics)
 
 
+def test_table_recovery_adds_ledger_metadata_to_plain_html(monkeypatch):
+    outcome, client, _, (_, calls, diagnostics) = recover(monkeypatch, [TABLE])
+
+    assert calls == 1
+    assert client.calls[0][2] is False
+    payload = outcome["payloads"]["tables"][0]
+    assert payload["markdown"] == TABLE
+    assert payload["layout_id"] == "p1-o001-table"
+    assert payload["source"] == "glm_ocr_layout+vlm_object_crop"
+    assert diagnostics["objects"][0]["attempts"][0]["json_status"] == "html"
+
+
 def test_two_invalid_crops_stay_failed_and_do_not_block_formula_or_figure(monkeypatch):
     outcome, client, _, (_, vlm_calls, diagnostics) = recover(monkeypatch, [
         candidate(markdown=PARTIAL), candidate(markdown=PARTIAL),
@@ -197,6 +239,23 @@ def test_two_invalid_crops_stay_failed_and_do_not_block_formula_or_figure(monkey
     assert diagnostics["objects"][0]["outcome"] == "failed"
 
 
+def test_layout_table_with_synthetic_placeholder_columns_requires_crop_recovery():
+    raw = fixtures._layout_raw([{
+        "index": 10,
+        "label": "table",
+        "bbox_2d": [10, 20, 90, 80],
+        "content": "| 参数 | 数值 | Col3 | Col4 |\n"
+                   "| --- | --- | --- | --- |\n"
+                   "| 0.35 | 1.480 |  |  |",
+    }])
+
+    outcome = ledger.build_layout_outcome(raw, page_no=1, fallback_width=100, fallback_height=100)
+
+    assert outcome["layout"][0]["status"] == "FAILED"
+    assert outcome["layout"][0]["error"]["code"] == "layout_table_synthetic_columns"
+    assert [item["layout_id"] for item in ledger.recovery_blocks(outcome)] == ["p1-o001-table"]
+
+
 def test_length_finish_reason_rejects_even_closed_valid_json(monkeypatch):
     outcome, _, _, (_, count, diagnostics) = recover(monkeypatch, [
         (candidate(), {"finish_reason": "length", "truncated": True}),
@@ -208,13 +267,13 @@ def test_length_finish_reason_rejects_even_closed_valid_json(monkeypatch):
 
 
 @pytest.mark.parametrize("response,reason", [
-    (candidate(layout_id="foreign SECRET_ID"), "layout_id_mismatch"),
-    (candidate(type="formula"), "object_type_mismatch"),
+    (candidate("formula", 1, layout_id="foreign SECRET_ID"), "layout_id_mismatch"),
+    (candidate("formula", 1, type="figure"), "object_type_mismatch"),
     (RuntimeError("SECRET_API_KEY https://private.example"), "RuntimeError"),
 ])
 def test_identity_errors_and_provider_exceptions_are_isolated_not_blindly_retried(monkeypatch, response, reason):
     outcome, client, _, (_, count, diag) = recover(monkeypatch, [response, candidate("figure", 2)],
-                                                 kinds=("table", "figure"))
+                                                 kinds=("formula", "figure"))
     assert count == 2
     assert len(client.calls) == 2
     assert diag["objects"][0]["attempts"][0]["reason"] == reason
@@ -254,10 +313,10 @@ def test_taskmanager_persists_redacted_attempt_diagnostics(monkeypatch, tmp_path
 
 
 @pytest.mark.parametrize("initial,info,reason", [
-    ({}, {"json_status": "invalid"}, "response_json_invalid"),
-    ({}, {"json_status": "empty"}, "response_empty"),
-    ({}, {"json_status": "object"}, "response_empty"),
-    ({}, {"json_status": "non_object"}, "response_invalid"),
+    ({}, {"json_status": "invalid"}, "table_content_empty"),
+    ({}, {"json_status": "empty"}, "table_content_empty"),
+    ({}, {"json_status": "object"}, "table_content_empty"),
+    ({}, {"json_status": "non_object"}, "table_content_empty"),
 ])
 def test_malformed_or_missing_object_retries_and_preserves_each_attempt(monkeypatch, initial, info, reason):
     outcome, client, _, (_, count, diag) = recover(monkeypatch, [(initial, info), candidate()])
@@ -268,13 +327,13 @@ def test_malformed_or_missing_object_retries_and_preserves_each_attempt(monkeypa
 
 
 def test_unmatched_target_diagnostic_survives_later_success(monkeypatch):
-    outcome, _, _, _ = recover(monkeypatch, [candidate(layout_id="SECRET_FOREIGN_ID"), candidate("figure", 2)],
-                               kinds=("table", "figure"))
-    assert outcome["unmatched_recovery_refs"] == ["p1-o001-table:layout_id_mismatch"]
+    outcome, _, _, _ = recover(monkeypatch, [candidate("formula", 1, layout_id="SECRET_FOREIGN_ID"), candidate("figure", 2)],
+                               kinds=("formula", "figure"))
+    assert outcome["unmatched_recovery_refs"] == ["p1-o001-formula:layout_id_mismatch"]
     reconciliation = ledger.reconcile_layout("EXTRACTED", outcome["layout"], outcome["payloads"],
                                               outcome["unmatched_recovery_refs"])
     assert reconciliation["complete"] is False
-    assert reconciliation["review_required_layout_ids"] == ["p1-o001-table"]
+    assert reconciliation["review_required_layout_ids"] == ["p1-o001-formula"]
 
 
 def test_provider_content_filter_cannot_be_promoted_or_blindly_retried(monkeypatch):
@@ -326,7 +385,10 @@ def test_real_local_upload_crop_and_client_parser_with_mocked_wire(monkeypatch, 
         image = fitz.Pixmap(base64.b64decode(message[1]["image_url"]["url"].split(",", 1)[1]))
         wire_calls.append({"budget": kwargs["max_tokens"], "size": [image.width, image.height],
                            "prompt": message[0]["text"]})
-        return json.dumps(next(responses)), "stream", "stop"
+        response = next(responses)
+        if "Return ONLY one complete valid HTML" in message[0]["text"]:
+            return response.get("markdown", ""), "stream", "stop"
+        return json.dumps(response), "stream", "stop"
 
     monkeypatch.setattr(VLMClient, "_chat_completion_with_stream_fallback", wire)
     start = getattr(server.start_task, "fn", server.start_task)

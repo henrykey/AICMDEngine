@@ -938,6 +938,11 @@ class LayoutLedgerVLMClient:
             return {"layout_id": block["layout_id"], "type": block["type"], "status": "FAILED", "complete": False}
         return {**values[0], "type": block["type"], "status": "EXTRACTED", "complete": True}
 
+    def extract_table_html(self, image_path, block, compact=False):
+        result = self.extract_object_structured(image_path, block, compact=compact)
+        self.last_object_call_info["json_status"] = "html"
+        return result.get("markdown", "")
+
     def cleanup_markdown_table_noise(self, markdown_text):
         return markdown_text
 
@@ -1090,6 +1095,48 @@ def test_layout_recovery_crop_clamps_bbox_and_keeps_small_padding(tmp_path):
         "padding_ratio": 0.02,
     }
     assert (cropped_pixmap.width, cropped_pixmap.height) == (22, 18)
+
+
+def test_layout_caption_survives_table_recovery_without_reusing_previous_title(monkeypatch):
+    table = "<table><tr><td>A</td></tr></table>"
+    result = _run_layout_ledger_page(monkeypatch, _layout_raw([
+        {"label": "table_caption", "bbox_2d": [10, 1, 90, 8], "content": "表 8（续）"},
+        {"label": "table", "bbox_2d": [10, 10, 90, 40], "content": table},
+        {"label": "table_caption", "bbox_2d": [10, 42, 90, 48], "content": "表 9 修正系数"},
+        {"label": "table", "bbox_2d": [10, 50, 90, 90], "content": "<table><tr><td>"},
+    ]), recovered={"tables": [{"layout_id": "p1-o004-table", "markdown": table.replace("A", "B")}]})
+    assert [t["title"] for t in result["elements"]["tables"]] == ["表 8（续）", "表 9 修正系数"]
+
+
+def test_layout_untitled_table_does_not_inherit_first_page_caption(monkeypatch):
+    result = _run_layout_ledger_page(monkeypatch, _layout_raw([
+        {"label": "table_caption", "bbox_2d": [10, 1, 90, 8], "content": "表 8（续）"},
+        {"label": "table", "bbox_2d": [10, 10, 90, 40], "content": "<table><tr><td>A</td></tr></table>"},
+        {"label": "table", "bbox_2d": [10, 50, 90, 90], "content": "<table><tr><td>B</td></tr></table>"},
+    ]))
+    assert result["elements"]["tables"][1]["title"] == ""
+
+
+@pytest.mark.parametrize("caption,box", [
+    ("图 3 示意图", [10, 1, 90, 8]),
+    ("表 3 系数", [1, 1, 9, 8]),
+    ("表 3 系数", [10, 50, 90, 60]),
+])
+def test_table_caption_requires_table_evidence_and_matching_geometry(caption, box):
+    outcome = page_processor.build_layout_outcome(_layout_raw([
+        {"label": "caption", "bbox_2d": box, "content": caption},
+        {"label": "table", "bbox_2d": [10, 10, 90, 40], "content": "<table><tr><td>A</td></tr></table>"},
+    ]), 1, 100, 100)
+    assert outcome["payloads"]["tables"][0]["title"] == ""
+
+
+def test_legacy_table_title_fallback_does_not_guess_on_multi_caption_page():
+    assert page_processor._title_for_table("<table></table>", ["表 8（续）", "表 9 系数"]) == ""
+    # Even a single caption must not be reassigned to a layout object without a bound title.
+    elements = page_processor._build_layout_output_elements("表 8（续）", {"tables": [
+        {"layout_id": "p1-o004-table", "markdown": "<table><tr><td>B</td></tr></table>"}
+    ]}, "glm_ocr_layout")
+    assert elements["tables"][0]["title"] == ""
 
 
 def test_process_page_layout_uses_object_content_contract_for_original_layout_id(monkeypatch):
