@@ -159,6 +159,17 @@ def test_protocol_injects_ocr_config_when_schema_declares_ocr_config():
     assert "vlm_config" not in args
 
 
+def test_protocol_injects_ocr_config_without_api_key(monkeypatch):
+    monkeypatch.setattr(FakeConfigLoader, "get_api_key", lambda self, ref: None)
+    args = _protocol_inject("extract_page_tables", schemas={"extract_page_tables": _tool_info("ocr_config")})
+
+    config = args["ocr_config"]["glm_ocr"]
+    assert config["enabled"] is True
+    assert config["model"] == FakeProvider.model
+    assert config["base_url"] == FakeProvider.base_url
+    assert config["api_key"] == ""
+
+
 def test_protocol_reads_input_schema_alias():
     args = _protocol_inject("revise_page_markdown", schemas={"revise_page_markdown": _tool_info("vlm_config", schema_key="input_schema")})
 
@@ -251,6 +262,17 @@ def test_rest_injects_ocr_config_when_schema_declares_ocr_config():
     assert registry.kwargs["ocr_config"]["glm_ocr"]["enabled"] is True
     assert registry.kwargs["ocr_config"]["glm_ocr"]["provider"] == "glmocr"
     assert "vlm_config" not in registry.kwargs
+
+
+def test_rest_injects_ocr_config_without_api_key(monkeypatch):
+    monkeypatch.setattr(FakeConfigLoader, "get_api_key", lambda self, ref: None)
+    _, registry = _rest_execute("extract_page_tables", schemas={"extract_page_tables": _tool_info("ocr_config")})
+
+    config = registry.kwargs["ocr_config"]["glm_ocr"]
+    assert config["enabled"] is True
+    assert config["model"] == FakeProvider.model
+    assert config["base_url"] == FakeProvider.base_url
+    assert config["api_key"] == ""
 
 
 def test_protocol_and_rest_paths_inject_consistently_for_combined_schema():

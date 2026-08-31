@@ -30,7 +30,7 @@ class OpenAICompatibleOcrClient:
         self.mode = str(cfg.get("mode") or cfg.get("api_type") or cfg.get("endpoint_type") or "").strip().lower()
         self.layout_url = str(cfg.get("layout_url") or cfg.get("api_url") or "").strip()
         self.use_layout_parsing = self._should_use_layout_parsing()
-        self.enabled = bool(cfg.get("enabled", False) and self.model and self.api_key and self.base_url)
+        self.enabled = bool(cfg.get("enabled", False) and self.model and self.base_url)
         self._client = None
         if self.enabled and not self.use_layout_parsing:
             from openai import OpenAI
@@ -103,8 +103,8 @@ class OpenAICompatibleOcrClient:
             "need_layout_visualization": bool(need_layout_visualization),
         }
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
+            **({"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}),
             **{str(k): str(v) for k, v in self.extra_headers.items()},
         }
         body = json.dumps(payload).encode("utf-8")

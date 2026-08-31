@@ -7,6 +7,7 @@ import types
 from pathlib import Path
 
 import fitz
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -281,6 +282,68 @@ def test_glm_ocr_layout_file_payload_uses_data_uri():
     assert client._data_uri_for_file("/tmp/page.png", "abc") == "data:image/png;base64,abc"
     assert client._data_uri_for_file("/tmp/page.jpg", "abc") == "data:image/jpeg;base64,abc"
     assert client._data_uri_for_file("/tmp/page.pdf", "abc") == "data:application/pdf;base64,abc"
+
+
+@pytest.mark.parametrize("api_key", [None, "", "secret-key"])
+@pytest.mark.parametrize("mode", ["layout_parsing", "chat"])
+def test_ocr_optional_api_key_request_headers(monkeypatch, tmp_path, api_key, mode):
+    import httpx
+    import io
+
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-leak")
+    config = {
+        "enabled": True,
+        "model": "self-hosted-ocr",
+        "base_url": "http://ocr.example.test/v1",
+        "mode": mode,
+        "max_retries": 0,
+    }
+    if api_key is not None:
+        config["api_key"] = api_key
+    client = OpenAICompatibleOcrClient(config)
+    client.ensure_enabled()
+    page = tmp_path / "page.png"
+    page.write_bytes(base64.b64decode(PNG_DATA))
+    observed = []
+
+    def fake_urlopen(request, timeout):
+        observed.append({key.lower(): value for key, value in request.header_items()})
+        return io.BytesIO(b'{"md_results": "OCR text"}')
+
+    def fake_send(self, request, **kwargs):
+        observed.append(dict(request.headers))
+        return httpx.Response(
+            200,
+            request=request,
+            json={"choices": [{"message": {"content": "OCR text"}}]},
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(httpx.Client, "send", fake_send)
+    try:
+        result = client.extract_page(str(page))
+    finally:
+        if client._client is not None:
+            client._client.close()
+
+    assert result.page_text == "OCR text"
+    assert len(observed) == 1
+    assert observed[0]["content-type"] == "application/json"
+    if api_key:
+        assert observed[0]["authorization"] == f"Bearer {api_key}"
+    else:
+        assert "authorization" not in observed[0]
+
+
+@pytest.mark.parametrize("missing_field", ["enabled", "model", "base_url"])
+def test_ocr_still_requires_enabled_model_and_base_url(missing_field):
+    config = {"enabled": True, "model": "glm-ocr", "base_url": "http://ocr.example.test/v1"}
+    config.pop(missing_field)
+    client = OpenAICompatibleOcrClient(config)
+
+    assert client.enabled is False
+    with pytest.raises(ValueError, match="config is required"):
+        client.ensure_enabled()
 
 
 def test_glm_ocr_layout_table_title_is_preserved():

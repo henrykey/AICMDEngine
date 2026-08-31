@@ -450,10 +450,7 @@ class MCPProtocolHandler:
             logger.warning(f"[{mcp_name}] provider '{provider_name}' not found, skip {label} injection")
             return None
 
-        api_key = provider_manager.config_loader.get_api_key(provider.api_key_ref)
-        if not api_key:
-            logger.warning(f"[{mcp_name}] provider '{provider_name}' api_key not available, skip {label} injection")
-            return None
+        api_key = provider_manager.config_loader.get_api_key(provider.api_key_ref) or ""
 
         return {
             "provider": provider.name,

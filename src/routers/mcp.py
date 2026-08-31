@@ -90,9 +90,7 @@ def _build_vlm_config_from_provider(request: Request, provider_name: str) -> Opt
     provider = manager.get_provider(provider_name)
     if not provider:
         return None
-    api_key = manager.config_loader.get_api_key(provider.api_key_ref)
-    if not api_key:
-        return None
+    api_key = manager.config_loader.get_api_key(provider.api_key_ref) or ""
     return {
         "provider": provider.name,
         "model": provider.model,
