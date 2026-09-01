@@ -405,6 +405,10 @@ def process_page(
                 "bbox_space": "normalized_page",
                 "page_width": 1.0,
                 "page_height": 1.0,
+                "source_page_width": layout_outcome.get("source_page_width"),
+                "source_page_height": layout_outcome.get("source_page_height"),
+                "source_bbox_space": layout_outcome.get("source_bbox_space"),
+                "source_page_index": layout_outcome.get("source_page_index"),
                 "layout": layout_outcome.get("layout") or [],
                 "reconciliation": reconciliation,
                 "layout_recovery": layout_outcome.get("recovery") or {

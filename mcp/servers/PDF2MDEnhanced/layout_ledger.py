@@ -112,6 +112,10 @@ def build_layout_outcome(
     return {
         "layout_status": "EXTRACTED",
         "layout_error": "",
+        "source_page_width": page_width,
+        "source_page_height": page_height,
+        "source_bbox_space": "pixel_page",
+        "source_page_index": 0,
         "layout": layout,
         "blocks": blocks,
         "payloads": payloads,

@@ -1026,6 +1026,10 @@ def test_process_page_layout_ledger_is_authoritative_for_two_tables(monkeypatch)
     )
 
     assert result["layout_status"] == "EXTRACTED"
+    assert result["source_page_width"] == 100
+    assert result["source_page_height"] == 100
+    assert result["source_bbox_space"] == "pixel_page"
+    assert result["source_page_index"] == 0
     assert [item["type"] for item in result["layout"]] == ["text", "table", "text", "table", "text"]
     assert [item["reading_order"] for item in result["layout"]] == [1, 2, 3, 4, 5]
     assert result["layout"][1]["bbox"] == [0.1, 0.2, 0.9, 0.4]
