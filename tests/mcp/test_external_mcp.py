@@ -399,6 +399,100 @@ class TestExternalMCPServer:
         # 不应该抛出异常
         asyncio.run(mcp._handle_message(message))
 
+    @pytest.mark.asyncio
+    async def test_disconnect_reconnects_and_restores_tools(self):
+        mcp = ExternalMCPServer(
+            name="recovering",
+            url="ws://recovering.example/mcp",
+            transport="websocket",
+        )
+        mcp.is_initialized = True
+        mcp._reconnect_enabled = True
+        attempts = 0
+
+        async def reconnect_once():
+            nonlocal attempts
+            attempts += 1
+            await mcp._replace_discovered_tools([
+                {
+                    "name": "restored_tool",
+                    "description": "restored",
+                    "inputSchema": {"type": "object", "properties": {}},
+                }
+            ])
+
+        mcp._connect_transport = reconnect_once
+        mcp._reconnect_base_delay = 0
+        mcp._reconnect_max_delay = 0
+
+        class ClosedWebSocket:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise StopAsyncIteration
+
+        mcp.websocket = ClosedWebSocket()
+        await mcp._read_websocket_messages_loop()
+        await mcp._reconnect_task
+
+        assert attempts == 1
+        assert mcp.is_initialized is True
+        assert set(mcp.tools) == {"restored_tool"}
+        await mcp.close()
+
+    @pytest.mark.asyncio
+    async def test_reconnect_failures_back_off_and_do_not_duplicate_task(self):
+        mcp = ExternalMCPServer(
+            name="recovering",
+            url="ws://recovering.example/mcp",
+            transport="websocket",
+        )
+        attempts = 0
+        delays = []
+
+        async def flaky_connect():
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                raise ConnectionError("still offline")
+
+        async def record_sleep(delay):
+            delays.append(delay)
+
+        mcp._connect_transport = flaky_connect
+        mcp._sleep = record_sleep
+        mcp._reconnect_enabled = True
+        mcp._reconnect_base_delay = 1
+        mcp._reconnect_max_delay = 2
+
+        mcp.schedule_reconnect()
+        reconnect_task = mcp._reconnect_task
+        mcp.schedule_reconnect()
+
+        assert mcp._reconnect_task is reconnect_task
+        await reconnect_task
+        assert attempts == 3
+        assert delays == [1, 2, 2]
+        assert mcp.is_initialized is True
+        await mcp.close()
+
+    @pytest.mark.asyncio
+    async def test_tool_refresh_replaces_registration_without_duplicates(self):
+        mcp = ExternalMCPServer(name="test", command="echo")
+        await mcp._replace_discovered_tools([
+            {"name": "old", "description": "old", "inputSchema": {}},
+        ])
+
+        await mcp._replace_discovered_tools([
+            {"name": "new", "description": "new", "inputSchema": {}},
+            {"name": "new", "description": "newer", "inputSchema": {}},
+        ])
+
+        assert set(mcp.tools) == {"new"}
+        assert set(mcp.tools_cache) == {"new"}
+        assert mcp.tools["new"].description == "newer"
+
 
 class TestExternalMCPIntegration:
     """集成测试 - 需要真实的外部MCP进程"""

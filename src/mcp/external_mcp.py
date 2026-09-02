@@ -85,6 +85,17 @@ class ExternalMCPServer(BaseMCPServer):
         # 工具缓存
         self.tools_cache: Dict[str, Dict[str, Any]] = {}
 
+        # 连接生命周期。配置身份由 registry 持有，连接失败只改变可用状态。
+        self._closing = False
+        self._reconnect_enabled = False
+        self._reconnect_task: Optional[asyncio.Task] = None
+        self._health_task: Optional[asyncio.Task] = None
+        self._connection_lock = asyncio.Lock()
+        self._reconnect_base_delay = 1.0
+        self._reconnect_max_delay = 30.0
+        self._health_interval = 30.0
+        self._sleep = asyncio.sleep
+
         # 验证参数
         if transport == "stdio" and not command:
             raise ValueError(f"'command' is required for stdio transport in '{name}'")
@@ -98,25 +109,96 @@ class ExternalMCPServer(BaseMCPServer):
 
     async def initialize(self) -> None:
         """初始化与外部MCP的连接"""
+        self._closing = False
+        self._reconnect_enabled = True
         try:
-            if self.transport == "stdio":
-                await self._connect_stdio()
-            elif self.transport == "websocket":
-                await self._connect_websocket()
-            elif self.transport in ("http", "http-bridge", "sse"):
-                await self._connect_http()
-            else:
-                raise ValueError(f"Unsupported transport: {self.transport}")
-
-            # 标记为已初始化
-            self.is_initialized = True
-            self.last_heartbeat = datetime.now()
+            await self._connect_once()
 
             logger.info(f"Initialized external MCP '{self.name}'")
 
         except Exception as e:
+            self._mark_unavailable_and_reconnect()
             logger.error(f"Failed to initialize external MCP '{self.name}': {e}")
             raise
+
+    async def _connect_transport(self) -> None:
+        if self.transport == "stdio":
+            await self._connect_stdio()
+        elif self.transport == "websocket":
+            await self._connect_websocket()
+        elif self.transport in ("http", "http-bridge", "sse"):
+            await self._connect_http()
+        else:
+            raise ValueError(f"Unsupported transport: {self.transport}")
+
+    async def _connect_once(self) -> None:
+        async with self._connection_lock:
+            if self.is_initialized:
+                return
+            await self._reset_transport()
+            await self._connect_transport()
+            self.is_initialized = True
+            self.last_heartbeat = datetime.now()
+            self._start_health_check()
+
+    def schedule_reconnect(self) -> None:
+        """Schedule one event-driven reconnect loop for this configured server."""
+        if self._closing or not self._reconnect_enabled:
+            return
+        if self._reconnect_task and not self._reconnect_task.done():
+            return
+        self._reconnect_task = asyncio.create_task(self._reconnect_loop())
+
+    def _mark_unavailable_and_reconnect(self) -> None:
+        self.is_initialized = False
+        self.schedule_reconnect()
+
+    async def _reconnect_loop(self) -> None:
+        delay = self._reconnect_base_delay
+        try:
+            while not self._closing and self._reconnect_enabled:
+                await self._sleep(delay)
+                try:
+                    await self._connect_once()
+                    logger.info("Reconnected external MCP '%s'", self.name)
+                    return
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    self.is_initialized = False
+                    logger.warning(
+                        "Reconnect failed for external MCP '%s'; retrying in %.1fs: %s",
+                        self.name,
+                        min(delay * 2, self._reconnect_max_delay),
+                        exc,
+                    )
+                    delay = min(delay * 2, self._reconnect_max_delay)
+        finally:
+            if self._reconnect_task is asyncio.current_task():
+                self._reconnect_task = None
+
+    def _start_health_check(self) -> None:
+        if self._closing:
+            return
+        if self._health_task and not self._health_task.done():
+            return
+        self._health_task = asyncio.create_task(self._health_check_loop())
+
+    async def _health_check_loop(self) -> None:
+        """Low-frequency tools/list health check; failures enter reconnect backoff."""
+        try:
+            while not self._closing and self.is_initialized:
+                await asyncio.sleep(self._health_interval)
+                await self._discover_tools()
+                self.last_heartbeat = datetime.now()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("External MCP '%s' health check failed: %s", self.name, exc)
+            self._mark_unavailable_and_reconnect()
+        finally:
+            if self._health_task is asyncio.current_task():
+                self._health_task = None
 
     async def _connect_stdio(self):
         """通过stdio连接外部MCP"""
@@ -538,16 +620,10 @@ class ExternalMCPServer(BaseMCPServer):
 
     async def _discover_tools(self):
         """发现外部MCP提供的工具"""
-        try:
-            if self.transport in ("http", "http-bridge", "sse"):
-                # HTTP方式：发送GET /tools请求
-                await self._discover_tools_http()
-            else:
-                # JSON-RPC方式：stdio 和 websocket
-                await self._discover_tools_jsonrpc()
-
-        except Exception as e:
-            logger.error(f"Failed to discover tools from '{self.name}': {e}")
+        if self.transport in ("http", "http-bridge", "sse"):
+            await self._discover_tools_http()
+        else:
+            await self._discover_tools_jsonrpc()
 
     async def _discover_tools_jsonrpc(self):
         """通过JSON-RPC发现工具（stdio/websocket）"""
@@ -561,19 +637,13 @@ class ExternalMCPServer(BaseMCPServer):
 
         if response and "result" in response:
             tools = response["result"].get("tools", [])
-
-            # 清空现有工具
-            self.tools = {}
-
-            # 注册所有发现的工具
-            for tool_def in tools:
-                await self._register_external_tool(tool_def)
+            await self._replace_discovered_tools(tools)
 
             logger.info(
                 f"Discovered {len(tools)} tools from external MCP '{self.name}'"
             )
         else:
-            logger.warning(f"No tools returned from external MCP '{self.name}'")
+            raise RuntimeError(f"No tools returned from external MCP '{self.name}'")
 
     async def _discover_tools_http(self):
         """通过 HTTP 协议发现工具（自动选择 streamable-http 或 legacy SSE）"""
@@ -593,19 +663,13 @@ class ExternalMCPServer(BaseMCPServer):
 
             if response and "result" in response:
                 tools = response["result"].get("tools", [])
-
-                # 清空现有工具
-                self.tools = {}
-
-                # 注册所有发现的工具
-                for tool_def in tools:
-                    await self._register_external_tool(tool_def)
+                await self._replace_discovered_tools(tools)
 
                 logger.info(
                     f"Discovered {len(tools)} tools from HTTP MCP '{self.name}'"
                 )
             else:
-                logger.warning(f"No tools returned from HTTP MCP '{self.name}'")
+                raise RuntimeError(f"No tools returned from HTTP MCP '{self.name}'")
 
         except Exception as e:
             logger.error(f"Error discovering tools from HTTP MCP '{self.name}': {e}")
@@ -755,6 +819,13 @@ class ExternalMCPServer(BaseMCPServer):
         tool_name = tool_def["name"]  # 保持原始名称，不带前缀
         self.tools_cache[tool_name] = tool_def
 
+        self.register_tool(self._build_external_tool(tool_def))
+
+        logger.debug(f"Registered external tool '{tool_name}' from '{self.name}'")
+
+    def _build_external_tool(self, tool_def: Dict[str, Any]) -> Tool:
+        tool_name = tool_def["name"]
+
         # 创建工具描述
         description = tool_def.get("description", "")
         input_schema = tool_def.get("inputSchema", {})
@@ -763,15 +834,22 @@ class ExternalMCPServer(BaseMCPServer):
         async def external_tool_wrapper(**kwargs):
             return await self._execute_external_tool(tool_name, kwargs)
 
-        # 注册到MCP（工具名不带前缀，前缀只用于协议层路由）
-        self.register_tool(Tool(
+        return Tool(
             name=tool_name,
             description=description,
             input_schema=input_schema,
             handler=external_tool_wrapper
-        ))
+        )
 
-        logger.debug(f"Registered external tool '{tool_name}' from '{self.name}'")
+    async def _replace_discovered_tools(self, tool_defs: List[Dict[str, Any]]) -> None:
+        """Build a complete tool snapshot, then expose it with one atomic swap."""
+        tools: Dict[str, Tool] = {}
+        cache: Dict[str, Dict[str, Any]] = {}
+        for tool_def in tool_defs:
+            tool_name = tool_def["name"]
+            cache[tool_name] = tool_def
+            tools[tool_name] = self._build_external_tool(tool_def)
+        self.tools, self.tools_cache = tools, cache
 
     async def _execute_external_tool(
         self,
@@ -890,17 +968,20 @@ class ExternalMCPServer(BaseMCPServer):
                 if "result" in response:
                     return self._build_tool_result_from_response_result(tool_name, response["result"])
 
+            self._mark_unavailable_and_reconnect()
             return ToolResult.error(
                 "No response from external MCP",
                 error_code="NO_RESPONSE"
             )
 
         except asyncio.TimeoutError:
+            self._mark_unavailable_and_reconnect()
             error_msg = f"HTTP tool '{tool_name}' execution timed out ({self.timeout}s)"
             logger.error(error_msg)
             return ToolResult.error(error_msg, error_code="TIMEOUT")
 
         except Exception as e:
+            self._mark_unavailable_and_reconnect()
             error_msg = f"Error executing HTTP tool '{tool_name}': {e}"
             logger.error(error_msg)
             return ToolResult.error(error_msg, error_code="EXECUTION_ERROR")
@@ -1063,7 +1144,8 @@ class ExternalMCPServer(BaseMCPServer):
         # 检查WebSocket连接，如果断开则重新连接
         if self.transport == "websocket" and self.websocket is None:
             logger.warning(f"WebSocket connection to '{self.name}' lost, reconnecting...")
-            await self._connect_websocket()
+            self.is_initialized = False
+            await self._connect_once()
 
         # 根据transport类型检查连接
         if self.transport == "stdio":
@@ -1094,6 +1176,7 @@ class ExternalMCPServer(BaseMCPServer):
                     logger.warning(f"WebSocket send failed for '{self.name}': {send_err}")
                     # 清理连接
                     self.websocket = None
+                    self._mark_unavailable_and_reconnect()
                     # 清理pending request
                     self.pending_requests.pop(request_id, None)
                     # 重新抛出异常
@@ -1120,6 +1203,7 @@ class ExternalMCPServer(BaseMCPServer):
             # WebSocket连接可能已失效，标记为需要重新连接
             if self.transport == "websocket":
                 self.websocket = None
+                self._mark_unavailable_and_reconnect()
             raise
         except Exception as e:
             logger.error(f"Error sending request to '{self.name}': {e}")
@@ -1128,11 +1212,13 @@ class ExternalMCPServer(BaseMCPServer):
             # WebSocket连接可能已失效，标记为需要重新连接
             if self.transport == "websocket":
                 self.websocket = None
+                self._mark_unavailable_and_reconnect()
             raise
 
     async def _read_messages_loop(self):
         """持续读取外部MCP的消息"""
-        if not self.process or self.process.stdout is None:
+        process = self.process
+        if not process or process.stdout is None:
             logger.error("Cannot start message loop: no stdout")
             return
 
@@ -1141,14 +1227,14 @@ class ExternalMCPServer(BaseMCPServer):
 
             while True:
                 # 检查进程是否还在运行
-                if self.process.returncode is not None:
+                if process.returncode is not None:
                     logger.warning(f"External MCP '{self.name}' process terminated")
                     break
 
                 # 读取数据
                 try:
                     chunk = await asyncio.wait_for(
-                        self.process.stdout.read(4096),
+                        process.stdout.read(4096),
                         timeout=0.1
                     )
 
@@ -1193,17 +1279,21 @@ class ExternalMCPServer(BaseMCPServer):
                         RuntimeError("External MCP connection closed")
                     )
             self.pending_requests.clear()
+            if self.process is process:
+                self.process = None
+                self._mark_unavailable_and_reconnect()
 
     async def _read_websocket_messages_loop(self):
         """WebSocket 消息接收循环"""
-        if not self.websocket:
+        websocket = self.websocket
+        if not websocket:
             logger.error("Cannot start WebSocket message loop: no connection")
             return
 
         try:
             logger.debug(f"Starting WebSocket message loop for '{self.name}'")
 
-            async for message in self.websocket:
+            async for message in websocket:
                 try:
                     data = json.loads(message)
                     logger.debug(f"Received WebSocket message from '{self.name}': {str(data)[:200]}...")
@@ -1220,13 +1310,15 @@ class ExternalMCPServer(BaseMCPServer):
         except Exception as e:
             logger.error(f"WebSocket message loop error for '{self.name}': {e}")
         finally:
-            # 清理所有pending requests
-            for future in self.pending_requests.values():
-                if not future.done():
-                    future.set_exception(
-                        RuntimeError("WebSocket MCP connection closed")
-                    )
-            self.pending_requests.clear()
+            if self.websocket is websocket:
+                self.websocket = None
+                for future in self.pending_requests.values():
+                    if not future.done():
+                        future.set_exception(
+                            RuntimeError("WebSocket MCP connection closed")
+                        )
+                self.pending_requests.clear()
+                self._mark_unavailable_and_reconnect()
 
     async def _handle_message(self, message: Dict[str, Any]):
         """处理收到的消息"""
@@ -1255,9 +1347,60 @@ class ExternalMCPServer(BaseMCPServer):
         self.request_id += 1
         return self.request_id
 
+    async def _reset_transport(self) -> None:
+        """Close stale transport resources without changing configured identity."""
+        if self._health_task and self._health_task is not asyncio.current_task():
+            self._health_task.cancel()
+            await asyncio.gather(self._health_task, return_exceptions=True)
+            self._health_task = None
+
+        if self.http_session:
+            try:
+                await self.http_session.close()
+            finally:
+                self.http_session = None
+                self.http_session_id = None
+                self.sse_mode = False
+
+        if self.websocket:
+            websocket = self.websocket
+            self.websocket = None
+            try:
+                await websocket.close()
+            except Exception:
+                pass
+
+        if self.process:
+            process = self.process
+            self.process = None
+            if process.returncode is None:
+                try:
+                    process.terminate()
+                    await asyncio.wait_for(process.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    process.kill()
+                    await process.wait()
+                except ProcessLookupError:
+                    pass
+
     async def close(self):
         """关闭连接并清理资源"""
         logger.info(f"Closing external MCP '{self.name}' (transport={self.transport})")
+
+        self._closing = True
+        self._reconnect_enabled = False
+        self.is_initialized = False
+        tasks = [
+            task
+            for task in (self._reconnect_task, self._health_task)
+            if task and task is not asyncio.current_task()
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._reconnect_task = None
+        self._health_task = None
 
         # 清理pending requests
         for future in self.pending_requests.values():
@@ -1267,43 +1410,7 @@ class ExternalMCPServer(BaseMCPServer):
                 )
         self.pending_requests.clear()
 
-        # 关闭 HTTP 会话
-        if self.transport in ("http", "http-bridge", "sse"):
-            if hasattr(self, 'http_session') and self.http_session:
-                try:
-                    await self.http_session.close()
-                    logger.info(f"HTTP session closed for '{self.name}'")
-                except Exception as e:
-                    logger.error(f"Error closing HTTP session: {e}")
-                finally:
-                    self.http_session = None
-
-        # 关闭 WebSocket 连接
-        if self.transport == "websocket" and self.websocket:
-            try:
-                await self.websocket.close()
-                logger.info(f"WebSocket connection closed for '{self.name}'")
-            except Exception as e:
-                logger.error(f"Error closing WebSocket connection: {e}")
-            finally:
-                self.websocket = None
-
-        # 终止进程 (stdio)
-        if self.transport == "stdio" and self.process:
-            try:
-                self.process.terminate()
-                await asyncio.wait_for(self.process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.warning(
-                    f"External MCP '{self.name}' did not terminate gracefully, "
-                    f"forcing kill"
-                )
-                self.process.kill()
-                await self.process.wait()
-            except Exception as e:
-                logger.error(f"Error terminating process: {e}")
-
-            self.process = None
+        await self._reset_transport()
 
         logger.info(f"Closed external MCP '{self.name}'")
 

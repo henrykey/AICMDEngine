@@ -109,7 +109,17 @@ class ExternalMCPManager:
                     replacement.external_config = dict(config)
                     await replacement.initialize()
                 except Exception as exc:
-                    if replacement is not None:
+                    if replacement is not None and current is None:
+                        self.registry.register_mcp(replacement)
+                        self.managed_names.add(name)
+                        schedule_reconnect = getattr(
+                            replacement,
+                            "schedule_reconnect",
+                            None,
+                        )
+                        if schedule_reconnect:
+                            schedule_reconnect()
+                    elif replacement is not None:
                         await self._close_server(replacement)
                     result["failed"][name] = str(exc)
                     result["success"] = False

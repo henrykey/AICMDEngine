@@ -18,6 +18,7 @@ class FakeExternalMCP:
         self.should_fail = should_fail
         self.initialized = False
         self.closed = False
+        self.reconnect_scheduled = False
 
     async def initialize(self):
         if self.should_fail:
@@ -26,6 +27,9 @@ class FakeExternalMCP:
 
     async def close(self):
         self.closed = True
+
+    def schedule_reconnect(self):
+        self.reconnect_scheduled = True
 
     def get_info(self):
         return {"tools": [{"name": "example_tool"}]}
@@ -157,3 +161,32 @@ async def _invalid_config_does_not_change_registry():
     assert result["success"] is False
     assert result["error"] == "bad yaml"
     assert registry.get_mcp("alpha") is original
+
+
+def test_failed_initial_connection_keeps_configured_server_identity():
+  asyncio.run(_failed_initial_connection_keeps_configured_server_identity())
+
+
+async def _failed_initial_connection_keeps_configured_server_identity():
+    registry = MCPRegistry()
+    manager = ExternalMCPManager(
+        registry=registry,
+        config_loader=lambda: {
+            "offline": {"transport": "http", "url": "http://offline:9000"}
+        },
+        server_factory=lambda name, config: FakeExternalMCP(
+            name=name,
+            should_fail=True,
+            **config,
+        ),
+    )
+
+    result = await manager.refresh()
+    server = registry.get_mcp("offline")
+
+    assert result["success"] is False
+    assert "offline" in result["failed"]
+    assert server is not None
+    assert server.closed is False
+    assert server.reconnect_scheduled is True
+    assert "offline" in manager.managed_names
