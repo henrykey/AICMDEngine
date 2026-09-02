@@ -14,8 +14,111 @@ from tests import test_pdf2md_enhanced_bad_text_policy as fixtures
 processor = fixtures.page_processor
 ledger = sys.modules[f"{fixtures.PACKAGE_NAME}.layout_ledger"]
 VLMClient = sys.modules[f"{fixtures.PACKAGE_NAME}.vlm_client"].DynamicVLMClient
+OCRClient = processor.OpenAICompatibleOcrClient
 TABLE = "<table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>"
 PARTIAL = "<table><tr><td>SECRET_ORIGINAL_FRAGMENT"
+
+
+@pytest.mark.parametrize("ocr_results,vlm_results,providers", [
+    ([TABLE], [], ["glm_ocr"]),
+    ([PARTIAL, TABLE], [], ["glm_ocr", "glm_ocr"]),
+    ([PARTIAL, PARTIAL], [PARTIAL, TABLE], ["glm_ocr", "glm_ocr", "vlm_ocr", "vlm_ocr"]),
+    ([RuntimeError("unavailable")], [TABLE], ["glm_ocr", "vlm_ocr"]),
+    ([PARTIAL, PARTIAL], [PARTIAL, PARTIAL], ["glm_ocr", "glm_ocr", "vlm_ocr", "vlm_ocr"]),
+])
+def test_table_crop_ocr_first_and_bounded_smaller_retries(tmp_path, ocr_results, vlm_results, providers):
+    source = tmp_path / "page.png"
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 1200, 1600), False)
+    pix.clear_with(255)
+    pix.save(str(source))
+    raw = fixtures._layout_raw([
+        {"label": "table", "bbox_2d": [10, 20, 90, 80], "content": PARTIAL},
+    ])
+    outcome = ledger.build_layout_outcome(raw, page_no=1, fallback_width=100, fallback_height=100)
+    calls = []
+
+    class OCR:
+        enabled = True
+        use_layout_parsing = True
+        results = iter(ocr_results)
+
+        def extract_table_html(self, path):
+            image = fitz.Pixmap(path)
+            calls.append(("glm_ocr", image.width, image.height))
+            result = next(self.results)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+    class VLM(ContentClient):
+        def extract_table_html(self, path, target, compact=False):
+            image = fitz.Pixmap(path)
+            calls.append(("vlm_ocr", image.width, image.height))
+            return super().extract_table_html(path, target, compact)
+
+    counts = processor._recover_layout_objects(
+        source, tmp_path, outcome, ledger.recovery_blocks(outcome), VLM(vlm_results),
+        bool(vlm_results), 8, 0.02, glm=OCR(), source_dpi=600,
+    )
+    assert [c[0] for c in calls] == providers
+    assert calls[0][1] <= 300 and calls[0][2] <= 400
+    for before, after in zip(calls, calls[1:]):
+        assert after[1] <= before[1] and after[2] <= before[2]
+        if before[0] == after[0]:
+            assert after[1] < before[1] and after[2] < before[2]
+    assert counts[:2] == (len(ocr_results), len(vlm_results))
+    succeeds = (vlm_results or ocr_results)[-1] == TABLE
+    assert outcome["layout"][0]["status"] == ("EXTRACTED" if succeeds else "FAILED")
+    assert outcome["layout"][0]["bbox"] == [0.1, 0.2, 0.9, 0.8]
+    if succeeds:
+        assert outcome["payloads"]["tables"][0]["markdown"] == TABLE
+    else:
+        assert outcome["payloads"]["tables"] == []
+        assert outcome["layout"][0]["review_required"] is True
+
+
+@pytest.mark.parametrize("html", [TABLE, PARTIAL, f"```html\n{TABLE}\n```"])
+def test_ocr_crop_keeps_raw_html_without_duplicate_markdown_projection(monkeypatch, html):
+    client = OCRClient({"enabled": True, "model": "glm-ocr", "base_url": "http://127.0.0.1:1"})
+    monkeypatch.setattr(client, "_call_layout_parsing_raw", lambda path: {
+        "md_results": html, "layout_details": [[{"label": "table", "content": html}]],
+    })
+    result = client.extract_table_html("mock-crop.png")
+    assert result == (TABLE if html.startswith("```") else html)
+    assert result.count("<table>") == 1
+    assert client.last_object_call_info["response_chars"] == len(html)
+
+
+def test_ocr_crop_does_not_guess_between_multiple_tables(monkeypatch):
+    client = OCRClient({"enabled": True, "model": "glm-ocr", "base_url": "http://127.0.0.1:1"})
+    monkeypatch.setattr(client, "_call_layout_parsing_raw", lambda path: {
+        "layout_details": [[{"label": "table", "content": TABLE}] * 2],
+    })
+    with pytest.raises(ValueError, match="ocr_crop_multiple_tables"):
+        client.extract_table_html("mock-crop.png")
+
+
+def test_ocr_crop_does_not_promote_nonempty_markdown_to_html(monkeypatch):
+    client = OCRClient({"enabled": True, "model": "glm-ocr", "base_url": "http://127.0.0.1:1"})
+    markdown = "| Col1 | Col2 |\n| --- | --- |\n| 1 | 2 |"
+    monkeypatch.setattr(client, "_call_layout_parsing_raw", lambda path: {"md_results": markdown})
+    assert client.extract_table_html("mock-crop.png") == ""
+    assert client.last_object_call_info["json_status"] == "invalid"
+
+
+@pytest.mark.parametrize("dpi,width,height", [(72, 600, 400), (150, 600, 400), (300, 300, 200), (650, 138, 92)])
+def test_crop_caps_actual_pixels_without_upscaling(tmp_path, dpi, width, height):
+    path = tmp_path / "page.png"
+    source = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 600, 400), False)
+    source.clear_with(255)
+    source.save(str(path))
+    crop, info = processor._crop_layout_block_image(
+        path, {"layout_id": "any-object", "bbox": [0, 0, 1, 1]}, tmp_path, source_dpi=dpi,
+    )
+    pixels = fitz.Pixmap(str(crop))
+    assert (pixels.width, pixels.height) == (width, height)
+    assert pixels.xres == min(dpi, 150)
+    assert info["pixel_bbox"] == [0, 0, 600, 400]
 
 
 def block(kind="table", number=1):
@@ -171,7 +274,7 @@ class ContentClient:
         return value
 
 
-def recover(monkeypatch, responses, kinds=("table",), max_objects=8, enabled=True):
+def recover(monkeypatch, responses, kinds=("table",), max_objects=8, enabled=True, glm=None):
     raw = fixtures._layout_raw([
         {"index": i * 10, "label": kind, "bbox_2d": [10, 20, 90, 80],
          "content": PARTIAL if kind == "table" else ""}
@@ -181,17 +284,36 @@ def recover(monkeypatch, responses, kinds=("table",), max_objects=8, enabled=Tru
     client = ContentClient(responses)
     crop_calls = []
 
-    def crop(path, target, directory, padding_ratio):
+    def crop(path, target, directory, padding_ratio, source_dpi):
         crop_calls.append(target["layout_id"])
         return Path("crop.png"), {"pixel_bbox": [8, 18, 92, 82], "width": 84, "height": 64}
 
     monkeypatch.setattr(processor, "_crop_layout_block_image", crop)
+    monkeypatch.setattr(processor, "_shrink_recovery_image", lambda path, info, scale: (path, info))
     counts = processor._recover_layout_objects(
         image_path=Path("page.png"), output_dir=Path("/tmp"), layout_outcome=outcome,
         pending_blocks=ledger.recovery_blocks(outcome), vlm=client, vlm_enabled=enabled,
         max_objects=max_objects, padding_ratio=0.02,
+        glm=glm,
     )
     return outcome, client, crop_calls, counts
+
+
+@pytest.mark.parametrize("finish,expected_calls", [("length", 2), ("content_filter", 1)])
+def test_ocr_finish_reason_overrides_closed_html(monkeypatch, finish, expected_calls):
+    class OCR:
+        enabled = True
+        calls = 0
+
+        def extract_table_html(self, path):
+            self.calls += 1
+            self.last_object_call_info = {"finish_reason": finish if self.calls == 1 else "stop"}
+            return TABLE
+
+    outcome, vlm, _, (ocr_calls, vlm_calls, diag) = recover(monkeypatch, [], glm=OCR())
+    assert ocr_calls == expected_calls
+    assert vlm_calls == 0 and vlm.calls == []
+    assert outcome["layout"][0]["status"] == ("EXTRACTED" if finish == "length" else "FAILED")
 
 
 def test_incomplete_crop_retries_once_compact_then_recovers_original_object(monkeypatch):
@@ -350,8 +472,8 @@ def test_extra_provider_fields_and_coordinates_do_not_escape_into_success_arrays
     assert payload["bbox"] == [0.1, 0.2, 0.9, 0.8]
 
 
-@pytest.mark.parametrize("crop_succeeds", [True, False])
-def test_real_local_upload_crop_and_client_parser_with_mocked_wire(monkeypatch, tmp_path, crop_succeeds):
+@pytest.mark.parametrize("crop_succeeds,ocr_recovers", [(True, False), (False, False), (True, True)])
+def test_real_local_upload_crop_and_client_parser_with_mocked_wire(monkeypatch, tmp_path, crop_succeeds, ocr_recovers):
     from tests import test_pdf2md_enhanced_single_page_tools as protocol_fixtures
 
     server = protocol_fixtures.server
@@ -369,13 +491,23 @@ def test_real_local_upload_crop_and_client_parser_with_mocked_wire(monkeypatch, 
         {"index": 3, "label": "formula", "bbox_2d": [10, 65, 45, 80], "content": ""},
         {"index": 4, "label": "image", "bbox_2d": [50, 65, 90, 90], "content": ""},
     ], markdown="Fixture page text")
-    monkeypatch.setattr(fixtures.LayoutLedgerGLMOcrClient, "raw", raw)
-    monkeypatch.setattr(fixtures.LayoutLedgerGLMOcrClient, "calls", [])
-    monkeypatch.setattr(processor, "OpenAICompatibleOcrClient", fixtures.LayoutLedgerGLMOcrClient)
+    ocr_calls = []
+
+    def ocr_wire(self, path, **kwargs):
+        image = fitz.Pixmap(path)
+        ocr_calls.append((path, image.width, image.height))
+        if "layout-recovery-" not in path:
+            return raw
+        content = TABLE if ocr_recovers else PARTIAL
+        return {"md_results": content, "layout_details": [[{"label": "table", "content": content}]]}
+
+    monkeypatch.setattr(OCRClient, "_call_layout_parsing_raw", ocr_wire)
+    monkeypatch.setattr(processor, "OpenAICompatibleOcrClient", OCRClient)
     monkeypatch.setattr(processor, "DynamicVLMClient", VLMClient)
-    responses = iter([
+    responses = iter(([] if ocr_recovers else [
         candidate(number=2, markdown=PARTIAL),
         candidate(number=2, markdown=TABLE if crop_succeeds else PARTIAL),
+    ]) + [
         candidate("formula", 3), candidate("figure", 4),
     ])
     wire_calls = []
@@ -398,13 +530,18 @@ def test_real_local_upload_crop_and_client_parser_with_mocked_wire(monkeypatch, 
         task_id=started["task_id"], page_no=1, policy="force_direct",
         vlm_config={"provider": "fixture", "model": "fixture-vlm", "api_key": "unused-local-only",
                     "base_url": "http://127.0.0.1:1/v1", "max_tokens": 12000, "max_retries": 0},
-        routing_config={"render_dpi": 72, "render_cleanup_with_llm": False,
-                        "ocr_config": {"glm_ocr": {"enabled": True}}},
+        routing_config={"render_dpi": 300, "render_cleanup_with_llm": False,
+                        "ocr_config": {"glm_ocr": {"enabled": True, "model": "glm-ocr",
+                                                   "base_url": "http://127.0.0.1:1"}}},
     )))["page_result"]
-    assert len(fixtures.LayoutLedgerGLMOcrClient.calls) == 1
-    assert len(wire_calls) == 4
+    assert len(ocr_calls) == (2 if ocr_recovers else 3)
+    assert len(wire_calls) == (2 if ocr_recovers else 4)
     assert all(call["budget"] == 12000 for call in wire_calls)
-    assert all(w < 300 and h < 400 for w, h in (call["size"] for call in wire_calls))
+    assert all(w < 625 and h < 834 for w, h in (call["size"] for call in wire_calls))
+    assert ocr_calls[0][1:] == (1250, 1667)
+    assert ocr_calls[1][1] < 625 and ocr_calls[1][2] < 834  # actual 150 DPI crop
+    if not ocr_recovers:
+        assert ocr_calls[2][1] < ocr_calls[1][1] and ocr_calls[2][2] < ocr_calls[1][2]
     assert all("SECRET_ORIGINAL_FRAGMENT" not in call["prompt"] for call in wire_calls)
     assert result["elements"] == result["rag"]["elements"]
     assert len(result["elements"]["tables"]) == (2 if crop_succeeds else 1)
@@ -416,7 +553,11 @@ def test_real_local_upload_crop_and_client_parser_with_mocked_wire(monkeypatch, 
     saved = json.loads((tmp_path / "output" / "tasks" / started["task_id"] / "page_1.json").read_text())
     assert saved["layout_recovery"] == result["layout_recovery"]
     assert "SECRET" not in json.dumps(saved["layout_recovery"])
-    assert saved["layout_recovery"]["objects"][0]["attempts"][0]["reason"] == "table_html_unclosed"
-    assert saved["layout_recovery"]["objects"][0]["attempts"][0]["finish_reason"] == "stop"
+    attempts = saved["layout_recovery"]["objects"][0]["attempts"]
+    assert attempts[0]["provider"] == "glm_ocr"
+    assert attempts[0]["reason"] == ("validated_object" if ocr_recovers else "table_html_unclosed")
+    if not ocr_recovers:
+        assert attempts[2]["provider"] == "vlm_ocr"
+        assert attempts[2]["finish_reason"] == "stop"
     finalized = manager.finalize_task(started["task_id"], merge_mode="both")
     assert finalized["merged_rag"][0]["rag"]["elements"] == result["elements"]

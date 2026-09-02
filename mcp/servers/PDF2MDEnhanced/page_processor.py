@@ -141,6 +141,8 @@ def process_page(
                             vlm_enabled=bool(rc.get("vlm_ocr_enabled") and vlm.enabled),
                             max_objects=rc["layout_recovery_max_objects"],
                             padding_ratio=rc["layout_recovery_crop_padding_ratio"],
+                            glm=glm_ocr,
+                            source_dpi=rc["render_dpi"],
                         )
                         glm_calls += recovery_glm_calls
                         vlm_calls += recovery_vlm_calls
@@ -867,7 +869,10 @@ def _recover_layout_objects(
     vlm_enabled: bool,
     max_objects: int,
     padding_ratio: float,
+    glm: Optional[OpenAICompatibleOcrClient] = None,
+    source_dpi: float = 150,
 ) -> tuple[int, int, Dict[str, Any]]:
+    glm_calls = 0
     vlm_calls = 0
     limit = max(0, min(int(max_objects), 16))
     diagnostics: Dict[str, Any] = {
@@ -889,7 +894,9 @@ def _recover_layout_objects(
             "outcome": "failed",
         }
         diagnostics["objects"].append(item_diagnostics)
-        if index >= limit or not vlm_enabled:
+        use_glm = (object_type == "table" and bool(getattr(glm, "enabled", False))
+                   and callable(getattr(glm, "extract_table_html", None)))
+        if index >= limit or not (vlm_enabled or use_glm):
             item_diagnostics.update({
                 "outcome": "not_attempted", "review_required": True,
                 "reason": "recovery_limit_exceeded" if index >= limit else "provider_unavailable",
@@ -902,6 +909,7 @@ def _recover_layout_objects(
                 block,
                 output_dir,
                 padding_ratio=padding_ratio,
+                source_dpi=source_dpi,
             )
             item_diagnostics["crop"] = crop_info
         except Exception as exc:
@@ -911,18 +919,35 @@ def _recover_layout_objects(
             item_diagnostics["review_required"] = True
             continue
 
-        for attempt_no in (1, 2):
-            vlm_calls += 1
+        # At most two OCR attempts, then two VLM attempts. The second attempt
+        # for each provider uses fewer pixels, never the same oversized image.
+        providers = (["glm_ocr"] * 2 if use_glm else []) + (["vlm_ocr"] * 2 if vlm_enabled else [])
+        skip_glm = False
+        for attempt_no, provider in enumerate(providers, 1):
+            if provider == "glm_ocr" and skip_glm:
+                continue
+            compact = attempt_no > 1 and providers[attempt_no - 2] == provider
+            client = glm if provider == "glm_ocr" else vlm
             attempt: Dict[str, Any] = {
-                "attempt": attempt_no, "mode": "initial" if attempt_no == 1 else "compact",
-                "provider": "vlm_ocr", "endpoint_kind": "image_chat_completions",
+                "attempt": attempt_no, "mode": "compact" if compact else "initial",
+                "provider": provider, "endpoint_kind": "layout_parsing" if provider == "glm_ocr"
+                and getattr(glm, "use_layout_parsing", False) else "image_chat_completions",
                 "outcome": "not_recovered",
             }
             item_diagnostics["attempts"].append(attempt)
-            vlm.last_object_call_info = {}
+            client.last_object_call_info = {}
             try:
+                if compact:
+                    crop_path, crop_info = _shrink_recovery_image(crop_path, crop_info, 2 / 3)
+                attempt["image_width"] = crop_info["width"]
+                attempt["image_height"] = crop_info["height"]
+                if provider == "glm_ocr":
+                    glm_calls += 1
+                else:
+                    vlm_calls += 1
                 if object_type == "table":
-                    html = vlm.extract_table_html(str(crop_path), block, compact=attempt_no == 2)
+                    html = (glm.extract_table_html(str(crop_path)) if provider == "glm_ocr" else
+                            vlm.extract_table_html(str(crop_path), block, compact=compact))
                     candidate = {
                         "layout_id": layout_id,
                         "type": "table",
@@ -931,8 +956,8 @@ def _recover_layout_objects(
                         "markdown": html,
                     }
                 else:
-                    candidate = vlm.extract_object_structured(str(crop_path), block, compact=attempt_no == 2)
-                attempt.update(_safe_object_call_info(vlm))
+                    candidate = vlm.extract_object_structured(str(crop_path), block, compact=compact)
+                attempt.update(_safe_object_call_info(client))
                 reason, shape = validate_recovered_object(block, candidate)
                 attempt.update(shape)
                 if attempt.get("truncated") or attempt.get("finish_reason") == "length":
@@ -944,11 +969,13 @@ def _recover_layout_objects(
                               "non_object": "response_invalid"}[attempt["json_status"]]
                 if not reason:
                     payload = _object_success_payload(block, candidate)
+                    if provider == "glm_ocr":
+                        payload["source"] = "glm_ocr_layout+glm_object_crop"
                     apply_recovered_payloads(layout_outcome, _single_recovery_result(object_type, payload))
                     if _layout_entry_recovered(layout_outcome, layout_id):
                         attempt.update({"outcome": "recovered", "reason": "validated_object"})
                         item_diagnostics["outcome"] = "recovered"
-                        item_diagnostics["provider"] = "vlm_ocr"
+                        item_diagnostics["provider"] = provider
                         break
                     reason = "ledger_binding_failed"
                 attempt["reason"] = reason
@@ -958,13 +985,16 @@ def _recover_layout_objects(
                 if not _object_content_retryable(reason):
                     break
             except Exception as exc:
-                attempt.update(_safe_object_call_info(vlm))
+                attempt.update(_safe_object_call_info(client))
                 attempt.update({"outcome": "failed", "reason": type(exc).__name__})
+                if provider == "glm_ocr":
+                    skip_glm = True
+                    continue
                 break
 
         if item_diagnostics["outcome"] != "recovered":
             item_diagnostics["review_required"] = True
-    return 0, vlm_calls, diagnostics
+    return glm_calls, vlm_calls, diagnostics
 
 
 def _object_content_retryable(reason: str) -> bool:
@@ -1009,6 +1039,7 @@ def _crop_layout_block_image(
     block: Dict[str, Any],
     output_dir: Path,
     padding_ratio: float = 0.02,
+    source_dpi: float = 150,
 ) -> tuple[Path, Dict[str, Any]]:
     source = fitz.Pixmap(str(image_path))
     bbox = block.get("bbox")
@@ -1046,15 +1077,33 @@ def _crop_layout_block_image(
         b"".join(bytes(row) for row in rows),
         source.alpha,
     )
+    scale = min(1.0, 150.0 / max(float(source_dpi), 1.0))
+    if scale < 1:
+        crop = fitz.Pixmap(crop, max(1, math.floor(crop_width * scale)),
+                          max(1, math.floor(crop_height * scale)))
+    dpi = max(1, min(150, int(source_dpi)))
+    crop.set_dpi(dpi, dpi)
     safe_layout_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(block.get("layout_id") or "object"))
     output_path = output_dir / f"layout-recovery-{safe_layout_id}.png"
     crop.save(str(output_path))
     return output_path, {
         "pixel_bbox": [left, top, right, bottom],
-        "width": crop_width,
-        "height": crop_height,
+        "width": crop.width,
+        "height": crop.height,
         "padding_ratio": float(padding_ratio),
     }
+
+
+def _shrink_recovery_image(
+    image_path: Path, crop_info: Dict[str, Any], scale: float,
+) -> tuple[Path, Dict[str, Any]]:
+    source = fitz.Pixmap(str(image_path))
+    resized = fitz.Pixmap(source, max(1, math.floor(source.width * scale)),
+                         max(1, math.floor(source.height * scale)))
+    resized.set_dpi(max(1, int(source.xres * scale)), max(1, int(source.yres * scale)))
+    output = image_path.with_name(f"{image_path.stem}-smaller.png")
+    resized.save(str(output))
+    return output, {**crop_info, "width": resized.width, "height": resized.height}
 
 
 def _single_recovery_result(object_type: str, candidate: Dict[str, Any]) -> Dict[str, Any]:

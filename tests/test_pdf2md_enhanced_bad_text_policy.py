@@ -960,7 +960,7 @@ def _run_layout_ledger_page(monkeypatch, raw, recovered=None):
     monkeypatch.setattr(page_processor, "DynamicVLMClient", LayoutLedgerVLMClient)
     crop_calls = []
 
-    def fake_crop(image_path, block, output_dir, padding_ratio=0.02):
+    def fake_crop(image_path, block, output_dir, padding_ratio=0.02, source_dpi=150):
         _ = image_path
         _ = output_dir
         crop_calls.append({"layout_id": block["layout_id"], "bbox": list(block["bbox"])})
@@ -972,6 +972,7 @@ def _run_layout_ledger_page(monkeypatch, raw, recovered=None):
         }
 
     monkeypatch.setattr(page_processor, "_crop_layout_block_image", fake_crop, raising=False)
+    monkeypatch.setattr(page_processor, "_shrink_recovery_image", lambda path, info, scale: (path, info))
     LayoutLedgerGLMOcrClient.raw = raw
     LayoutLedgerGLMOcrClient.calls = []
     LayoutLedgerVLMClient.recovered = recovered or {"tables": [], "formulas": [], "figures": []}
@@ -1109,6 +1110,19 @@ def test_layout_caption_survives_table_recovery_without_reusing_previous_title(m
         {"label": "table_caption", "bbox_2d": [10, 42, 90, 48], "content": "表 9 修正系数"},
         {"label": "table", "bbox_2d": [10, 50, 90, 90], "content": "<table><tr><td>"},
     ]), recovered={"tables": [{"layout_id": "p1-o004-table", "markdown": table.replace("A", "B")}]})
+    assert [t["title"] for t in result["elements"]["tables"]] == ["表 8（续）", "表 9 修正系数"]
+
+
+def test_layout_caption_overrides_recovery_candidate_title(monkeypatch):
+    table = "<table><tr><td>A</td></tr></table>"
+    result = _run_layout_ledger_page(monkeypatch, _layout_raw([
+        {"label": "table_caption", "bbox_2d": [10, 1, 90, 8], "content": "表 8（续）"},
+        {"label": "table", "bbox_2d": [10, 10, 90, 40], "content": table},
+        {"label": "table_caption", "bbox_2d": [10, 42, 90, 48], "content": "表 9 修正系数"},
+        {"label": "table", "bbox_2d": [10, 50, 90, 90], "content": "<table><tr><td>"},
+    ]), recovered={"tables": [{
+        "layout_id": "p1-o004-table", "markdown": table.replace("A", "B"), "title": "表 8（续）"
+    }]})
     assert [t["title"] for t in result["elements"]["tables"]] == ["表 8（续）", "表 9 修正系数"]
 
 

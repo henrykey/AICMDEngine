@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 import time
 import urllib.error
 import urllib.request
@@ -43,6 +44,36 @@ class OpenAICompatibleOcrClient:
             return self._call_layout_parsing(image_path)
         text = self._call_image_prompt(image_path, prompt or self._default_prompt())
         return normalize_text_response(text, self.source)
+
+    def extract_table_html(self, image_path: str) -> str:
+        """Read one already-cropped table; keep HTML without flattening or adding metadata."""
+        self.ensure_enabled()
+        self.last_object_call_info = {}
+        if self.use_layout_parsing:
+            data = self._call_layout_parsing_raw(image_path)
+            tables = [item for page in data.get("layout_details") or [] if isinstance(page, list)
+                      for item in page if isinstance(item, dict) and item.get("label") == "table"]
+            # Never pick the first of multiple tables returned for one ledger object.
+            if len(tables) > 1:
+                raise ValueError("ocr_crop_multiple_tables")
+            text = str(tables[0].get("content") or "") if tables else str(
+                data.get("md_results") or data.get("markdown") or "")
+            self.last_object_call_info["finish_reason"] = data.get("finish_reason")
+        else:
+            text = self._call_image_prompt(image_path, (
+                "Transcribe this single cropped table. Return ONLY one complete valid HTML table, "
+                "all rows and cells, preserving rowspan and colspan and LaTeX formulas. "
+                "No JSON, no summary, no invented columns. Close all HTML tags."
+            ))
+        self.last_object_call_info.update({"response_chars": len(text), "call_mode": "non_stream",
+                                           "json_status": "html" if text.strip() else "empty"})
+        text = text.strip()
+        fenced = re.fullmatch(r"```(?:html)?\s*\n?(.*?)\n?```", text, flags=re.S | re.I)
+        text = fenced.group(1).strip() if fenced else text
+        if not re.search(r"<table\b", text, flags=re.I):
+            self.last_object_call_info["json_status"] = "invalid" if text else "empty"
+            return ""
+        return text
 
     def parse_layout(
         self,
@@ -241,6 +272,11 @@ class OpenAICompatibleOcrClient:
                     elapsed,
                 )
                 content = resp.choices[0].message.content if resp.choices else ""
+                self.last_object_call_info = {
+                    "finish_reason": getattr(resp.choices[0], "finish_reason", None) if resp.choices else None,
+                    "requested_max_tokens": self.max_tokens,
+                    "effective_max_tokens": self.max_tokens,
+                }
                 if isinstance(content, list):
                     return "\n".join([str(x.get("text") or "") for x in content if isinstance(x, dict)])
                 return str(content or "")

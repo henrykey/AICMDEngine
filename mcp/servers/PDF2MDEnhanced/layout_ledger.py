@@ -424,7 +424,9 @@ def _payload_from_entry(entry: Dict[str, Any], block: Dict[str, Any]) -> Optiona
     if object_type == "table":
         return {
             **common,
-            "title": entry.get("title") or _first_text(raw, "table_title", "tableName", "table_name", "caption", "title"),
+            # A layout-bound caption is the only reliable title source.  Model/raw
+            # metadata may belong to a preceding table on the same page.
+            "title": entry.get("title") or "",
             "markdown": content,
             "description": _first_text(raw, "description", "semanticDesc", "summary"),
             "context": _first_text(raw, "context", "surrounding_text"),
@@ -462,7 +464,7 @@ def _recovered_payload(entry: Dict[str, Any], candidate: Dict[str, Any]) -> Opti
             **common,
             "source": _first_text(candidate, "source") or "glm_ocr_layout+vlm_ocr",
             "markdown": markdown,
-            "title": entry.get("title") or _first_text(candidate, "title", "table_title", "tableName", "table_name"),
+            "title": entry.get("title") or "",
         }
     if object_type == "formula":
         latex = _first_text(candidate, "latex", "formula", "content", "text")
