@@ -1,9 +1,11 @@
 import base64
 import asyncio
 import importlib.util
+import io
 import json
 import sys
 import types
+import urllib.error
 from pathlib import Path
 
 import fitz
@@ -282,6 +284,106 @@ def test_glm_ocr_layout_file_payload_uses_data_uri():
     assert client._data_uri_for_file("/tmp/page.png", "abc") == "data:image/png;base64,abc"
     assert client._data_uri_for_file("/tmp/page.jpg", "abc") == "data:image/jpeg;base64,abc"
     assert client._data_uri_for_file("/tmp/page.pdf", "abc") == "data:application/pdf;base64,abc"
+
+
+def _layout_http_error(status, payload):
+    return urllib.error.HTTPError(
+        "http://ocr.example.test/layout_parsing",
+        status,
+        "fixture error",
+        {},
+        io.BytesIO(json.dumps(payload).encode("utf-8")),
+    )
+
+
+def test_glm_ocr_layout_429_1305_retries_then_succeeds(monkeypatch, tmp_path, caplog):
+    client = OpenAICompatibleOcrClient(
+        {
+            "enabled": True,
+            "model": "glm-ocr",
+            "base_url": "http://ocr.example.test/v1",
+            "max_retries": 2,
+        }
+    )
+    page = tmp_path / "page.png"
+    page.write_bytes(base64.b64decode(PNG_DATA))
+    responses = [
+        _layout_http_error(429, {"error": {"code": 1305, "message": "当前访问量过大"}}),
+        io.BytesIO(b'{"md_results": "OCR text"}'),
+    ]
+    sleeps = []
+
+    def fake_urlopen(request, timeout):
+        response = responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("time.sleep", sleeps.append)
+
+    with caplog.at_level("WARNING"):
+        result = client.extract_page(str(page))
+
+    assert result.page_text == "OCR text"
+    assert sleeps == [3.0]
+    assert "waiting 3.0s before retry=1/2" in caplog.text
+
+
+def test_glm_ocr_layout_regular_400_does_not_retry(monkeypatch, tmp_path):
+    client = OpenAICompatibleOcrClient(
+        {
+            "enabled": True,
+            "model": "glm-ocr",
+            "base_url": "http://ocr.example.test/v1",
+            "max_retries": 2,
+        }
+    )
+    page = tmp_path / "page.png"
+    page.write_bytes(base64.b64decode(PNG_DATA))
+    calls = []
+    sleeps = []
+
+    def fake_urlopen(request, timeout):
+        calls.append(request)
+        raise _layout_http_error(400, {"error": {"code": 1000, "message": "bad request"}})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("time.sleep", sleeps.append)
+
+    with pytest.raises(RuntimeError, match="HTTP 400"):
+        client.extract_page(str(page))
+
+    assert len(calls) == 1
+    assert sleeps == []
+
+
+def test_glm_ocr_layout_429_1305_fails_after_retries_exhausted(monkeypatch, tmp_path):
+    client = OpenAICompatibleOcrClient(
+        {
+            "enabled": True,
+            "model": "glm-ocr",
+            "base_url": "http://ocr.example.test/v1",
+            "max_retries": 2,
+        }
+    )
+    page = tmp_path / "page.png"
+    page.write_bytes(base64.b64decode(PNG_DATA))
+    calls = []
+    sleeps = []
+
+    def fake_urlopen(request, timeout):
+        calls.append(request)
+        raise _layout_http_error(429, {"code": "1305", "message": "当前访问量过大"})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("time.sleep", sleeps.append)
+
+    with pytest.raises(RuntimeError, match="HTTP 429"):
+        client.extract_page(str(page))
+
+    assert len(calls) == 3
+    assert sleeps == [3.0, 6.0]
 
 
 @pytest.mark.parametrize("api_key", [None, "", "secret-key"])

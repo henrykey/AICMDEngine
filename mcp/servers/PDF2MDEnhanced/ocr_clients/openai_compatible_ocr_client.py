@@ -141,6 +141,7 @@ class OpenAICompatibleOcrClient:
         body = json.dumps(payload).encode("utf-8")
         last_err = None
         for attempt in range(self.max_retries + 1):
+            retry_delay = 0.4 * (attempt + 1)
             try:
                 t0 = time.time()
                 request = urllib.request.Request(url, data=body, headers=headers, method="POST")
@@ -158,6 +159,7 @@ class OpenAICompatibleOcrClient:
             except urllib.error.HTTPError as exc:
                 error_body = exc.read().decode("utf-8", errors="replace")
                 last_err = f"HTTP {exc.code}: {error_body}"
+                retryable_overload = self._is_retryable_layout_overload(exc.code, error_body)
                 logger.warning(
                     "%s layout_parsing call failed: model=%s attempt=%s/%s error=%s",
                     self.source,
@@ -166,8 +168,17 @@ class OpenAICompatibleOcrClient:
                     self.max_retries + 1,
                     last_err,
                 )
-                if 400 <= exc.code < 500 or attempt >= self.max_retries:
+                if (400 <= exc.code < 500 and not retryable_overload) or attempt >= self.max_retries:
                     break
+                if retryable_overload:
+                    retry_delay = 3.0 * (attempt + 1)
+                    logger.warning(
+                        "%s layout_parsing overloaded: waiting %.1fs before retry=%s/%s",
+                        self.source,
+                        retry_delay,
+                        attempt + 1,
+                        self.max_retries,
+                    )
             except Exception as exc:
                 last_err = repr(exc)
                 logger.warning(
@@ -180,8 +191,22 @@ class OpenAICompatibleOcrClient:
                 )
                 if attempt >= self.max_retries:
                     break
-            time.sleep(0.4 * (attempt + 1))
+            time.sleep(retry_delay)
         raise RuntimeError(f"{self.source} layout_parsing call failed: {last_err}")
+
+    @staticmethod
+    def _is_retryable_layout_overload(status_code: int, error_body: str) -> bool:
+        if status_code != 429:
+            return False
+        try:
+            payload = json.loads(error_body)
+        except (TypeError, ValueError):
+            return False
+        error = payload.get("error") if isinstance(payload, dict) else None
+        codes = [payload.get("code")] if isinstance(payload, dict) else []
+        if isinstance(error, dict):
+            codes.append(error.get("code"))
+        return any(str(code) == "1305" for code in codes)
 
     def _data_uri_for_file(self, image_path: str, encoded: str) -> str:
         suffix = Path(image_path).suffix.lower()
