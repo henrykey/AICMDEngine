@@ -334,9 +334,15 @@ def process_page(
             markdown,
             layout_outcome.get("payloads") or {},
             route_selected,
+            description_language,
         )
     else:
-        output_elements = _build_output_elements(markdown, structured, route_selected)
+        output_elements = _build_output_elements(
+            markdown,
+            structured,
+            route_selected,
+            description_language,
+        )
 
     reconciliation = None
     if layout_enabled and layout_outcome is not None:
@@ -449,6 +455,7 @@ def _routing_defaults(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "render_dpi": int(c.get("render_dpi", 220)),
         "render_rotate_deg": int(c.get("render_rotate_deg", 0)),
         "source_page_no": int(c.get("source_page_no", 0) or 0),
+        "description_language": str(c.get("description_language") or "unknown"),
         "chunk_size": int(c.get("chunk_size", 700)),
         "enable_chunks": bool(c.get("enable_chunks", False)),
         "chunk_policy": str(c.get("chunk_policy", "disabled")),
@@ -1582,7 +1589,12 @@ def _build_rag_content(markdown: str, structured: Dict[str, Any], rag_page_text:
     return "\n\n".join([p for p in parts if p])
 
 
-def _build_output_elements(markdown: str, structured: Dict[str, Any], route_selected: str) -> Dict[str, Any]:
+def _build_output_elements(
+    markdown: str,
+    structured: Dict[str, Any],
+    route_selected: str,
+    description_language: str = "unknown",
+) -> Dict[str, Any]:
     lines = (markdown or "").splitlines()
     table_source = "glm_ocr" if "glm" in route_selected else ("vlm_ocr" if "vlm" in route_selected else "pymupdf")
     formula_source = "glm_ocr" if "glm" in route_selected else "vlm_ocr"
@@ -1601,7 +1613,8 @@ def _build_output_elements(markdown: str, structured: Dict[str, Any], route_sele
             "source": table_source if not table_text.startswith("[TABLE_PLACEHOLDER]") else "pymupdf",
             "title": title,
             "markdown": table_text,
-            "semantic_summary": str(metadata.get("description") or "").strip() or _table_summary(title, table_text),
+            "semantic_summary": str(metadata.get("description") or "").strip()
+            or _table_summary(title, table_text, description_language),
             "context": str(metadata.get("context") or "").strip() or _context_for_anchor(title, lines),
         }
         _copy_optional_element_metadata(item, metadata)
@@ -1617,7 +1630,10 @@ def _build_output_elements(markdown: str, structured: Dict[str, Any], route_sele
         metadata = formula_metadata.get(latex) if isinstance(formula_metadata, dict) else None
         metadata = metadata if isinstance(metadata, dict) else {}
         context = str(metadata.get("context") or "").strip() or _context_for_formula(latex, lines)
-        semantic_summary = str(formula_descriptions.get(latex) or "").strip() or _formula_summary(context)
+        semantic_summary = str(formula_descriptions.get(latex) or "").strip() or _formula_summary(
+            context,
+            description_language,
+        )
         item = {
             "source": formula_source,
             "latex": latex,
@@ -1654,6 +1670,7 @@ def _build_layout_output_elements(
     markdown: str,
     payloads: Dict[str, Any],
     route_selected: str,
+    description_language: str = "unknown",
 ) -> Dict[str, Any]:
     output: Dict[str, list[Dict[str, Any]]] = {"tables": [], "formulas": [], "figures": []}
     for collection in ("tables", "formulas", "figures"):
@@ -1664,7 +1681,12 @@ def _build_layout_output_elements(
             if not isinstance(payload, dict):
                 continue
             normalized = _normalize_structured({collection: [payload]})
-            built = _build_output_elements(markdown, normalized, route_selected).get(collection) or []
+            built = _build_output_elements(
+                markdown,
+                normalized,
+                route_selected,
+                description_language,
+            ).get(collection) or []
             if not built:
                 continue
             item = built[0]
@@ -1753,11 +1775,15 @@ def _title_for_table(table_text: str, lines: list[str]) -> str:
     return titles[0] if len(set(titles)) == 1 else ""
 
 
-def _table_summary(title: str, table_text: str) -> str:
+def _table_summary(title: str, table_text: str, description_language: str = "unknown") -> str:
     cols, rows = _table_shape(table_text)
     headers = _header_tokens(table_text)
     if title:
         return title
+    if not _uses_chinese_description(description_language):
+        if headers:
+            return f"Table: contains {rows} rows and {cols} columns; fields include {', '.join(headers[:6])}."
+        return f"Table: contains {rows} rows and {cols} columns."
     if headers:
         return f"表格：包含 {rows} 行、{cols} 列，字段包括 {'、'.join(headers[:6])}。"
     return f"表格：包含 {rows} 行、{cols} 列。"
@@ -1783,11 +1809,22 @@ def _context_for_formula(latex: str, lines: list[str]) -> str:
     return ""
 
 
-def _formula_summary(context: str) -> str:
+def _formula_summary(context: str, description_language: str = "unknown") -> str:
     ctx = (context or "").strip()
     if ctx:
         return ctx[:160]
-    return "公式：变量说明见原文。"
+    if _uses_chinese_description(description_language):
+        return "公式：变量说明见原文。"
+    return "Formula: see the source document for variable definitions."
+
+
+def _uses_chinese_description(description_language: str) -> bool:
+    return str(description_language or "").strip().lower() in {
+        "zh",
+        "zh-cn",
+        "zh_hans",
+        "chinese",
+    }
 
 
 def _extract_formula_variables_context(lines: list[str]) -> str:
@@ -2627,7 +2664,13 @@ def _replace_large_tables_with_placeholders(markdown: str, page_no: int, rc: Dic
     if not markdown or not rc.get("large_table_placeholder_enabled", True):
         return markdown, []
 
-    markdown, latex_placeholders = _replace_latex_tabular_with_placeholders(markdown, page_no)
+    description_language = str(rc.get("description_language") or "unknown")
+    use_chinese = _uses_chinese_description(description_language)
+    markdown, latex_placeholders = _replace_latex_tabular_with_placeholders(
+        markdown,
+        page_no,
+        description_language,
+    )
     lines = (markdown or "").splitlines()
     blocks = _extract_markdown_tables_with_spans(markdown)
     if not blocks:
@@ -2653,19 +2696,34 @@ def _replace_large_tables_with_placeholders(markdown: str, page_no: int, rc: Dic
         anchor = _find_table_anchor(lines, start)
         if not anchor:
             unnamed_idx += 1
-            anchor = f"未命名表{unnamed_idx}"
-        semantic_desc = _build_table_semantic_desc(anchor, block, lines, start)
-        placeholder = (
-            f"[TABLE_PLACEHOLDER] {anchor}（页号: {page_no}）："
-            f"{semantic_desc}（约{row_count}行×{col_count}列）；关键数值请回看原PDF本页。"
-        )
-        block_md = (
-            f"### {anchor}（页号: {page_no}）\n"
-            f"该表为大表/横向表，已省略表体，仅保留语义占位。\n"
-            f"语义说明：{semantic_desc}\n"
-            f"字段维度约为 {row_count} 行 × {col_count} 列，关键数值请回看原PDF本页。\n"
-            f"{placeholder}"
-        )
+            anchor = f"未命名表{unnamed_idx}" if use_chinese else f"Untitled table {unnamed_idx}"
+        semantic_desc = _build_table_semantic_desc(anchor, block, lines, start, description_language)
+        if use_chinese:
+            placeholder = (
+                f"[TABLE_PLACEHOLDER] {anchor}（页号: {page_no}）："
+                f"{semantic_desc}（约{row_count}行×{col_count}列）；关键数值请回看原PDF本页。"
+            )
+            block_md = (
+                f"### {anchor}（页号: {page_no}）\n"
+                f"该表为大表/横向表，已省略表体，仅保留语义占位。\n"
+                f"语义说明：{semantic_desc}\n"
+                f"字段维度约为 {row_count} 行 × {col_count} 列，关键数值请回看原PDF本页。\n"
+                f"{placeholder}"
+            )
+        else:
+            placeholder = (
+                f"[TABLE_PLACEHOLDER] {anchor} (page: {page_no}): {semantic_desc} "
+                f"(approximately {row_count} rows x {col_count} columns); "
+                "refer to this page in the source PDF for key values."
+            )
+            block_md = (
+                f"### {anchor} (page: {page_no})\n"
+                "This large or wide table has been omitted; only a semantic placeholder is retained.\n"
+                f"Semantic description: {semantic_desc}\n"
+                f"The table has approximately {row_count} rows x {col_count} columns; "
+                "refer to this page in the source PDF for key values.\n"
+                f"{placeholder}"
+            )
         replacements.append((start, end, block_md))
         placeholders.append(placeholder)
 
@@ -2708,7 +2766,11 @@ def _is_compacted_numeric_table(table_markdown: str) -> bool:
     return False
 
 
-def _replace_latex_tabular_with_placeholders(markdown: str, page_no: int) -> tuple[str, list[str]]:
+def _replace_latex_tabular_with_placeholders(
+    markdown: str,
+    page_no: int,
+    description_language: str = "unknown",
+) -> tuple[str, list[str]]:
     lines = (markdown or "").splitlines()
     if not lines:
         return markdown, []
@@ -2716,6 +2778,7 @@ def _replace_latex_tabular_with_placeholders(markdown: str, page_no: int) -> tup
     placeholders: list[str] = []
     i = 0
     unnamed = 0
+    use_chinese = _uses_chinese_description(description_language)
     n = len(lines)
     while i < n:
         t = (lines[i] or "").strip()
@@ -2733,19 +2796,36 @@ def _replace_latex_tabular_with_placeholders(markdown: str, page_no: int) -> tup
         anchor = _find_table_anchor(lines, start)
         if not anchor:
             unnamed += 1
-            anchor = f"未命名表{unnamed}"
-        semantic_desc = _build_table_semantic_desc(anchor, block, lines, start)
-        placeholder = (
-            f"[TABLE_PLACEHOLDER] {anchor}（页号: {page_no}）："
-            f"{semantic_desc}（检测到LaTeX表格块，约{max(1, row_count)}行×{max(1, col_count)}列）；关键数值请回看原PDF本页。"
-        )
-        repl = (
-            f"### {anchor}（页号: {page_no}）\n"
-            "该表为大表/横向表（LaTeX表格块），已省略表体，仅保留语义占位。\n"
-            f"语义说明：{semantic_desc}\n"
-            f"字段维度约为 {max(1, row_count)} 行 × {max(1, col_count)} 列，关键数值请回看原PDF本页。\n"
-            f"{placeholder}"
-        )
+            anchor = f"未命名表{unnamed}" if use_chinese else f"Untitled table {unnamed}"
+        semantic_desc = _build_table_semantic_desc(anchor, block, lines, start, description_language)
+        rows = max(1, row_count)
+        cols = max(1, col_count)
+        if use_chinese:
+            placeholder = (
+                f"[TABLE_PLACEHOLDER] {anchor}（页号: {page_no}）："
+                f"{semantic_desc}（检测到LaTeX表格块，约{rows}行×{cols}列）；关键数值请回看原PDF本页。"
+            )
+            repl = (
+                f"### {anchor}（页号: {page_no}）\n"
+                "该表为大表/横向表（LaTeX表格块），已省略表体，仅保留语义占位。\n"
+                f"语义说明：{semantic_desc}\n"
+                f"字段维度约为 {rows} 行 × {cols} 列，关键数值请回看原PDF本页。\n"
+                f"{placeholder}"
+            )
+        else:
+            placeholder = (
+                f"[TABLE_PLACEHOLDER] {anchor} (page: {page_no}): {semantic_desc} "
+                f"(LaTeX table block detected, approximately {rows} rows x {cols} columns); "
+                "refer to this page in the source PDF for key values."
+            )
+            repl = (
+                f"### {anchor} (page: {page_no})\n"
+                "This large or wide LaTeX table has been omitted; only a semantic placeholder is retained.\n"
+                f"Semantic description: {semantic_desc}\n"
+                f"The table has approximately {rows} rows x {cols} columns; "
+                "refer to this page in the source PDF for key values.\n"
+                f"{placeholder}"
+            )
         replacements.append((start, end, repl))
         placeholders.append(placeholder)
         i = end
@@ -2769,30 +2849,57 @@ def _split_markdown_row(line: str) -> list[str]:
     return [c.strip() for c in s.split("|")]
 
 
-def _build_table_semantic_desc(anchor: str, table_block: str, lines: list[str], table_start: int) -> str:
+def _build_table_semantic_desc(
+    anchor: str,
+    table_block: str,
+    lines: list[str],
+    table_start: int,
+    description_language: str = "unknown",
+) -> str:
     a = (anchor or "").strip()
     ctx = _nearby_context(lines, table_start)
     sig = f"{a}\n{ctx}\n{table_block[:800]}"
+    use_chinese = _uses_chinese_description(description_language)
     if re.search(r"许用应力|allowable stress|应力", sig, flags=re.IGNORECASE):
-        base = "该表用于给出材料在不同工况下的许用应力对照"
+        base = (
+            "该表用于给出材料在不同工况下的许用应力对照"
+            if use_chinese
+            else "This table compares allowable material stresses under different conditions"
+        )
     elif re.search(r"成分|化学|composition", sig, flags=re.IGNORECASE):
-        base = "该表用于给出材料化学成分及限值对照"
-    elif re.search(r"尺寸|公差|厚度|直径", sig, flags=re.IGNORECASE):
-        base = "该表用于给出尺寸范围与对应参数对照"
+        base = (
+            "该表用于给出材料化学成分及限值对照"
+            if use_chinese
+            else "This table compares material chemical compositions and limits"
+        )
+    elif re.search(
+        r"尺寸|公差|厚度|直径|dimension|tolerance|thickness|diameter",
+        sig,
+        flags=re.IGNORECASE,
+    ):
+        base = (
+            "该表用于给出尺寸范围与对应参数对照"
+            if use_chinese
+            else "This table compares dimensional ranges and corresponding parameters"
+        )
     else:
-        base = "该表用于给出多维条件下的参数对照"
+        base = (
+            "该表用于给出多维条件下的参数对照"
+            if use_chinese
+            else "This table compares parameters across multiple conditions"
+        )
 
     dims = []
-    if re.search(r"温度|℃", sig):
-        dims.append("温度")
-    if re.search(r"厚度|mm", sig, flags=re.IGNORECASE):
-        dims.append("厚度")
+    if re.search(r"温度|temperature|℃", sig, flags=re.IGNORECASE):
+        dims.append("温度" if use_chinese else "temperature")
+    if re.search(r"厚度|thickness|mm", sig, flags=re.IGNORECASE):
+        dims.append("厚度" if use_chinese else "thickness")
     if re.search(r"牌号|数字代号|material|grade", sig, flags=re.IGNORECASE):
-        dims.append("材料牌号")
+        dims.append("材料牌号" if use_chinese else "material grade")
     if re.search(r"标准|GB/?T|ASME|ASTM", sig, flags=re.IGNORECASE):
-        dims.append("材料标准")
+        dims.append("材料标准" if use_chinese else "material standard")
     if re.search(r"Rm|ReL|Rp0\\.2|强度", sig, flags=re.IGNORECASE):
-        dims.append("强度指标")
+        dims.append("强度指标" if use_chinese else "strength properties")
 
     head_tokens = _header_tokens(table_block)
     if head_tokens:
@@ -2800,9 +2907,13 @@ def _build_table_semantic_desc(anchor: str, table_block: str, lines: list[str], 
     dims = [_normalize_dim_token(x) for x in dims]
     dims = _unique_keep_order([x for x in dims if x])[:6]
     if dims:
-        usage = _build_table_usage_hint(dims)
-        return f"{base}，主要维度包括：{'、'.join(dims)}。{usage}"
-    return f"{base}。可结合表题与页号回查原文获取完整数值。"
+        usage = _build_table_usage_hint(dims, description_language)
+        if use_chinese:
+            return f"{base}，主要维度包括：{'、'.join(dims)}。{usage}"
+        return f"{base}. Primary dimensions include {', '.join(dims)}. {usage}"
+    if use_chinese:
+        return f"{base}。可结合表题与页号回查原文获取完整数值。"
+    return f"{base}. Refer to the table title and page number for complete values."
 
 
 def _nearby_context(lines: list[str], table_start: int) -> str:
@@ -2877,8 +2988,25 @@ def _normalize_dim_token(token: str) -> str:
     return t
 
 
-def _build_table_usage_hint(dims: list[str]) -> str:
+def _build_table_usage_hint(dims: list[str], description_language: str = "unknown") -> str:
     d = [x for x in (dims or []) if x]
+    if not _uses_chinese_description(description_language):
+        if not d:
+            return "Refer to the table title and page number for complete values."
+        if "temperature" in d and "thickness" in d:
+            return (
+                "Locate the target cell by temperature and thickness, then read the parameter "
+                "for the relevant material grade or standard."
+            )
+        if "material grade" in d and "material standard" in d:
+            return (
+                "Filter by material grade and material standard, then use the remaining "
+                "dimensions to find the target parameter."
+            )
+        return (
+            f"Use {', '.join(d[:3])} to locate the target parameter, then verify details "
+            "in the source PDF."
+        )
     if not d:
         return "可结合表题与页号回查原文获取完整数值。"
     if "温度" in d and "厚度" in d:

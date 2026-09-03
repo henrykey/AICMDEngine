@@ -78,6 +78,76 @@ def test_openai_compatible_ocr_prompt_uses_description_language_fallback(
     assert "visible titles, labels, table cells, symbols, and formulas verbatim" in prompt
 
 
+@pytest.mark.parametrize("language", ["zh", "en", "unknown"])
+def test_routing_defaults_preserves_description_language(language):
+    assert page_processor._routing_defaults({"description_language": language})["description_language"] == language
+
+
+def test_process_page_passes_description_language_to_vlm_client(monkeypatch, tmp_path):
+    observed = {}
+    original_client = page_processor.DynamicVLMClient
+
+    class RecordingVLMClient(original_client):
+        def __init__(self, config):
+            observed.update(config or {})
+            super().__init__(config)
+
+    source = tmp_path / "language-routing.pdf"
+    document = fitz.open()
+    document.new_page().insert_text((72, 72), "language routing fixture")
+    document.save(source)
+    document.close()
+    monkeypatch.setattr(page_processor, "DynamicVLMClient", RecordingVLMClient)
+
+    page_processor.process_page(
+        source_path=str(source),
+        page_no=1,
+        policy="force_direct",
+        vlm_config={},
+        routing_config={
+            "description_language": "zh",
+            "layout_ledger_enabled": False,
+            "render_cleanup_with_llm": False,
+        },
+        prev_context=None,
+    )
+
+    assert observed["description_language"] == "zh"
+
+
+@pytest.mark.parametrize("language,expected", [
+    ("zh", "公式：变量说明见原文。"),
+    ("en", "Formula: see the source document for variable definitions."),
+    ("unknown", "Formula: see the source document for variable definitions."),
+])
+def test_formula_fallback_summary_uses_description_language(language, expected):
+    assert page_processor._formula_summary("", language) == expected
+
+
+@pytest.mark.parametrize("language,expected,unexpected", [
+    ("zh", "语义说明：", "Semantic description:"),
+    ("en", "Semantic description:", "语义说明："),
+    ("unknown", "Semantic description:", "语义说明："),
+])
+def test_large_table_placeholder_uses_description_language(language, expected, unexpected):
+    markdown = "| A | B |\n| --- | --- |\n| 1 | 2 |"
+    replaced, placeholders = page_processor._replace_large_tables_with_placeholders(
+        markdown,
+        1,
+        {
+            "description_language": language,
+            "large_table_placeholder_enabled": True,
+            "large_table_min_cols": 1,
+            "large_table_min_rows": 99,
+            "large_table_min_cells": 99,
+        },
+    )
+
+    assert placeholders
+    assert expected in replaced
+    assert unexpected not in replaced
+
+
 def test_full_page_dual_output_uses_configured_bounded_budget(monkeypatch):
     observed = []
     client = DynamicVLMClient(
@@ -1743,16 +1813,25 @@ def test_local_task_chain_persists_layout_and_finalizes_legacy_rag(monkeypatch, 
     assert finalized["merged_rag"][0]["rag"]["elements"] == page_result["rag"]["elements"]
 
 
-def test_single_page_table_schema_is_not_used_by_task_output_elements():
+@pytest.mark.parametrize("language,expected_summary", [
+    ("zh", "表格：包含 3 行、2 列。"),
+    ("en", "Table: contains 3 rows and 2 columns."),
+])
+def test_single_page_table_schema_is_not_used_by_task_output_elements(language, expected_summary):
     markdown = "| A | B |\n| --- | --- |\n| 1 | 2 |"
-    elements = page_processor._build_output_elements(markdown, {"tables": [markdown], "formulas": [], "figures": []}, "text_only")
+    elements = page_processor._build_output_elements(
+        markdown,
+        {"tables": [markdown], "formulas": [], "figures": []},
+        "text_only",
+        description_language=language,
+    )
 
     assert elements["tables"] == [
         {
             "source": "pymupdf",
             "title": "",
             "markdown": markdown,
-            "semantic_summary": "表格：包含 3 行、2 列。",
+            "semantic_summary": expected_summary,
             "context": "",
         }
     ]
