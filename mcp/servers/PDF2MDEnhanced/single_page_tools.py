@@ -1842,7 +1842,7 @@ def _prompt_layout_figures(blocks: List[Dict[str, Any]], page_text: str) -> str:
         "要求：每个输入 image block 最多返回一个对应 figure；block_index 和 bbox 必须原样保留；"
         "description 要说明图中表达的对象、结构关系、关键标注和可读文字。"
         "字段要求：caption/capture/name/figureName 都表示图名/图题；有可见图题/图注时必须抄录原文并填入这些字段。"
-        "description/semanticDesc 都表示图的语义描述。"
+        "description/semanticDesc 都表示图的语义描述，必须是纯文本；禁止 HTML、XML、Markdown、列表标记、标签和代码围栏。"
         "语种要求：图名必须抄录图片中可见图题/图注的原文；description/semanticDesc 和 context "
         "必须优先使用图题/图注的语种，其次使用正文/图片中文字的主要语种；中文页面请用中文描述，不要翻译成英文。"
         "未见图题时图名字段都留空，不要编造图名。\n"
