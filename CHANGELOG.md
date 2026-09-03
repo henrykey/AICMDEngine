@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.2.4 - 2026-09-03
+
+### Added
+
+- Added `description_language` propagation across PDF2MD Enhanced task creation, page processing, OCR/VLM configuration, and single-page structured extraction.
+- Added automatic semantic-description language detection when callers do not provide an explicit language.
+
+### Changed
+
+- Updated table, formula, and figure recovery prompts and fallback summaries to preserve the requested description language while retaining source-language titles, labels, values, symbols, and formulas.
+- Normalized recovered figure descriptions to plain semantic text and discarded label-only or markup-wrapped descriptions.
+- Reduced repetitive external MCP connection and background-reconnect logging while retaining actionable startup failures.
+
+### Fixed
+
+- Fixed semantic descriptions reverting to the wrong language during PDF2MD task processing, recovery, or fallback generation.
+- Fixed recovered figure descriptions leaking HTML, XML, Markdown, code fences, or bare figure labels into structured output.
+
 ## v1.2.2 - 2026-08-01
 
 ### Added
