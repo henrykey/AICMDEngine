@@ -647,8 +647,6 @@ def _enrich_table_metadata_with_vlm(
     if not items or not describe:
         return
     _fill_local_table_descriptions(items, description_language)
-    if not _tables_need_vlm_metadata(items):
-        return
     if not vlm.enabled:
         warnings.append("vlm_ocr_unavailable_for_table_metadata")
         return
@@ -706,6 +704,8 @@ def _extract_formulas(
             _cache_description_language(ctx, result)
             items = _formula_items_from_result("glm_ocr", result, ctx.page_text, describe)
             if items:
+                _enrich_formula_metadata_with_vlm(ctx, vlm, items, describe, model_calls, warnings,
+                                                  _effective_description_language(ctx))
                 return items
             warnings.append("glm_ocr_returned_no_formulas")
         except Exception as exc:
@@ -752,6 +752,8 @@ def _extract_formula_page_result(
             if not items:
                 items = _formula_items_from_result("glm_ocr", result, ctx.page_text, describe)
             if page_markdown or items:
+                _enrich_formula_metadata_with_vlm(ctx, vlm, items, describe, model_calls, warnings,
+                                                  _effective_description_language(ctx))
                 return _formula_page_result(ctx, model_calls, warnings, page_markdown, items)
             warnings.append("glm_ocr_returned_no_formula_markdown")
         except Exception as exc:
@@ -778,6 +780,46 @@ def _extract_formula_page_result(
         warnings.append("vlm_ocr_unavailable")
 
     return _formula_page_result(ctx, model_calls, warnings, page_markdown, items)
+
+
+def _enrich_formula_metadata_with_vlm(
+    ctx: SinglePageContext,
+    vlm: DynamicVLMClient,
+    items: List[Dict[str, Any]],
+    describe: bool,
+    model_calls: Dict[str, int],
+    warnings: List[str],
+    description_language: str,
+) -> None:
+    if not items or not describe:
+        return
+    if not vlm.enabled:
+        warnings.append("vlm_ocr_unavailable_for_formula_metadata")
+        return
+    try:
+        model_calls["vlm_ocr"] += 1
+        result = _call_vlm_structured(
+            vlm, ctx.image_path,
+            _prompt_formula_metadata(ctx.page_text, items, description_language),
+            max_tokens=min(vlm.max_tokens, 2048),
+        )
+        metadata = result.formulas if isinstance(result, OcrResult) else []
+        matched = 0
+        for entry in metadata:
+            raw = entry.raw if isinstance(entry.raw, dict) else {}
+            try:
+                index = int(raw.get("index"))
+            except (TypeError, ValueError):
+                continue
+            if 0 <= index < len(items) and entry.description:
+                items[index]["description"] = entry.description
+                matched += 1
+        if metadata and not matched:
+            warnings.append("vlm_ocr_formula_metadata_identity_unmatched")
+        elif not metadata:
+            warnings.append("vlm_ocr_returned_no_formula_metadata")
+    except Exception as exc:
+        warnings.append(f"vlm_ocr_formula_metadata_failed: {exc}")
 
 
 def _extract_figures(
@@ -1076,6 +1118,7 @@ def _formula_page_result(
     markdown: str,
     items: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    semantic_missing = any("vlm_ocr" in warning for warning in warnings)
     return {
         "tool": "extract_page_formulas",
         "source": _source_payload(ctx),
@@ -1083,6 +1126,11 @@ def _formula_page_result(
         "items": items,
         "model_calls": model_calls,
         "warnings": _dedupe(warnings),
+        "semantic_status": {
+            "complete": not semantic_missing,
+            "missing": ["formula_description"] if semantic_missing else [],
+            "reason": "vlm_ocr_unavailable_or_failed" if semantic_missing else "",
+        },
     }
 
 
@@ -1377,6 +1425,13 @@ def _base_result(
         "model_calls": model_calls,
         "warnings": _dedupe(warnings),
     }
+    semantic_warnings = [warning for warning in warnings if "vlm_ocr" in warning]
+    if tool == "extract_page_tables":
+        result["semantic_status"] = {
+            "complete": not semantic_warnings,
+            "missing": ["table_description"] if semantic_warnings else [],
+            "reason": "vlm_ocr_unavailable_or_failed" if semantic_warnings else "",
+        }
     if tool == "extract_page_tables":
         result["tables"] = items
         if items:
@@ -1759,6 +1814,18 @@ def _prompt_formulas(page_text: str, describe: bool, description_language: str =
         "{\"formulas\":[{\"latex\":\"\",\"description\":\"\",\"variables\":\"\",\"context\":\"\"}],\"tables\":[],\"figures\":[]}.\n"
         f"Descriptions required: {bool(describe)}.\n"
         f"Text-layer context, if useful:\n{_trim_context(page_text)}"
+    )
+
+
+def _prompt_formula_metadata(page_text: str, items: List[Dict[str, Any]], description_language: str) -> str:
+    formulas = [{"index": index, "latex": item.get("latex", ""), "context": item.get("context", "")}
+                for index, item in enumerate(items)]
+    return (
+        f"{_description_language_instruction(description_language)}\n"
+        "为图片中已识别的公式补充语义描述，只输出严格 JSON。不要改写 LaTeX。"
+        "返回 schema：{\"formulas\":[{\"index\":0,\"description\":\"\"}]}。"
+        f"已识别公式：{json.dumps(formulas, ensure_ascii=False)}\n"
+        f"页面上下文：{_trim_context(page_text)}"
     )
 
 

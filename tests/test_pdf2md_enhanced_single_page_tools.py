@@ -1174,7 +1174,7 @@ def test_extract_page_tables_enriches_glm_rows_with_vlm_metadata(monkeypatch):
     assert any("补全表名和语义描述" in prompt for prompt in FakeVLMClient.prompts)
 
 
-def test_extract_page_tables_skips_vlm_metadata_when_glm_title_is_reliable(monkeypatch):
+def test_extract_page_tables_enriches_even_reliable_glm_title(monkeypatch):
     _patch_clients(monkeypatch)
     FakeGLMOcrClient.result = OcrResult(
         tables=[
@@ -1187,6 +1187,7 @@ def test_extract_page_tables_skips_vlm_metadata_when_glm_title_is_reliable(monke
         ]
     )
 
+    FakeVLMClient.result_text = json.dumps({"tables": [{"index": 0, "semanticDesc": "VLM 语义"}]})
     result = json.loads(
         single_page_tools.extract_page_tables_direct(
             file_data=PNG_DATA,
@@ -1196,12 +1197,26 @@ def test_extract_page_tables_skips_vlm_metadata_when_glm_title_is_reliable(monke
             vlm_config={"model": "vlm", "api_key": "x", "base_url": "http://x"},
         )
     )
-
-    assert result["model_calls"] == {"glm_ocr": 1, "vlm_ocr": 0}
+    assert result["model_calls"] == {"glm_ocr": 1, "vlm_ocr": 1}
     assert result["items"][0]["title"] == "表 7-35 铜换热管的折流板和支撑板管孔直径及允许偏差"
-    assert result["items"][0]["semanticDesc"].startswith("表 7-35 铜换热管")
-    assert "字段包括：换热管外径, 10, 12" in result["items"][0]["semanticDesc"]
-    assert not FakeVLMClient.prompts
+    assert result["items"][0]["semanticDesc"] == "VLM 语义"
+    assert FakeVLMClient.prompts
+
+
+def test_auto_reliable_table_still_calls_vlm_and_preserves_glm_data(monkeypatch):
+    _patch_clients(monkeypatch)
+    FakeGLMOcrClient.result = OcrResult(tables=[OcrElement(
+        kind="table", source="glm_ocr", title="表 7 可靠表名",
+        markdown="| A | B |\n| --- | --- |\n| 1 | 2 |"),])
+    FakeVLMClient.result_text = json.dumps({"tables": [{"index": 0, "semanticDesc": "VLM 语义"}]})
+    result = json.loads(single_page_tools.extract_page_tables_direct(
+        file_data=PNG_DATA, input_type="image",
+        ocr_config={"glm_ocr": {"enabled": True}},
+        vlm_config={"model": "vlm", "api_key": "x", "base_url": "http://x"},
+    ))
+    assert result["model_calls"] == {"glm_ocr": 1, "vlm_ocr": 1}
+    assert result["items"][0]["normalized_rows"] == [["1", "2"]]
+    assert result["items"][0]["semanticDesc"] == "VLM 语义"
 
 
 def test_extract_page_tables_model_rows_wider_than_columns_degraded(monkeypatch):
@@ -1920,7 +1935,7 @@ def test_extract_page_formulas_only_uses_formula_items(monkeypatch):
     assert len(result["items"]) == 1
     assert result["items"][0]["latex"] == "$$\nx=y+z\n$$"
     assert "markdown" not in result["items"][0]
-    assert result["model_calls"] == {"glm_ocr": 1, "vlm_ocr": 0}
+    assert result["model_calls"] == {"glm_ocr": 1, "vlm_ocr": 1}
 
 
 def test_extract_page_formulas_includes_surrounding_explanation(monkeypatch):
@@ -1958,6 +1973,21 @@ def test_extract_page_formulas_includes_surrounding_explanation(monkeypatch):
     assert "公式(B.13)" in result["items"][0]["description"]
     assert "$A$" in result["items"][0]["variables"]
     assert "下一段说明" not in result["items"][0]["variables"]
+
+
+def test_auto_formula_merges_vlm_semantics_without_overwriting_glm_latex(monkeypatch):
+    _patch_clients(monkeypatch)
+    FakeGLMOcrClient.result = OcrResult(formulas=[OcrElement(
+        kind="formula", source="glm_ocr", latex="GLM-LATEX")])
+    FakeVLMClient.result_text = json.dumps({"formulas": [{"index": 0, "description": "VLM 语义"}]})
+    result = json.loads(single_page_tools.extract_page_formulas_direct(
+        file_data=PNG_DATA, input_type="image", describe=True,
+        ocr_config={"glm_ocr": {"enabled": True}},
+        vlm_config={"model": "vlm", "api_key": "x", "base_url": "http://x"},
+    ))
+    assert result["model_calls"] == {"glm_ocr": 1, "vlm_ocr": 1}
+    assert result["items"][0]["latex"] == "$$\nGLM-LATEX\n$$"
+    assert result["items"][0]["description"] == "VLM 语义"
 
 
 def test_extract_page_formulas_returns_formula_page_markdown(monkeypatch):
@@ -2343,7 +2373,7 @@ def test_unknown_language_is_cached_from_ocr_text_for_later_semantic_prompts(mon
         vlm_config={"model": "vlm", "api_key": "x", "base_url": "http://x"},
     ))
 
-    assert "字段包括" in result["tables"][0]["semanticDesc"]
+    assert result["tables"][0]["semanticDesc"]
     assert all("必须使用中文" in prompt for prompt in FakeGLMOcrClient.prompts[1:])
 
 
@@ -2369,7 +2399,7 @@ def test_explicit_language_is_not_overridden_by_detected_ocr_text(monkeypatch):
         vlm_config={"model": "vlm", "api_key": "x", "base_url": "http://x"},
     ))
 
-    assert "Fields include" in result["tables"][0]["semanticDesc"]
+    assert result["tables"][0]["semanticDesc"]
     assert all("MUST be written in English" in prompt for prompt in FakeGLMOcrClient.prompts)
 
 
