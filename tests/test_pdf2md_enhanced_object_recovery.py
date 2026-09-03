@@ -140,6 +140,7 @@ def candidate(kind="table", number=1, **extra):
 def test_object_client_contract_is_crop_specific_budgeted_and_redacted(kind):
     client = VLMClient.__new__(VLMClient)
     client.max_tokens = 20000
+    client.description_language = "unknown"
     client.last_call_info = {}
     calls = []
 
@@ -165,6 +166,7 @@ def test_object_client_contract_is_crop_specific_budgeted_and_redacted(kind):
 def test_object_client_never_raises_injected_budget_and_marks_invalid_json():
     client = VLMClient.__new__(VLMClient)
     client.max_tokens = 2048
+    client.description_language = "unknown"
     client.last_call_info = {"finish_reason": "length"}
     calls = []
 
@@ -180,6 +182,47 @@ def test_object_client_never_raises_injected_budget_and_marks_invalid_json():
     assert info["json_status"] == "invalid"
     assert info["finish_reason"] is None  # previous call diagnostics must not leak
     assert "SECRET_RESPONSE" not in json.dumps(info)
+
+
+@pytest.mark.parametrize("compact", [False, True])
+@pytest.mark.parametrize("language,expected_language", [
+    ("zh-CN", "Chinese"),
+    ("en-US", "English"),
+    ("ja", "English"),
+    ("unknown", "English"),
+])
+def test_object_client_final_prompt_uses_description_language(language, expected_language, compact):
+    client = VLMClient({"description_language": language})
+    calls = []
+
+    def mock_call(path, prompt, max_tokens):
+        calls.append(prompt)
+        return json.dumps(candidate("figure"))
+
+    client._call_image_prompt = mock_call
+    assert client.extract_object_structured(
+        "crop.png", block("figure"), compact=compact,
+    ) == candidate("figure")
+
+    assert f"written in {expected_language}" in calls[0]
+    assert "visible titles, labels, table cells, symbols, and formulas verbatim" in calls[0]
+
+
+@pytest.mark.parametrize("language,expected_language", [
+    ("zh", "Chinese"),
+    ("en", "English"),
+])
+def test_layout_client_final_prompt_uses_description_language(language, expected_language):
+    client = VLMClient({"description_language": language})
+    calls = []
+    client._call_image_prompt = lambda path, prompt, max_tokens: (
+        calls.append(prompt) or '{"tables":[],"formulas":[],"figures":[]}'
+    )
+
+    client.extract_layout_structured("page.png", [block("figure")])
+
+    assert f"written in {expected_language}" in calls[0]
+    assert "visible titles, labels, table cells, symbols, and formulas verbatim" in calls[0]
 
 
 def test_table_client_returns_fenced_html_without_json_wrapper():

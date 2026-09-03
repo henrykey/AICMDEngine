@@ -13,10 +13,14 @@ logger = logging.getLogger(__name__)
 def _description_language_instruction(value: Any) -> str:
     language = str(value or "").strip().lower()
     if language in {"zh", "zh-cn", "zh_hans", "chinese"}:
-        return " Write all semantic descriptions, captions, contexts, and variable explanations in Chinese."
-    if language in {"en", "en-us", "english"}:
-        return " Write all semantic descriptions, captions, contexts, and variable explanations in English."
-    return ""
+        output_language = "Chinese"
+    else:
+        output_language = "English"
+    return (
+        " All generated semantic descriptions, captions, contexts, and variable explanations must be "
+        f"written in {output_language}. Copy visible titles, labels, table cells, symbols, and formulas "
+        "verbatim; do not translate source content."
+    )
 
 
 def _extract_html_table(text: Any) -> str:
@@ -298,7 +302,7 @@ class DynamicVLMClient:
             '"bbox_space":"normalized_page","caption":"","type":"figure","description":"",'
             '"labels":[],"context":""}]}. '
             f"Failed layout blocks: {json.dumps(bounded_blocks, ensure_ascii=False)}"
-        )
+        ) + _description_language_instruction(self.description_language)
         text = self._call_image_prompt(image_path, prompt, max_tokens=self.max_tokens)
         data = self._extract_json(text)
         if not data:
@@ -341,7 +345,7 @@ class DynamicVLMClient:
             "cells or values, and never close a partial table merely to claim completeness. "
             f"Original page bbox (metadata only): {json.dumps(block.get('bbox') or [])}. "
             f"Response schema: {json.dumps(schema, ensure_ascii=False)}. "
-        )
+        ) + _description_language_instruction(self.description_language)
         if compact:
             prompt += (
                 "This is the single compact retry after an invalid or incomplete response. Re-read the entire "

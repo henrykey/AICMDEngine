@@ -19,10 +19,14 @@ logger = logging.getLogger(__name__)
 def _description_language_instruction(value: Any) -> str:
     language = str(value or "").strip().lower()
     if language in {"zh", "zh-cn", "zh_hans", "chinese"}:
-        return " Write all semantic descriptions, captions, contexts, and variable explanations in Chinese."
-    if language in {"en", "en-us", "english"}:
-        return " Write all semantic descriptions, captions, contexts, and variable explanations in English."
-    return ""
+        output_language = "Chinese"
+    else:
+        output_language = "English"
+    return (
+        " All generated semantic descriptions, captions, contexts, and variable explanations must be "
+        f"written in {output_language}. Copy visible titles, labels, table cells, symbols, and formulas "
+        "verbatim; do not translate source content."
+    )
 
 
 class OpenAICompatibleOcrClient:

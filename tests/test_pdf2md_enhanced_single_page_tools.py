@@ -62,6 +62,22 @@ GBT16749_PAGE12_QWEN_RESPONSE = (
 ).read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize("language,expected_language", [
+    ("zh", "Chinese"),
+    ("en", "English"),
+    ("ja", "English"),
+    ("unknown", "English"),
+])
+def test_openai_compatible_ocr_prompt_uses_description_language_fallback(
+        language, expected_language):
+    client = OpenAICompatibleOcrClient({"description_language": language})
+
+    prompt = client._default_prompt()
+
+    assert f"written in {expected_language}" in prompt
+    assert "visible titles, labels, table cells, symbols, and formulas verbatim" in prompt
+
+
 def test_full_page_dual_output_uses_configured_bounded_budget(monkeypatch):
     observed = []
     client = DynamicVLMClient(
@@ -203,6 +219,7 @@ def test_layout_recovery_prompt_keeps_authoritative_ids_and_parses_only_typed_ar
     observed = {}
     client = DynamicVLMClient.__new__(DynamicVLMClient)
     client.max_tokens = 4096
+    client.description_language = "unknown"
 
     def fake_call(image_path, prompt, max_tokens):
         observed.update({"image_path": image_path, "prompt": prompt, "max_tokens": max_tokens})
