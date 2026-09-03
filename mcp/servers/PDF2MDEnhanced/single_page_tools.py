@@ -23,6 +23,18 @@ from .vlm_client import DynamicVLMClient
 
 
 logger = logging.getLogger(__name__)
+
+
+def _figure_plain_text(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"(?is)<li\b[^>]*>", "- ", text)
+    text = re.sub(r"(?is)</?(?:br|p|div|li|tr|h[1-6])\b[^>]*>", "\n", text)
+    text = re.sub(r"(?is)<[^>]+>", " ", text)
+    text = html.unescape(text)
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.splitlines()]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(line for line in lines if line)).strip()
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 PDF_EXTENSIONS = {".pdf"}
 DEFAULT_REVISE_PAGE_MARKDOWN_PROMPT = """请根据这张单页渲染图片，重新生成该页可审核的 Markdown 内容。
@@ -1103,7 +1115,7 @@ def _normalize_page_markdown(markdown: str) -> str:
 
 
 def _figure_item(item: OcrElement, page_text: str, source: str = "vlm_ocr") -> Dict[str, Any]:
-    desc = str(item.description or item.text or item.caption or item.title or "").strip()
+    desc = _figure_plain_text(str(item.description or item.text or item.caption or item.title or "").strip())
     caption = item.caption or item.title or _figure_caption(desc) or _figure_caption(page_text)
     labels = item.raw.get("labels", []) if isinstance(item.raw, dict) else []
     if not isinstance(labels, list):
@@ -1772,7 +1784,7 @@ def _prompt_figures(page_text: str, description_language: str = "en") -> str:
         "\"type\":\"schematic|chart|diagram|figure|unknown\",\"description\":\"\",\"semanticDesc\":\"\","
         "\"labels\":[],\"context\":\"\"}],\"tables\":[],\"formulas\":[]}。\n"
         "字段要求：caption/capture/name/figureName 都表示图名/图题；有可见图题/图注时必须抄录原文并填入这些字段。"
-        "description/semanticDesc 都表示图的语义描述。"
+        "description/semanticDesc 都表示图的语义描述，必须是纯文本；禁止 HTML、XML、Markdown、列表标记、标签和代码围栏。"
         "语种要求：图名必须抄录图片中可见图题/图注的原文；description/semanticDesc 和 context "
         "必须遵守开头指定的描述语言。"
         "未见图题时图名字段都留空，不要编造图名。\n"
@@ -1791,7 +1803,7 @@ def _prompt_figure_page(page_text: str, description_language: str = "en") -> str
         "\"labels\":[],\"context\":\"\"}],\"tables\":[],\"formulas\":[]}。"
         "Markdown 中的每个插图应包含图题和简洁但具体的图像描述。"
         "字段要求：caption/capture/name/figureName 都表示图名/图题；有可见图题/图注时必须抄录原文并填入这些字段。"
-        "description/semanticDesc 都表示图的语义描述。"
+        "description/semanticDesc 都表示图的语义描述，必须是纯文本；禁止 HTML、XML、Markdown、列表标记、标签和代码围栏。"
         "语种要求：图名必须抄录图片中可见图题/图注的原文；生成的 description/semanticDesc 和 context "
         "必须遵守开头指定的描述语言。Markdown 中抄录的原文保持原语种。"
         "未见图题时图名字段都留空，不要编造图名。"

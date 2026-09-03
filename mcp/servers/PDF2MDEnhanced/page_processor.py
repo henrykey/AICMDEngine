@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import logging
 import math
@@ -25,6 +26,30 @@ from .layout_ledger import (
 from .vlm_client import DynamicVLMClient
 
 logger = logging.getLogger(__name__)
+
+
+def _figure_plain_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"(?is)<li\b[^>]*>", "- ", text)
+    text = re.sub(r"(?is)</?(?:br|p|div|li|tr|h[1-6])\b[^>]*>", "\n", text)
+    text = re.sub(r"(?is)<[^>]+>", " ", text)
+    text = html.unescape(text)
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.splitlines()]
+    text = re.sub(r"\n{3,}", "\n\n", "\n".join(line for line in lines if line)).strip()
+    if not text or re.fullmatch(r"(?i)(?:figure|fig\.?|图)\s*[\w.-]+[.:：]?", text):
+        return ""
+    return text
+
+
+def _normalize_recovered_figure(candidate: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(candidate)
+    description = _figure_plain_text(candidate.get("description") or candidate.get("semanticDesc") or candidate.get("summary"))
+    normalized["description"] = description
+    if not description:
+        normalized["caption"] = ""
+    return normalized
 
 
 def process_page(
@@ -969,6 +994,8 @@ def _recover_layout_objects(
                 else:
                     candidate = vlm.extract_object_structured(str(crop_path), block, compact=compact)
                 attempt.update(_safe_object_call_info(client))
+                if isinstance(candidate, dict) and object_type == "figure":
+                    candidate = _normalize_recovered_figure(candidate)
                 reason, shape = validate_recovered_object(block, candidate)
                 attempt.update(shape)
                 if attempt.get("truncated") or attempt.get("finish_reason") == "length":
