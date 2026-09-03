@@ -1113,7 +1113,7 @@ def test_extract_page_tables_skips_vlm_metadata_when_glm_title_is_reliable(monke
     assert result["model_calls"] == {"glm_ocr": 1, "vlm_ocr": 0}
     assert result["items"][0]["title"] == "表 7-35 铜换热管的折流板和支撑板管孔直径及允许偏差"
     assert result["items"][0]["semanticDesc"].startswith("表 7-35 铜换热管")
-    assert "Fields include: 换热管外径, 10, 12" in result["items"][0]["semanticDesc"]
+    assert "字段包括：换热管外径, 10, 12" in result["items"][0]["semanticDesc"]
     assert not FakeVLMClient.prompts
 
 
@@ -2155,18 +2155,71 @@ def test_revise_page_markdown_tool_schema_exposed():
     assert "file_url" in properties
 
 
-def test_semantic_description_language_defaults_to_english():
-    assert single_page_tools._normalize_description_language(None) == "en"
-    assert single_page_tools._normalize_description_language("unknown") == "en"
-    prompt = single_page_tools._prompt_table_metadata([], "", "unknown")
-    assert "MUST be written in English" in prompt
-    assert "Do not translate them into Chinese" in prompt
+def test_semantic_description_language_detects_from_readable_page_text():
+    assert single_page_tools._detect_description_language("这是中文技术文档的正文内容。") == "zh"
+    assert single_page_tools._detect_description_language(
+        "This technical document contains readable English prose."
+    ) == "en"
+    assert single_page_tools._detect_description_language("$$x=y$$ 123 mm") is None
 
 
 def test_semantic_description_language_supports_chinese():
     assert single_page_tools._normalize_description_language("zh-CN") == "zh"
     prompt = single_page_tools._prompt_table_metadata([], "", "zh-CN")
     assert "必须使用中文" in prompt
+
+
+@pytest.mark.parametrize("requested_language", [None, "", "   ", "unknown", " UNKNOWN "])
+def test_unknown_language_is_cached_from_ocr_text_for_later_semantic_prompts(monkeypatch, requested_language):
+    _patch_clients(monkeypatch)
+    FakeGLMOcrClient.result = OcrResult(
+        page_text="这是中文技术文档的正文内容，包含表格、公式和插图。",
+        tables=[OcrElement(
+            kind="table",
+            source="glm_ocr",
+            title="表 1 参数",
+            markdown="| 参数 | 数值 |\n| --- | --- |\n| 压力 | 1 |",
+        )],
+        formulas=[OcrElement(kind="formula", source="glm_ocr", latex="x=y+z")],
+        figures=[OcrElement(kind="figure", source="glm_ocr", caption="图 1", description="结构示意图")],
+    )
+
+    result = json.loads(single_page_tools.extract_page_structured_direct(
+        file_data=PNG_DATA,
+        input_type="image",
+        description_language=requested_language,
+        ocr_config={"glm_ocr": {"enabled": True, "model": "glm", "base_url": "http://x"}},
+        vlm_config={"model": "vlm", "api_key": "x", "base_url": "http://x"},
+    ))
+
+    assert "字段包括" in result["tables"][0]["semanticDesc"]
+    assert all("必须使用中文" in prompt for prompt in FakeGLMOcrClient.prompts[1:])
+
+
+def test_explicit_language_is_not_overridden_by_detected_ocr_text(monkeypatch):
+    _patch_clients(monkeypatch)
+    FakeGLMOcrClient.result = OcrResult(
+        page_text="这是中文技术文档的正文内容，包含表格、公式和插图。",
+        tables=[OcrElement(
+            kind="table",
+            source="glm_ocr",
+            title="表 1 参数",
+            markdown="| 参数 | 数值 |\n| --- | --- |\n| 压力 | 1 |",
+        )],
+        formulas=[OcrElement(kind="formula", source="glm_ocr", latex="x=y+z")],
+        figures=[OcrElement(kind="figure", source="glm_ocr", caption="图 1", description="结构示意图")],
+    )
+
+    result = json.loads(single_page_tools.extract_page_structured_direct(
+        file_data=PNG_DATA,
+        input_type="image",
+        description_language="en",
+        ocr_config={"glm_ocr": {"enabled": True, "model": "glm", "base_url": "http://x"}},
+        vlm_config={"model": "vlm", "api_key": "x", "base_url": "http://x"},
+    ))
+
+    assert "Fields include" in result["tables"][0]["semanticDesc"]
+    assert all("MUST be written in English" in prompt for prompt in FakeGLMOcrClient.prompts)
 
 
 def test_completion_tool_schemas_expose_description_language():
@@ -2179,4 +2232,4 @@ def test_completion_tool_schemas_expose_description_language():
         tool = server.mcp.get_tool(tool_name)
         if asyncio.iscoroutine(tool):
             tool = asyncio.run(tool)
-        assert tool.parameters["properties"]["description_language"]["default"] == "en"
+        assert tool.parameters["properties"]["description_language"]["default"] == "unknown"

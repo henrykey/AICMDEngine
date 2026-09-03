@@ -42,6 +42,8 @@ class SinglePageContext:
     page_no: int
     page_text: str = ""
     native_tables: List[str] = None  # type: ignore[assignment]
+    description_language: str = ""
+    description_language_explicit: bool = False
 
     def __post_init__(self) -> None:
         if self.native_tables is None:
@@ -57,7 +59,7 @@ def extract_page_tables_direct(
     output_format: str = "json",
     describe: bool = True,
     table_rows_format: str = "structured_json",
-    description_language: str = "en",
+    description_language: str = "unknown",
     ocr_config: Optional[Dict[str, Any]] = None,
     vlm_config: Optional[Dict[str, Any]] = None,
     routing_config: Optional[Dict[str, Any]] = None,
@@ -88,7 +90,7 @@ def extract_page_formulas_direct(
     input_type: str = "auto",
     output_format: str = "json",
     describe: bool = True,
-    description_language: str = "en",
+    description_language: str = "unknown",
     ocr_config: Optional[Dict[str, Any]] = None,
     vlm_config: Optional[Dict[str, Any]] = None,
     routing_config: Optional[Dict[str, Any]] = None,
@@ -118,7 +120,7 @@ def extract_page_figures_direct(
     input_type: str = "auto",
     output_format: str = "json",
     describe: bool = True,
-    description_language: str = "en",
+    description_language: str = "unknown",
     ocr_config: Optional[Dict[str, Any]] = None,
     vlm_config: Optional[Dict[str, Any]] = None,
     routing_config: Optional[Dict[str, Any]] = None,
@@ -149,7 +151,7 @@ def extract_page_structured_direct(
     input_type: str = "auto",
     output_format: str = "json",
     describe: bool = True,
-    description_language: str = "en",
+    description_language: str = "unknown",
     ocr_config: Optional[Dict[str, Any]] = None,
     vlm_config: Optional[Dict[str, Any]] = None,
     routing_config: Optional[Dict[str, Any]] = None,
@@ -294,7 +296,6 @@ def _extract_single_page(
     table_rows_format: str = "structured_json",
 ) -> Dict[str, Any]:
     _validate_output_target(target)
-    description_language = _normalize_description_language(description_language)
     with tempfile.TemporaryDirectory(prefix="pdf2md_enh_single_page_") as work_dir:
         ctx = _prepare_context(
             Path(work_dir),
@@ -305,6 +306,7 @@ def _extract_single_page(
             input_type=input_type,
             routing_config=routing_config,
         )
+        _initialize_description_language(ctx, description_language)
         rc = _routing_defaults(_merge_routing_ocr_config(routing_config, ocr_config))
         glm = OpenAICompatibleOcrClient(rc.get("glm_ocr") or {}, source="glm_ocr")
         vlm = DynamicVLMClient(vlm_config or _vlm_ocr_config(ocr_config))
@@ -519,7 +521,9 @@ def _extract_tables(
     if glm.enabled:
         try:
             model_calls["glm_ocr"] += 1
-            result = glm.extract_page(ctx.image_path, prompt=_prompt_tables(ctx.page_text, describe, description_language))
+            result = glm.extract_page(ctx.image_path, prompt=_prompt_tables(
+                ctx.page_text, describe, _effective_description_language(ctx)))
+            _cache_description_language(ctx, result)
             items = [
                 _table_item("glm_ocr", item.markdown or item.text, ctx.page_text, describe, item, table_rows_format=table_rows_format)
                 for item in result.tables
@@ -529,7 +533,8 @@ def _extract_tables(
                 if recovered:
                     items = [_table_item("glm_ocr", recovered, ctx.page_text, describe, table_rows_format=table_rows_format, source_text=source_text)]
             if items:
-                _enrich_table_metadata_with_vlm(ctx, vlm, items, describe, model_calls, warnings, description_language)
+                _enrich_table_metadata_with_vlm(ctx, vlm, items, describe, model_calls, warnings,
+                                                _effective_description_language(ctx))
                 return items
             warnings.append("glm_ocr_returned_no_tables")
         except Exception as exc:
@@ -541,9 +546,10 @@ def _extract_tables(
             result = _call_vlm_structured(
                 vlm,
                 ctx.image_path,
-                _prompt_tables(ctx.page_text, describe, description_language),
+                _prompt_tables(ctx.page_text, describe, _effective_description_language(ctx)),
                 max_tokens=vlm.max_tokens,
             )
+            _cache_description_language(ctx, result)
             items = [
                 _table_item("vlm_ocr", item.markdown or item.text, ctx.page_text, describe, item, table_rows_format=table_rows_format)
                 for item in result.tables
@@ -568,9 +574,10 @@ def _extract_tables(
                 compact_result = _call_vlm_structured(
                     vlm,
                     ctx.image_path,
-                    _prompt_tables_compact(ctx.page_text, description_language),
+                    _prompt_tables_compact(ctx.page_text, _effective_description_language(ctx)),
                     max_tokens=vlm.max_tokens,
                 )
+                _cache_description_language(ctx, compact_result)
                 compact_items = [
                     _table_item(
                         "vlm_ocr",
@@ -682,7 +689,9 @@ def _extract_formulas(
     if glm.enabled:
         try:
             model_calls["glm_ocr"] += 1
-            result = glm.extract_page(ctx.image_path, prompt=_prompt_formulas(ctx.page_text, describe, description_language))
+            result = glm.extract_page(ctx.image_path, prompt=_prompt_formulas(
+                ctx.page_text, describe, _effective_description_language(ctx)))
+            _cache_description_language(ctx, result)
             items = _formula_items_from_result("glm_ocr", result, ctx.page_text, describe)
             if items:
                 return items
@@ -693,7 +702,9 @@ def _extract_formulas(
     if vlm.enabled:
         try:
             model_calls["vlm_ocr"] += 1
-            result = _call_vlm_structured(vlm, ctx.image_path, _prompt_formulas(ctx.page_text, describe, description_language))
+            result = _call_vlm_structured(vlm, ctx.image_path, _prompt_formulas(
+                ctx.page_text, describe, _effective_description_language(ctx)))
+            _cache_description_language(ctx, result)
             items = _formula_items_from_result("vlm_ocr", result, ctx.page_text, describe)
             if items:
                 return items
@@ -719,7 +730,9 @@ def _extract_formula_page_result(
     if glm.enabled:
         try:
             model_calls["glm_ocr"] += 1
-            result = glm.extract_page(ctx.image_path, prompt=_prompt_formula_page(ctx.page_text, describe, description_language))
+            result = glm.extract_page(ctx.image_path, prompt=_prompt_formula_page(
+                ctx.page_text, describe, _effective_description_language(ctx)))
+            _cache_description_language(ctx, result)
             page_markdown = _normalize_page_markdown(result.markdown or result.page_text)
             if not page_markdown and result.formulas:
                 page_markdown = _formula_page_markdown_from_items(result.formulas)
@@ -735,7 +748,9 @@ def _extract_formula_page_result(
     if vlm.enabled:
         try:
             model_calls["vlm_ocr"] += 1
-            result = _call_vlm_structured(vlm, ctx.image_path, _prompt_formula_page(ctx.page_text, describe, description_language))
+            result = _call_vlm_structured(vlm, ctx.image_path, _prompt_formula_page(
+                ctx.page_text, describe, _effective_description_language(ctx)))
+            _cache_description_language(ctx, result)
             page_markdown = _normalize_page_markdown(result.markdown or result.page_text)
             if not page_markdown and result.formulas:
                 page_markdown = _formula_page_markdown_from_items(result.formulas)
@@ -764,7 +779,9 @@ def _extract_figures(
     if glm.enabled:
         try:
             model_calls["glm_ocr"] += 1
-            result = glm.extract_page(ctx.image_path, prompt=_prompt_figures(ctx.page_text, description_language))
+            result = glm.extract_page(ctx.image_path, prompt=_prompt_figures(
+                ctx.page_text, _effective_description_language(ctx)))
+            _cache_description_language(ctx, result)
             items = [_figure_item(item, ctx.page_text, "glm_ocr") for item in result.figures]
             if items:
                 return items
@@ -777,7 +794,9 @@ def _extract_figures(
         return []
     try:
         model_calls["vlm_ocr"] += 1
-        result = _call_vlm_structured(vlm, ctx.image_path, _prompt_figures(ctx.page_text, description_language))
+        result = _call_vlm_structured(vlm, ctx.image_path, _prompt_figures(
+            ctx.page_text, _effective_description_language(ctx)))
+        _cache_description_language(ctx, result)
         items = [_figure_item(item, ctx.page_text, "vlm_ocr") for item in result.figures]
         if items:
             return items
@@ -800,7 +819,9 @@ def _extract_figure_page_result(
     if glm.enabled:
         try:
             model_calls["glm_ocr"] += 1
-            result = glm.extract_page(ctx.image_path, prompt=_prompt_figure_page(ctx.page_text, description_language))
+            result = glm.extract_page(ctx.image_path, prompt=_prompt_figure_page(
+                ctx.page_text, _effective_description_language(ctx)))
+            _cache_description_language(ctx, result)
             page_markdown = _normalize_page_markdown(result.markdown or result.page_text)
             items = [_figure_item(item, ctx.page_text or page_markdown, "glm_ocr") for item in result.figures]
             if not page_markdown and items:
@@ -816,7 +837,9 @@ def _extract_figure_page_result(
         return _figure_page_result(ctx, model_calls, warnings, page_markdown, items)
     try:
         model_calls["vlm_ocr"] += 1
-        result = _call_vlm_structured(vlm, ctx.image_path, _prompt_figure_page(ctx.page_text, description_language))
+        result = _call_vlm_structured(vlm, ctx.image_path, _prompt_figure_page(
+            ctx.page_text, _effective_description_language(ctx)))
+        _cache_description_language(ctx, result)
         page_markdown = _normalize_page_markdown(result.markdown or result.page_text)
         items = [_figure_item(item, ctx.page_text or page_markdown, "vlm_ocr") for item in result.figures]
         if not page_markdown and items:
@@ -1598,6 +1621,45 @@ def _vlm_ocr_config(ocr_config: Optional[Dict[str, Any]]) -> Optional[Dict[str, 
 def _normalize_description_language(value: Optional[str]) -> str:
     normalized = str(value or "").strip().lower()
     return "zh" if normalized.startswith("zh") else "en"
+
+
+def _initialize_description_language(ctx: SinglePageContext, value: Optional[str]) -> None:
+    normalized = str(value or "").strip().lower()
+    if normalized and normalized != "unknown":
+        ctx.description_language = _normalize_description_language(normalized)
+        ctx.description_language_explicit = True
+        return
+    detected = _detect_description_language(ctx.page_text)
+    if detected:
+        ctx.description_language = detected
+
+
+def _effective_description_language(ctx: SinglePageContext) -> str:
+    return ctx.description_language or "en"
+
+
+def _cache_description_language(ctx: SinglePageContext, result: OcrResult) -> None:
+    if ctx.description_language_explicit or ctx.description_language:
+        return
+    candidates = [result.page_text, result.markdown]
+    candidates.extend(item.markdown or item.title or item.text for item in result.tables)
+    candidates.extend(item.context or item.text for item in result.formulas)
+    candidates.extend(item.caption or item.title for item in result.figures)
+    detected = _detect_description_language("\n".join(item for item in candidates if item))
+    if detected:
+        ctx.description_language = detected
+
+
+def _detect_description_language(value: Optional[str]) -> Optional[str]:
+    text = re.sub(r"(?s)\$\$.*?\$\$|\$[^$]*\$", " ", str(value or ""))
+    text = re.sub(r"(?is)</?[A-Za-z][^<>]*>", " ", text)
+    han_count = len(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", text))
+    latin_words = re.findall(r"\b[A-Za-z][A-Za-z'-]{1,}\b", text)
+    if han_count >= 4:
+        return "zh"
+    if sum(len(word) for word in latin_words) >= 12 and len(latin_words) >= 3:
+        return "en"
+    return None
 
 
 def _description_language_instruction(value: Optional[str]) -> str:
