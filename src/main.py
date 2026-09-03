@@ -130,7 +130,15 @@ async def startup_db_client():
         app.external_mcp_manager = external_mcp_manager
         refresh_result = await external_mcp_manager.refresh()
         if not refresh_result["success"]:
-            logger.error("External MCP startup refresh had failures: %s", refresh_result)
+            failed_names = set(refresh_result["failed"])
+            reconnecting_names = set(refresh_result.get("reconnecting", []))
+            if failed_names and failed_names.issubset(reconnecting_names):
+                logger.debug(
+                    "Configured external MCP servers are reconnecting in the background: %s",
+                    sorted(reconnecting_names),
+                )
+            else:
+                logger.error("External MCP startup refresh had failures: %s", refresh_result)
 
         # Set global MCP registry for dependency injection
         app.mcp_registry = mcp_registry

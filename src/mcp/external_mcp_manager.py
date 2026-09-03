@@ -95,6 +95,7 @@ class ExternalMCPManager:
                 "unchanged": [],
                 "failed": {},
                 "stale_external_ids": [],
+                "reconnecting": [],
             }
 
             for name, config in desired.items():
@@ -119,11 +120,19 @@ class ExternalMCPManager:
                         )
                         if schedule_reconnect:
                             schedule_reconnect()
+                        result["reconnecting"].append(name)
                     elif replacement is not None:
                         await self._close_server(replacement)
                     result["failed"][name] = str(exc)
                     result["success"] = False
-                    logger.error("Failed to initialize external MCP '%s': %s", name, exc)
+                    if name in result["reconnecting"]:
+                        logger.debug(
+                            "External MCP '%s' is unavailable and reconnecting in the background: %s",
+                            name,
+                            exc,
+                        )
+                    else:
+                        logger.error("Failed to initialize external MCP '%s': %s", name, exc)
                     continue
 
                 self.registry.register_mcp(replacement)

@@ -4,6 +4,7 @@ Tests for External MCP Server Adapter
 
 import pytest
 import asyncio
+import logging
 from unittest.mock import Mock, AsyncMock, patch
 import json
 
@@ -475,6 +476,62 @@ class TestExternalMCPServer:
         assert attempts == 3
         assert delays == [1, 2, 2]
         assert mcp.is_initialized is True
+        await mcp.close()
+
+    @pytest.mark.asyncio
+    async def test_reconnect_failures_are_quiet_until_one_recovery_log(self, caplog):
+        mcp = ExternalMCPServer(
+            name="recovering",
+            url="ws://recovering.example/mcp",
+            transport="websocket",
+        )
+        attempts = 0
+
+        async def flaky_connect():
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                mcp._log_connection_attempt_failure(
+                    "error", "transport unavailable for %s", mcp.name
+                )
+                raise ConnectionError("still offline")
+
+        async def no_wait(_delay):
+            return None
+
+        mcp._connect_transport = flaky_connect
+        mcp._sleep = no_wait
+        mcp._reconnect_enabled = True
+        mcp._reconnect_base_delay = 0
+        mcp._reconnect_max_delay = 0
+
+        with caplog.at_level(logging.INFO, logger="src.mcp.external_mcp"):
+            mcp.schedule_reconnect()
+            await mcp._reconnect_task
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert not any("transport unavailable" in message for message in messages)
+        assert messages.count("Reconnected external MCP 'recovering'") == 1
+        await mcp.close()
+
+    @pytest.mark.asyncio
+    async def test_health_check_failure_is_quiet_before_reconnect(self, caplog):
+        mcp = ExternalMCPServer(name="recovering", command="echo")
+        mcp.is_initialized = True
+        mcp._reconnect_enabled = True
+        mcp._health_interval = 0
+
+        async def unavailable_tools():
+            raise ConnectionError("server stopped")
+
+        mcp._discover_tools = unavailable_tools
+        mcp.schedule_reconnect = Mock()
+
+        with caplog.at_level(logging.INFO, logger="src.mcp.external_mcp"):
+            await mcp._health_check_loop()
+
+        assert not any("health check failed" in record.getMessage() for record in caplog.records)
+        mcp.schedule_reconnect.assert_called_once()
         await mcp.close()
 
     @pytest.mark.asyncio

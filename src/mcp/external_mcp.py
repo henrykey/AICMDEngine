@@ -11,6 +11,7 @@ External MCP Server Adapter
 import asyncio
 import json
 import logging
+from contextvars import ContextVar
 from typing import Dict, Any, Optional, List
 from subprocess import PIPE, STDOUT
 from datetime import datetime
@@ -95,6 +96,11 @@ class ExternalMCPServer(BaseMCPServer):
         self._reconnect_max_delay = 30.0
         self._health_interval = 30.0
         self._sleep = asyncio.sleep
+        # Connection attempts run in several tasks.  Keep the retry loop quiet
+        # without hiding errors from an actual tool invocation.
+        self._quiet_connection_attempt: ContextVar[bool] = ContextVar(
+            f"external_mcp_quiet_connection_attempt_{name}", default=False
+        )
 
         # 验证参数
         if transport == "stdio" and not command:
@@ -112,13 +118,13 @@ class ExternalMCPServer(BaseMCPServer):
         self._closing = False
         self._reconnect_enabled = True
         try:
-            await self._connect_once()
+            await self._connect_once(quiet=True)
 
             logger.info(f"Initialized external MCP '{self.name}'")
 
         except Exception as e:
             self._mark_unavailable_and_reconnect()
-            logger.error(f"Failed to initialize external MCP '{self.name}': {e}")
+            logger.debug("External MCP '%s' is unavailable; reconnect scheduled: %s", self.name, e)
             raise
 
     async def _connect_transport(self) -> None:
@@ -131,15 +137,38 @@ class ExternalMCPServer(BaseMCPServer):
         else:
             raise ValueError(f"Unsupported transport: {self.transport}")
 
-    async def _connect_once(self) -> None:
+    async def _connect_once(self, *, quiet: bool = False) -> None:
         async with self._connection_lock:
             if self.is_initialized:
                 return
-            await self._reset_transport()
-            await self._connect_transport()
-            self.is_initialized = True
-            self.last_heartbeat = datetime.now()
-            self._start_health_check()
+            quiet_token = self._quiet_connection_attempt.set(quiet)
+            try:
+                await self._reset_transport()
+                await self._connect_transport()
+                self.is_initialized = True
+                self.last_heartbeat = datetime.now()
+                self._start_health_check()
+            finally:
+                self._quiet_connection_attempt.reset(quiet_token)
+
+    def _log_connection_attempt_failure(self, level: str, message: str, *args: Any) -> None:
+        """Log background connection failures only at debug level.
+
+        A configured server may be intentionally stopped.  The reconnect loop
+        should keep trying, but its expected failures must not flood operator
+        logs.  Calls made while executing a tool keep their original severity.
+        """
+        if self._quiet_connection_attempt.get():
+            logger.debug(message, *args)
+            return
+        getattr(logger, level)(message, *args)
+
+    def _log_connection_attempt_info(self, message: str, *args: Any) -> None:
+        """Keep connection-attempt detail out of normal operator logs."""
+        if self._quiet_connection_attempt.get():
+            logger.debug(message, *args)
+            return
+        logger.info(message, *args)
 
     def schedule_reconnect(self) -> None:
         """Schedule one event-driven reconnect loop for this configured server."""
@@ -159,14 +188,14 @@ class ExternalMCPServer(BaseMCPServer):
             while not self._closing and self._reconnect_enabled:
                 await self._sleep(delay)
                 try:
-                    await self._connect_once()
+                    await self._connect_once(quiet=True)
                     logger.info("Reconnected external MCP '%s'", self.name)
                     return
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
                     self.is_initialized = False
-                    logger.warning(
+                    logger.debug(
                         "Reconnect failed for external MCP '%s'; retrying in %.1fs: %s",
                         self.name,
                         min(delay * 2, self._reconnect_max_delay),
@@ -194,7 +223,10 @@ class ExternalMCPServer(BaseMCPServer):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.warning("External MCP '%s' health check failed: %s", self.name, exc)
+            # A temporarily stopped configured server is expected to recover in
+            # the background.  Do not turn its 30-second health probe into
+            # operator-log noise.
+            logger.debug("External MCP '%s' health check failed: %s", self.name, exc)
             self._mark_unavailable_and_reconnect()
         finally:
             if self._health_task is asyncio.current_task():
@@ -209,9 +241,11 @@ class ExternalMCPServer(BaseMCPServer):
             env.update(self.env)
 
             # 启动外部MCP进程
-            logger.info(
-                f"Starting external MCP '{self.name}': "
-                f"{self.command} {' '.join(self.args)}"
+            self._log_connection_attempt_info(
+                "Starting external MCP '%s': %s %s",
+                self.name,
+                self.command,
+                " ".join(self.args),
             )
 
             self.process = await asyncio.create_subprocess_exec(
@@ -237,7 +271,7 @@ class ExternalMCPServer(BaseMCPServer):
             await self._discover_tools()
 
         except Exception as e:
-            logger.error(f"Failed to connect via stdio: {e}")
+            self._log_connection_attempt_failure("error", "Failed to connect via stdio: %s", e)
             if self.process:
                 self.process.terminate()
                 await self.process.wait()
@@ -248,7 +282,9 @@ class ExternalMCPServer(BaseMCPServer):
         try:
             import websockets
 
-            logger.info(f"Connecting to WebSocket MCP '{self.name}': {self.url}")
+            self._log_connection_attempt_info(
+                "Connecting to WebSocket MCP '%s': %s", self.name, self.url
+            )
 
             # 建立 WebSocket 连接
             self.websocket = await websockets.connect(
@@ -259,7 +295,7 @@ class ExternalMCPServer(BaseMCPServer):
                 max_size=settings.external_mcp_ws_max_size
             )
 
-            logger.info(f"WebSocket connection established to '{self.name}'")
+            self._log_connection_attempt_info("WebSocket connection established to '%s'", self.name)
 
             # 启动消息接收任务
             asyncio.create_task(self._read_websocket_messages_loop())
@@ -273,10 +309,12 @@ class ExternalMCPServer(BaseMCPServer):
             # 发现工具
             await self._discover_tools()
 
-            logger.info(f"WebSocket MCP '{self.name}' initialized successfully")
+            self._log_connection_attempt_info("WebSocket MCP '%s' initialized successfully", self.name)
 
         except Exception as e:
-            logger.error(f"Failed to connect WebSocket MCP '{self.name}': {e}")
+            self._log_connection_attempt_failure(
+                "error", "Failed to connect WebSocket MCP '%s': %s", self.name, e
+            )
             if self.websocket:
                 try:
                     await self.websocket.close()
@@ -302,7 +340,7 @@ class ExternalMCPServer(BaseMCPServer):
         """
         import aiohttp
 
-        logger.info(f"Connecting to HTTP MCP '{self.name}': {self.url}")
+        self._log_connection_attempt_info("Connecting to HTTP MCP '%s': %s", self.name, self.url)
 
         self.http_session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=self.timeout, connect=30, sock_read=self.timeout),
@@ -317,18 +355,24 @@ class ExternalMCPServer(BaseMCPServer):
             # 尝试 streamable-http
             probed = await self._probe_streamable_http()
             if probed:
-                logger.info(f"HTTP MCP '{self.name}': using streamable-http (/mcp)")
+                self._log_connection_attempt_info(
+                    "HTTP MCP '%s': using streamable-http (/mcp)", self.name
+                )
                 await self._discover_tools()
             else:
                 # 回退旧版 SSE
-                logger.info(f"HTTP MCP '{self.name}': /mcp not found, trying legacy SSE (/sse)")
+                self._log_connection_attempt_info(
+                    "HTTP MCP '%s': /mcp not found, trying legacy SSE (/sse)", self.name
+                )
                 await self._connect_legacy_sse()
                 await self._discover_tools()
 
-            logger.info(f"HTTP MCP '{self.name}' initialized successfully")
+            self._log_connection_attempt_info("HTTP MCP '%s' initialized successfully", self.name)
 
         except Exception as e:
-            logger.error(f"Failed to connect HTTP MCP '{self.name}': {e}")
+            self._log_connection_attempt_failure(
+                "error", "Failed to connect HTTP MCP '%s': %s", self.name, e
+            )
             if self.http_session:
                 try:
                     await self.http_session.close()
@@ -381,7 +425,7 @@ class ExternalMCPServer(BaseMCPServer):
                 session_id = resp.headers.get("Mcp-Session-Id") or resp.headers.get("mcp-session-id")
                 if session_id:
                     self.http_session_id = session_id
-                    logger.info(f"HTTP MCP '{self.name}' session ID: {session_id}")
+                    self._log_connection_attempt_info("HTTP MCP '%s' session ID: %s", self.name, session_id)
 
                 if resp.status == 200:
                     content_type = resp.headers.get("Content-Type", "")
@@ -406,10 +450,11 @@ class ExternalMCPServer(BaseMCPServer):
 
                     if response and "result" in response:
                         server_info = response["result"].get("serverInfo", {})
-                        logger.info(
-                            f"Connected to HTTP MCP '{self.name}': "
-                            f"{server_info.get('name', 'Unknown')} "
-                            f"v{server_info.get('version', 'Unknown')}"
+                        self._log_connection_attempt_info(
+                            "Connected to HTTP MCP '%s': %s v%s",
+                            self.name,
+                            server_info.get("name", "Unknown"),
+                            server_info.get("version", "Unknown"),
                         )
 
                     # 发送 initialized 通知
@@ -422,7 +467,9 @@ class ExternalMCPServer(BaseMCPServer):
                     return True
 
         except Exception as e:
-            logger.warning(f"HTTP MCP '{self.name}' streamable-http probe failed: {e}")
+            self._log_connection_attempt_failure(
+                "warning", "HTTP MCP '%s' streamable-http probe failed: %s", self.name, e
+            )
 
         return False
 
@@ -444,7 +491,7 @@ class ExternalMCPServer(BaseMCPServer):
         import aiohttp
 
         sse_url = f"{self.url.rstrip('/')}/sse"
-        logger.info(f"Connecting legacy SSE MCP '{self.name}': {sse_url}")
+        self._log_connection_attempt_info("Connecting legacy SSE MCP '%s': %s", self.name, sse_url)
 
         endpoint_future: asyncio.Future = asyncio.get_event_loop().create_future()
 
@@ -484,8 +531,8 @@ class ExternalMCPServer(BaseMCPServer):
                             self.sse_mode = True
                             if not endpoint_future.done():
                                 endpoint_future.set_result(msg_url)
-                            logger.info(
-                                f"Legacy SSE MCP '{self.name}' message URL: {msg_url}"
+                            self._log_connection_attempt_info(
+                                "Legacy SSE MCP '%s' message URL: %s", self.name, msg_url
                             )
                         elif event_type == "message" and data_str:
                             # JSON-RPC 响应，解析并 resolve 对应的 future
@@ -502,7 +549,9 @@ class ExternalMCPServer(BaseMCPServer):
                     elif line == "":
                         event_type = None
             except Exception as e:
-                logger.warning(f"Legacy SSE reader for '{self.name}' ended: {e}")
+                self._log_connection_attempt_failure(
+                    "warning", "Legacy SSE reader for '%s' ended: %s", self.name, e
+                )
                 # 将所有待定请求标记为错误
                 for fut in self.pending_requests.values():
                     if not fut.done():
@@ -530,10 +579,11 @@ class ExternalMCPServer(BaseMCPServer):
         response = await self._send_legacy_sse_request(init_request)
         if response and "result" in response:
             server_info = response["result"].get("serverInfo", {})
-            logger.info(
-                f"Connected to legacy SSE MCP '{self.name}': "
-                f"{server_info.get('name', 'Unknown')} "
-                f"v{server_info.get('version', 'Unknown')}"
+            self._log_connection_attempt_info(
+                "Connected to legacy SSE MCP '%s': %s v%s",
+                self.name,
+                server_info.get("name", "Unknown"),
+                server_info.get("version", "Unknown"),
             )
 
         # 发送 initialized 通知
@@ -606,16 +656,21 @@ class ExternalMCPServer(BaseMCPServer):
 
             if response and "result" in response:
                 server_info = response["result"].get("serverInfo", {})
-                logger.info(
-                    f"Connected to external MCP '{self.name}': "
-                    f"{server_info.get('name', 'Unknown')} "
-                    f"v{server_info.get('version', 'Unknown')}"
+                self._log_connection_attempt_info(
+                    "Connected to external MCP '%s': %s v%s",
+                    self.name,
+                    server_info.get("name", "Unknown"),
+                    server_info.get("version", "Unknown"),
                 )
             else:
-                logger.warning(f"Unexpected initialize response from '{self.name}'")
+                self._log_connection_attempt_failure(
+                    "warning", "Unexpected initialize response from '%s'", self.name
+                )
 
         except Exception as e:
-            logger.error(f"Failed to initialize external MCP '{self.name}': {e}")
+            self._log_connection_attempt_failure(
+                "error", "Failed to initialize external MCP '%s': %s", self.name, e
+            )
             raise
 
     async def _discover_tools(self):
@@ -639,8 +694,8 @@ class ExternalMCPServer(BaseMCPServer):
             tools = response["result"].get("tools", [])
             await self._replace_discovered_tools(tools)
 
-            logger.info(
-                f"Discovered {len(tools)} tools from external MCP '{self.name}'"
+            self._log_connection_attempt_info(
+                "Discovered %s tools from external MCP '%s'", len(tools), self.name
             )
         else:
             raise RuntimeError(f"No tools returned from external MCP '{self.name}'")
@@ -648,7 +703,7 @@ class ExternalMCPServer(BaseMCPServer):
     async def _discover_tools_http(self):
         """通过 HTTP 协议发现工具（自动选择 streamable-http 或 legacy SSE）"""
         try:
-            logger.info(f"Discovering tools from HTTP MCP '{self.name}'")
+            self._log_connection_attempt_info("Discovering tools from HTTP MCP '%s'", self.name)
 
             request = {
                 "jsonrpc": "2.0",
@@ -665,14 +720,16 @@ class ExternalMCPServer(BaseMCPServer):
                 tools = response["result"].get("tools", [])
                 await self._replace_discovered_tools(tools)
 
-                logger.info(
-                    f"Discovered {len(tools)} tools from HTTP MCP '{self.name}'"
+                self._log_connection_attempt_info(
+                    "Discovered %s tools from HTTP MCP '%s'", len(tools), self.name
                 )
             else:
                 raise RuntimeError(f"No tools returned from HTTP MCP '{self.name}'")
 
         except Exception as e:
-            logger.error(f"Error discovering tools from HTTP MCP '{self.name}': {e}")
+            self._log_connection_attempt_failure(
+                "error", "Error discovering tools from HTTP MCP '%s': %s", self.name, e
+            )
             raise
 
     async def _send_http_request(
@@ -776,7 +833,8 @@ class ExternalMCPServer(BaseMCPServer):
                     return None, session_id
 
         except Exception as e:
-            logger.error(
+            self._log_connection_attempt_failure(
+                "error",
                 "HTTP request error for '%s': %s (%r)",
                 self.name,
                 e.__class__.__name__,
@@ -1145,7 +1203,7 @@ class ExternalMCPServer(BaseMCPServer):
         if self.transport == "websocket" and self.websocket is None:
             logger.warning(f"WebSocket connection to '{self.name}' lost, reconnecting...")
             self.is_initialized = False
-            await self._connect_once()
+            await self._connect_once(quiet=True)
 
         # 根据transport类型检查连接
         if self.transport == "stdio":
