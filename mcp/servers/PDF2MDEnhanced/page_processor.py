@@ -80,7 +80,9 @@ def process_page(
             rotate_deg=rc["render_rotate_deg"],
         )
 
-        effective_vlm_config = vlm_config or rc.get("vlm_ocr")
+        description_language = str(rc.get("description_language") or "unknown")
+        effective_vlm_config = dict(vlm_config or rc.get("vlm_ocr") or {})
+        effective_vlm_config["description_language"] = description_language
         vlm = DynamicVLMClient(effective_vlm_config)
         logger.info(
             "process_page vlm_client: enabled=%s provider=%s model=%s base_url=%s timeout=%s max_retries=%s",
@@ -93,7 +95,9 @@ def process_page(
         )
         vlm_calls = 0
         glm_calls = 0
-        glm_ocr = OpenAICompatibleOcrClient(rc.get("glm_ocr") or {}, source="glm_ocr")
+        glm_ocr_config = dict(rc.get("glm_ocr") or {})
+        glm_ocr_config["description_language"] = description_language
+        glm_ocr = OpenAICompatibleOcrClient(glm_ocr_config, source="glm_ocr")
         layout_enabled = bool(rc.get("layout_ledger_enabled", True))
         layout_driven = False
         layout_outcome = None

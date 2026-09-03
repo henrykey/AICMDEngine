@@ -16,6 +16,15 @@ from .ocr_normalizers import normalize_text_response
 logger = logging.getLogger(__name__)
 
 
+def _description_language_instruction(value: Any) -> str:
+    language = str(value or "").strip().lower()
+    if language in {"zh", "zh-cn", "zh_hans", "chinese"}:
+        return " Write all semantic descriptions, captions, contexts, and variable explanations in Chinese."
+    if language in {"en", "en-us", "english"}:
+        return " Write all semantic descriptions, captions, contexts, and variable explanations in English."
+    return ""
+
+
 class OpenAICompatibleOcrClient:
     def __init__(self, config: Optional[Dict[str, Any]], source: str = "glm_ocr") -> None:
         cfg = config or {}
@@ -28,6 +37,7 @@ class OpenAICompatibleOcrClient:
         self.max_tokens = int(cfg.get("max_tokens", 4096))
         self.temperature = float(cfg.get("temperature", 0.0))
         self.extra_headers = cfg.get("extra_headers") or {}
+        self.description_language = str(cfg.get("description_language") or "unknown")
         self.mode = str(cfg.get("mode") or cfg.get("api_type") or cfg.get("endpoint_type") or "").strip().lower()
         self.layout_url = str(cfg.get("layout_url") or cfg.get("api_url") or "").strip()
         self.use_layout_parsing = self._should_use_layout_parsing()
@@ -331,4 +341,4 @@ class OpenAICompatibleOcrClient:
             "in the 0..1 range and set bbox_space to normalized_page. Table source_cells row 0 is the header "
             "row; set source_cell_row_offset to 1 and include row, col, rowspan, colspan, source_cell_index, "
             "confidence, and bbox for each reliably bounded source cell. Omit uncertain cell bboxes."
-        )
+        ) + _description_language_instruction(self.description_language)

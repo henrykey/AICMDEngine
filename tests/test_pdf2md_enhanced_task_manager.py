@@ -71,3 +71,16 @@ def test_finalize_includes_failed_page_errors(tmp_path):
         "2": "VLM token quota exhausted",
         "3": "provider timeout",
     }
+
+
+def test_task_record_retains_description_language():
+    task = TaskRecord(
+        task_id="task_language",
+        task_name="demo",
+        source_path="/tmp/demo.pdf",
+        total_pages=1,
+        planned_pages=[1],
+        description_language="zh",
+    )
+
+    assert task.description_language == "zh"

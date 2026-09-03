@@ -48,6 +48,7 @@ async def start_task(
     s3_key: Optional[str] = None,
     storage_config: Optional[Dict[str, Any]] = None,
     pages: Optional[List[int]] = None,
+    description_language: str = "unknown",
     routing_config: Optional[Dict[str, Any]] = None,
     ocr_config: Optional[Dict[str, Any]] = None,
     vlm_defaults: Optional[Dict[str, Any]] = None,
@@ -67,6 +68,7 @@ async def start_task(
                 s3_key=s3_key,
                 storage_config=storage_config,
                 pages=pages,
+                description_language=description_language,
             ),
         )
         res = {
@@ -93,6 +95,7 @@ async def process_task_page(
     ocr_config: Optional[Dict[str, Any]] = None,
     policy: str = "auto",
     prev_context: Optional[Dict[str, Any]] = None,
+    description_language: str = "unknown",
     routing_config: Optional[Dict[str, Any]] = None,
 ) -> str:
     loop = asyncio.get_event_loop()
@@ -107,6 +110,10 @@ async def process_task_page(
         await loop.run_in_executor(None, manager.update_page_running, task_id, page_no)
 
         task = manager.get_task(task_id)
+        effective_description_language = _known_description_language(description_language)
+        if effective_description_language == "unknown":
+            effective_description_language = _known_description_language(task.description_language)
+        effective_routing_config["description_language"] = effective_description_language
         # Internal context for page processor policy decisions.
         effective_routing_config["__task_total_pages"] = len(task.planned_pages)
         result = await asyncio.wait_for(
@@ -390,6 +397,15 @@ def _vlm_runtime_info(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "context_window": c.get("context_window"),
         "dual_output_max_tokens": c.get("dual_output_max_tokens"),
     }
+
+
+def _known_description_language(value: Any) -> str:
+    language = str(value or "").strip().lower()
+    if language in {"zh", "zh-cn", "zh_hans", "chinese"}:
+        return "zh"
+    if language in {"en", "en-us", "english"}:
+        return "en"
+    return "unknown"
 
 
 def _normalize_vlm_config(cfg: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

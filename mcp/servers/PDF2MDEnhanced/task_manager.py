@@ -28,6 +28,7 @@ class TaskManager:
         s3_key: Optional[str] = None,
         storage_config: Optional[Dict[str, Any]] = None,
         pages: Optional[List[int]] = None,
+        description_language: str = "unknown",
     ) -> TaskRecord:
         source = self._source_resolver.resolve(
             task_name=task_name,
@@ -62,6 +63,7 @@ class TaskManager:
             source_ref=source.source_ref,
             source_size_bytes=source.size_bytes,
             source_sha1=source.sha1,
+            description_language=str(description_language or "unknown"),
         )
         for p in planned_pages:
             task.pages[p] = PageRecord(page_no=p)

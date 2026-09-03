@@ -1494,6 +1494,7 @@ def test_process_task_page_does_not_promote_single_page_table_schema(monkeypatch
     class FakeTask:
         source_path = "/tmp/demo.pdf"
         planned_pages = [1]
+        description_language = "unknown"
 
     class FakeManager:
         def update_page_running(self, task_id, page_no):
@@ -1583,6 +1584,60 @@ def test_process_task_page_does_not_promote_single_page_table_schema(monkeypatch
     assert top_level_forbidden.isdisjoint(result["page_result"].keys())
     assert table_item_forbidden.isdisjoint(result["page_result"]["elements"]["tables"][0].keys())
     assert table_item_forbidden.isdisjoint(result["page_result"]["rag"]["elements"]["tables"][0].keys())
+
+
+def test_process_task_page_uses_task_description_language_when_request_is_unknown(monkeypatch):
+    class FakeTask:
+        source_path = "/tmp/demo.pdf"
+        planned_pages = [1]
+        description_language = "zh"
+
+    class FakeManager:
+        def update_page_running(self, task_id, page_no):
+            pass
+
+        def get_task(self, task_id):
+            return FakeTask()
+
+        def update_page_result(self, task_id, page_no, result):
+            pass
+
+        def update_page_failed(self, task_id, page_no, error):
+            raise AssertionError(error)
+
+    captured = {}
+
+    def process(source_path, page_no, policy, vlm_config, routing_config, prev_context):
+        captured["routing_config"] = routing_config
+        return {"next_context": {}}
+
+    monkeypatch.setattr(server, "manager", FakeManager())
+    monkeypatch.setattr(server, "process_page", process)
+
+    process_task_page_fn = getattr(server.process_task_page, "fn", server.process_task_page)
+    result = json.loads(asyncio.run(process_task_page_fn(
+        task_id="task1", page_no=1, description_language="unknown",
+    )))
+
+    assert result["page_result"] == {"next_context": {}}
+    assert captured["routing_config"]["description_language"] == "zh"
+
+
+def test_start_task_persists_description_language(monkeypatch, tmp_path):
+    source = tmp_path / "language.pdf"
+    document = fitz.open()
+    document.new_page().insert_text((72, 72), "language fixture")
+    document.save(source)
+    document.close()
+
+    manager = server.TaskManager(str(tmp_path / "output"))
+    monkeypatch.setattr(server, "manager", manager)
+    start_task_fn = getattr(server.start_task, "fn", server.start_task)
+    started = json.loads(asyncio.run(start_task_fn(
+        task_name="language-fixture", file_path=str(source), description_language="zh",
+    )))
+
+    assert manager.get_task(started["task_id"]).description_language == "zh"
 
 
 def test_local_task_chain_persists_layout_and_finalizes_legacy_rag(monkeypatch, tmp_path):

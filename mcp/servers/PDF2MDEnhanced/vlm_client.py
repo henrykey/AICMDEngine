@@ -10,6 +10,15 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger(__name__)
 
 
+def _description_language_instruction(value: Any) -> str:
+    language = str(value or "").strip().lower()
+    if language in {"zh", "zh-cn", "zh_hans", "chinese"}:
+        return " Write all semantic descriptions, captions, contexts, and variable explanations in Chinese."
+    if language in {"en", "en-us", "english"}:
+        return " Write all semantic descriptions, captions, contexts, and variable explanations in English."
+    return ""
+
+
 def _extract_html_table(text: Any) -> str:
     """Keep the single HTML table from a model response, stripping only a fence."""
     value = str(text or "").strip()
@@ -43,6 +52,7 @@ class DynamicVLMClient:
         self.context_window_safety_margin = int(cfg.get("context_window_safety_margin", 0))
         self.temperature = float(cfg.get("temperature", 0.1))
         self.extra_headers = cfg.get("extra_headers") or {}
+        self.description_language = str(cfg.get("description_language") or "unknown")
         self._runtime_max_tokens_cap: Optional[int] = None
         self.last_dual_output_budget: Dict[str, Any] = {}
         self.last_call_info: Dict[str, Any] = {}
@@ -89,7 +99,7 @@ class DynamicVLMClient:
         }
 
     def full_page_markdown(self, image_path: str) -> str:
-        prompt = "Extract page content as clean markdown. Keep structure, formulas and tables where possible. Illustrations are replaced with placeholders described in text."
+        prompt = "Extract page content as clean markdown. Keep structure, formulas and tables where possible. Illustrations are replaced with placeholders described in text." + _description_language_instruction(self.description_language)
         # prompt = """
         #     分析这页PDF，生成Render数据。
         #     Render（展示用）：
@@ -182,7 +192,7 @@ class DynamicVLMClient:
             "\"formulas\":[{\"latex\":\"\",\"description\":\"\",\"bbox\":[0,0,0,0],\"bbox_space\":\"normalized_page\",\"confidence\":0.0}],"
             "\"tables\":[{\"title\":\"\",\"markdown\":\"\",\"description\":\"\",\"columns\":[],\"normalized_rows\":[[]],\"bbox\":[0,0,0,0],\"bbox_space\":\"normalized_page\",\"source_cell_row_offset\":1,\"source_cells\":[]}],"
             "\"figures\":[{\"caption\":\"\",\"description\":\"\",\"bbox\":[0,0,0,0],\"bbox_space\":\"normalized_page\",\"confidence\":0.0}]}}}"
-        )
+        ) + _description_language_instruction(self.description_language)
         # Keep dual-output bounded by the provider, task setting, and context reserve.
         effective_max_tokens = self._dual_output_budget()
         text = self._call_image_prompt(image_path, prompt, max_tokens=effective_max_tokens)
@@ -252,7 +262,7 @@ class DynamicVLMClient:
             '"description":"","labels":[],"context":"","bbox":[0,0,0,0],"bbox_space":"normalized_page",'
             '"confidence":0.0,"status":"EXTRACTED|LOW_CONFIDENCE|UNREADABLE"}]}. '
             "Do not invent content for unreadable objects; empty content remains incomplete downstream."
-        )
+        ) + _description_language_instruction(self.description_language)
         text = self._call_image_prompt(image_path, prompt, max_tokens=self.max_tokens)
         data = self._extract_json(text)
         if data:

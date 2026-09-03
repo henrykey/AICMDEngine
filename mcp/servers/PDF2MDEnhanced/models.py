@@ -33,6 +33,7 @@ class TaskRecord:
     source_ref: Optional[str] = None
     source_size_bytes: Optional[int] = None
     source_sha1: Optional[str] = None
+    description_language: str = "unknown"
     status: str = "UPLOADED"
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
