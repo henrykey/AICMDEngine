@@ -101,12 +101,16 @@ def build_layout_outcome(
         if error:
             entry["error"] = error
         else:
+            if object_type == "table":
+                _normalize_table_math(entry)
+                if entry["content"] != content:
+                    markdown = markdown.replace(content, entry["content"])
             payload = _payload_from_entry(entry, block)
             if payload is None:
                 entry["error"] = _error(f"layout_{object_type}_content_missing", "layout_content", True)
             else:
                 entry["status"] = "EXTRACTED"
-                entry["review_required"] = False
+                entry["review_required"] = bool(entry.get("manualReviewRequired"))
                 if object_type != "text":
                     payloads[_collection_for_type(object_type)].append(payload)
         layout.append(entry)
@@ -276,6 +280,10 @@ def apply_recovered_payloads(outcome: Dict[str, Any], recovered: Any) -> None:
             entry["status"] = "EXTRACTED"
             entry["review_required"] = False
             entry["content"] = _payload_content(object_type, payload)
+            if object_type == "table":
+                _normalize_table_math(entry)
+                payload["markdown"] = entry["content"]
+                payload.update(_table_math_metadata(entry))
             entry["error"] = None
             used_layout_ids.add(str(entry["layout_id"]))
     outcome["unmatched_recovery_refs"] = _unique(unmatched)
@@ -349,7 +357,7 @@ def reconcile_layout(
         stats["identified"] += 1
         status = item.get("status")
         if status == "EXTRACTED":
-            item["review_required"] = False
+            item["review_required"] = bool(item.get("manualReviewRequired"))
             stats["extracted"] += 1
         elif status == "FAILED":
             item["review_required"] = True
@@ -381,7 +389,7 @@ def reconcile_layout(
             if item.get("status") == "FAILED" or item.get("review_required") is True
         ),
         "accounted_for": accounted_for,
-        "complete": accounted_for and failed == 0,
+        "complete": accounted_for and failed == 0 and not any(item.get("review_required") for item in layout),
     }
 
 
@@ -535,6 +543,7 @@ def _payload_from_entry(entry: Dict[str, Any], block: Dict[str, Any]) -> Optiona
     if object_type == "table":
         return {
             **common,
+            **_table_math_metadata(entry),
             # A layout-bound caption is the only reliable title source.  Model/raw
             # metadata may belong to a preceding table on the same page.
             "title": entry.get("title") or "",
@@ -671,6 +680,68 @@ def validate_recovered_object(block: Dict[str, Any], candidate: Any) -> Tuple[st
     return "", shape
 
 
+def _table_math_metadata(entry: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: entry[key] for key in (
+        "original_content", "warnings", "degraded", "manualReviewRequired"
+    ) if key in entry}
+
+
+def _normalize_math_cell(cell: str) -> Tuple[str, bool]:
+    # Escaped dollars are text. Match runs so a stray $$ is never treated as $.
+    dollars = [m for m in re.finditer(r"\$+", cell)
+               if (len(cell[:m.start()]) - len(cell[:m.start()].rstrip("\\"))) % 2 == 0]
+    if not dollars:
+        return cell, False
+    if len(dollars) == 1 and dollars[0].group() == "$":
+        text = cell.strip()
+        body = text[1:] if text.startswith("$") else text[:-1] if text.endswith("$") else ""
+        # A complete simple scalar with an explicit script is unambiguous here;
+        # prose, HTML, commands, incomplete braces and bare currency are not.
+        atom = r"(?:\d+(?:\.\d+)?|[A-Za-z])"
+        script = r"[_^](?:\{[A-Za-z0-9*†‡]+\}|[A-Za-z0-9*†‡])"
+        if re.fullmatch(rf"[≤≥<>+−-]?{atom}(?:[~～+−-]{atom})*(?:{script})+", body):
+            return cell.replace(text, "$" + body + "$", 1), False
+    # Leave ordinary prices alone, including prices in prose.
+    if not re.search(r"[_^{}]", cell) and all(
+        m.group() == "$" and re.match(r"\d+(?:[.,]\d+)*(?:\b|$)", cell[m.end():])
+        for m in dollars
+    ):
+        return cell, False
+    valid = len(dollars) % 2 == 0 and all(
+        left.group() == right.group() and len(left.group()) <= 2
+        and cell[left.end():right.start()].strip()
+        for left, right in zip(dollars[::2], dollars[1::2])
+    )
+    return cell, not valid
+
+
+def _normalize_table_math(entry: Dict[str, Any]) -> None:
+    original = str(entry.get("content") or "")
+    if "$" not in original:
+        return
+    parser = _TableMathParser(original)
+    parser.feed(original)
+    parser.close()
+    # Reuse structural validation; never let malformed/nested HTML join cells.
+    if parser.invalid or parser.stack or not parser.spans:
+        return
+    content = original
+    review = False
+    for start, end in reversed(parser.spans):
+        normalized, unresolved = _normalize_math_cell(original[start:end])
+        content = content[:start] + normalized + content[end:]
+        review = review or unresolved
+    if content != original or review:
+        entry.setdefault("original_content", original)
+        entry["content"] = content
+        entry["warnings"] = [*entry.get("warnings", []),
+                             "table_math_delimiter_unresolved" if review else "table_math_delimiter_repaired"]
+        if review:
+            entry["degraded"] = True
+            entry["manualReviewRequired"] = True
+            entry["review_required"] = True
+
+
 class _TableStructureParser(HTMLParser):
     """Reject incomplete/misnested table structure; never auto-close model output."""
     parents = {
@@ -707,6 +778,30 @@ class _TableStructureParser(HTMLParser):
             self.invalid = True
         else:
             self.handle_starttag(tag, attrs)
+
+
+class _TableMathParser(_TableStructureParser):
+    """Locate cell interiors without reserializing tags, attributes or entities."""
+
+    def __init__(self, content: str) -> None:
+        super().__init__()
+        self.line_offsets = [0, *[m.end() for m in re.finditer("\n", content)]]
+        self.spans: List[Tuple[int, int]] = []
+        self.cell_start = 0
+
+    def _offset(self) -> int:
+        line, column = self.getpos()
+        return self.line_offsets[line - 1] + column
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        super().handle_starttag(tag, attrs)
+        if tag in {"td", "th"}:
+            self.cell_start = self._offset() + len(self.get_starttag_text())
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"td", "th"}:
+            self.spans.append((self.cell_start, self._offset()))
+        super().handle_endtag(tag)
 
 
 def _payload_common(entry: Dict[str, Any]) -> Dict[str, Any]:

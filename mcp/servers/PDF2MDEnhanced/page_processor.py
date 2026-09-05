@@ -1785,6 +1785,10 @@ def _build_layout_output_elements(
             item = built[0]
             if payload.get("source"):
                 item["source"] = payload["source"]
+            if collection == "tables":
+                for key in ("original_content", "warnings", "degraded", "manualReviewRequired"):
+                    if key in payload:
+                        item[key] = payload[key]
             output[collection].append(item)
     return output
 

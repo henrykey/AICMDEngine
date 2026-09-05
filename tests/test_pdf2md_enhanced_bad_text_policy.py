@@ -1605,3 +1605,79 @@ def test_full_html_table_semantics_use_title_instead_of_zero_dimensions():
 
 def test_formula_context_placeholder_is_not_semantic_description():
     assert page_processor._formula_summary('', 'zh') == ''
+
+
+@pytest.mark.parametrize('cell,expected,review', [
+    ('150~475^{a}$', '$150~475^{a}$', False),
+    ('≤475^{a}$', '$≤475^{a}$', False),
+    ('$x_{i}^{2}', '$x_{i}^{2}$', False),
+    ('$x_{i}^{2}$', '$x_{i}^{2}$', False),
+    ('$$x_{i}^{2}$$', '$$x_{i}^{2}$$', False),
+    (r'\(x_i\)', r'\(x_i\)', False),
+    ('$5.00', '$5.00', False),
+    (r'price \$5', r'price \$5', False),
+    ('cost $5 and $10', 'cost $5 and $10', False),
+    ('unreadable $', 'unreadable $', True),
+    ('x_{i$','x_{i$', True),
+    ('<b>x_i</b>$', '<b>x_i</b>$', True),
+    ('$x_i$$', '$x_i$$', True),
+])
+def test_table_cell_math_boundary_contract(monkeypatch, cell, expected, review):
+    table = f'<table><tr><th rowspan="2">{cell}</th><td>stable</td></tr><tr><td>2</td></tr></table>'
+    raw = _layout_raw([
+        {'label': 'table', 'bbox_2d': [10, 10, 90, 50], 'content': table},
+        {'label': 'formula', 'bbox_2d': [10, 60, 90, 80], 'content': '$$E=mc^2$$'},
+    ])
+    raw['md_results'] = table + '\n\n$$E=mc^2$$'
+    result = _run_layout_ledger_page(monkeypatch, raw)
+    output = result['elements']['tables'][0]
+    assert output['markdown'] == table.replace(cell, expected)
+    assert table.replace(cell, expected) in result['render']['markdown']
+    assert len(result['elements']['tables']) == 1
+    assert [f['latex'] for f in result['elements']['formulas']] == ['$$E=mc^2$$']
+    assert result['layout'][0]['review_required'] is review
+    assert result['reconciliation']['complete'] is (not review)
+    if cell != expected or review:
+        assert output['original_content'] == table
+    if review:
+        assert output['manualReviewRequired'] is True
+        assert result['reconciliation']['review_required_layout_ids'] == ['p1-o001-table']
+
+
+def test_table_math_never_pairs_across_cells_or_tables(monkeypatch):
+    tables = ['<table><tr><td>x_i$</td><td>$y_j</td></tr></table>',
+              '<table><tr><td>unknown $</td><td>text</td></tr></table>']
+    raw = _layout_raw([{'label': 'table', 'bbox_2d': [10, 10+i*40, 90, 40+i*40], 'content': t}
+                       for i, t in enumerate(tables)])
+    result = _run_layout_ledger_page(monkeypatch, raw)
+    assert [t['markdown'] for t in result['elements']['tables']] == [
+        '<table><tr><td>$x_i$</td><td>$y_j$</td></tr></table>', tables[1]]
+    assert [t['layout_id'] for t in result['elements']['tables']] == ['p1-o001-table', 'p1-o002-table']
+    assert result['elements']['formulas'] == []
+
+
+@pytest.mark.parametrize('cell,review', [('x_i$', False), ('unknown $', True)])
+def test_recovered_table_math_uses_same_boundary_and_quality_contract(monkeypatch, cell, review):
+    table = f'<table><tr><td colspan="2">{cell}</td></tr></table>'
+    result = _run_layout_ledger_page(monkeypatch, _layout_raw([
+        {'label': 'table', 'bbox_2d': [10, 10, 90, 90], 'content': '<table><tr><td>'},
+    ]), recovered={'tables': [{'layout_id': 'p1-o001-table', 'markdown': table}]})
+    output = result['elements']['tables'][0]
+    assert output['markdown'] == (table if review else table.replace('x_i$', '$x_i$'))
+    assert output['original_content'] == table
+    assert result['layout'][0]['review_required'] is review
+    assert result['reconciliation']['complete'] is (not review)
+    assert result['elements']['formulas'] == []
+
+
+def test_table_math_preserves_duplicate_identity_tags_and_entities(monkeypatch):
+    table = '<TABLE data-note="$"><TR>\n<TD colspan="2"> x_i$ </TD><TD>&amp;<sup>a</sup></TD></TR></TABLE>'
+    raw = _layout_raw([
+        {'index': i, 'label': 'table', 'bbox_2d': [10, 10+i*40, 90, 40+i*40], 'content': table}
+        for i in range(2)
+    ], markdown=table + '\n\n' + table)
+    result = _run_layout_ledger_page(monkeypatch, raw)
+    assert [t['markdown'] for t in result['elements']['tables']] == [table.replace('x_i$', '$x_i$')] * 2
+    assert [t['source_block_index'] for t in result['elements']['tables']] == [0, 1]
+    assert result['reconciliation']['complete'] is True
+    assert result['elements']['formulas'] == []
