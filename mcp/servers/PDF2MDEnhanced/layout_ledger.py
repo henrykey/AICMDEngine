@@ -77,6 +77,8 @@ def build_layout_outcome(
     payloads: Dict[str, List[Dict[str, Any]]] = {"tables": [], "formulas": [], "figures": []}
     for reading_order, block in enumerate(blocks, 1):
         object_type = canonical_layout_type(block.get("layout_type"))
+        if object_type == "formula" and is_formula_body_text(block.get("content"), block.get("layout_type")):
+            object_type = "text"
         layout_id = f"p{page_no}-o{reading_order:03d}-{object_type}"
         content = str(block.get("content") or "").strip()
         entry = {
@@ -183,7 +185,11 @@ def apply_recovered_payloads(outcome: Dict[str, Any], recovered: Any) -> None:
             payload = _recovered_payload(entry, candidate)
             if payload is None:
                 continue
-            outcome["payloads"][collection].append(payload)
+            if object_type == "formula" and is_formula_body_text(payload.get("latex")):
+                # A recovered variable explanation belongs to body text, not an object array.
+                entry["type"] = "text"
+            else:
+                outcome["payloads"][collection].append(payload)
             entry["status"] = "EXTRACTED"
             entry["review_required"] = False
             entry["content"] = _payload_content(object_type, payload)
@@ -294,6 +300,28 @@ def reconcile_layout(
         "accounted_for": accounted_for,
         "complete": accounted_for and failed == 0,
     }
+
+
+def is_formula_body_text(content: Any, layout_type: Any = "") -> bool:
+    """Demote explicit inline math, variable atoms and definition prose; keep main equations."""
+    if str(layout_type or "").lower() == "inline_formula":
+        return True
+    text = str(content or "").strip()
+    if not text:
+        return False  # unknown content still needs the existing structural recovery
+    text = re.sub(r"\\[()[\]]|\$", "", text).strip()
+    text = re.sub(r"\\(?:mathrm|mathbf|mathit|text)\{([^{}]*)\}", r"\1", text).strip()
+    if re.fullmatch(r"(?:Pa|kPa|MPa|GPa|mm|cm|kg|kN|Hz|rad|mol)", text):
+        return True
+    if re.match(r"(?i)^(?:式中|其中|注[:：]|where\b)", text):
+        return True
+    atom = r"(?:\\(?:Delta|delta)\s*)?(?:\\[A-Za-z]+|[A-Za-z\u0370-\u03ff])(?:\s*[_^]\s*(?:\{[^{}]+\}|[A-Za-z0-9]))*"
+    if re.fullmatch(atom, text):
+        return True
+    # A symbol followed by prose is a definition, unlike F=ma or a standalone integral.
+    return bool(re.match(
+        rf"(?i)^{atom}\s*(?:[—–:：]+\s*|(?:为|表示|是)\s*|(?:is|denotes|represents)\s+).+", text
+    ))
 
 
 def canonical_layout_type(value: Any) -> str:

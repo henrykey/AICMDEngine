@@ -15,6 +15,7 @@ import fitz
 from .ocr_clients import OpenAICompatibleOcrClient, OcrResult
 from .layout_ledger import (
     LAYOUT_VERSION,
+    is_formula_body_text,
     apply_recovered_payloads,
     blank_layout_outcome,
     build_layout_outcome,
@@ -120,7 +121,6 @@ def process_page(
         )
         vlm_calls = 0
         page_semantic_attempted = False
-        semantic_layout_ids = set()
         glm_calls = 0
         glm_ocr_config = dict(rc.get("glm_ocr") or {})
         glm_ocr_config["description_language"] = description_language
@@ -178,11 +178,6 @@ def process_page(
                         glm_calls += recovery_glm_calls
                         vlm_calls += recovery_vlm_calls
                         layout_outcome["recovery"] = recovery_diagnostics
-                        semantic_layout_ids = {
-                            item["layout_id"] for item in recovery_diagnostics["objects"]
-                            if item["type"] == "formula"
-                            and any(attempt.get("provider") == "vlm_ocr" for attempt in item["attempts"])
-                        }
                 except Exception as exc:
                     layout_outcome = failed_layout_outcome("layout_analysis_failed")
                     logger.warning(
@@ -335,6 +330,17 @@ def process_page(
             markdown = _merge_region_vlm_markdown(markdown, structured)
             rag_page_text = ""
 
+        formula_body_text = list(structured.pop("formula_body_text", []))
+        if layout_driven:
+            formula_body_text.extend(
+                entry["content"] for entry in layout_outcome.get("layout") or []
+                if entry.get("type") == "text"
+                and entry.get("layout_type") in {"formula", "equation", "display_formula", "inline_formula"}
+                and entry.get("content")
+            )
+        formula_body_text = _unique_keep_order(formula_body_text)
+        semantic_page_text = _append_formula_body_text(rag_page_text, [markdown, *formula_body_text])
+        formula_semantic_calls = {"text": 0, "image": 0}
         # OCR owns structure; every OCR table/formula gets its normal VLM semantic pass.
         # This is before output validation and never loops on missing semantic fields.
         if route_selected in {"hybrid_glm_ocr", "full_glm_ocr"}:
@@ -342,7 +348,7 @@ def process_page(
                 vlm, str(image_path), structured,
                 layout_outcome.get("payloads") if layout_driven else None,
                 bool(rc.get("vlm_ocr_enabled") and vlm.enabled and not page_semantic_attempted),
-                semantic_layout_ids,
+                page_text=semantic_page_text, formula_semantic_calls=formula_semantic_calls,
             )
 
     doc.close()
@@ -356,6 +362,7 @@ def process_page(
                 vlm_calls += 1
         except Exception as exc:
             logger.warning("render cleanup with llm failed: %r", exc)
+    markdown = _append_formula_body_text(markdown, formula_body_text)
     markdown, table_placeholders = _replace_large_tables_with_placeholders(markdown, display_page_no, rc)
     current_section = _extract_section(markdown) or (prev_context or {}).get("current_section")
     next_context = {
@@ -368,7 +375,8 @@ def process_page(
     # Preserve identified structures and their metadata; use render only when none exist.
     if not layout_driven:
         structured["tables"] = _select_rag_tables(markdown, structured.get("tables") or [])
-    rag_content = _build_rag_content(markdown, structured, rag_page_text=rag_page_text)
+    rag_content = _append_formula_body_text(
+        _build_rag_content(markdown, structured, rag_page_text=rag_page_text), formula_body_text)
     table_source = _detect_table_source(markdown, structured)
     semantic_status = _semantic_status(route_selected, metrics, structured, rc, route_decision.get("fallback_reason"))
     if layout_driven:
@@ -443,7 +451,8 @@ def process_page(
 
     rag_obj = {
         "content": rag_content,
-        "page_text": _strip_layout_noise_lines(rag_page_text.strip() or markdown.strip()),
+        "page_text": _append_formula_body_text(
+            _strip_layout_noise_lines(rag_page_text.strip() or markdown.strip()), formula_body_text),
         "elements": output_elements,
     }
     if _should_emit_chunks(rc):
@@ -465,6 +474,7 @@ def process_page(
             "reasons": reasons,
             "metrics": metrics,
             "vlm_calls": vlm_calls,
+            "formula_semantic_calls": formula_semantic_calls,
             "glm_calls": glm_calls,
             "source_page_no": display_page_no,
             "table_source": table_source,
@@ -1921,7 +1931,7 @@ def _set_object_semantics(item: Dict[str, Any], metadata: Dict[str, Any], name_k
 def _enrich_upload_semantics(
     vlm: DynamicVLMClient, image_path: str, structured: Dict[str, Any],
     payloads: Optional[Dict[str, Any]], enabled: bool,
-    semantic_layout_ids: Optional[set[str]] = None,
+    page_text: str = "", formula_semantic_calls: Optional[Dict[str, int]] = None,
 ) -> int:
     targets = []
     destinations = {}
@@ -1932,8 +1942,6 @@ def _enrich_upload_semantics(
         for index, value in enumerate(values):
             if payloads is not None:
                 metadata = value
-                if metadata.get("layout_id") in (semantic_layout_ids or set()):
-                    continue
                 content = str(value.get(content_key) or "")
             else:
                 content = str(value)
@@ -1956,8 +1964,11 @@ def _enrich_upload_semantics(
                 structured.setdefault("formula_descriptions", {}).pop(content, None)
     if not targets or not enabled:
         return 0
-    try:
-        response = vlm.extract_region_structured(image_path, semantic_objects=targets)
+
+    def merge(response: Any, allowed_targets: list[Dict[str, Any]]) -> None:
+        if not isinstance(response, dict):
+            return
+        allowed_refs = {target["object_ref"] for target in allowed_targets}
         for collection in ("tables", "formulas"):
             candidates = response.get(collection) or []
             if not isinstance(candidates, list):
@@ -1967,7 +1978,7 @@ def _enrich_upload_semantics(
                 if not isinstance(candidate, dict):
                     continue
                 ref = candidate.get("object_ref")
-                if not isinstance(ref, str) or ref not in destinations or refs.count(ref) != 1:
+                if not isinstance(ref, str) or ref not in allowed_refs or refs.count(ref) != 1:
                     continue
                 expected_collection, content, metadata = destinations[ref]
                 if collection != expected_collection:
@@ -1977,16 +1988,54 @@ def _enrich_upload_semantics(
                 for key in ("title", "formula_name", "formula_no", "description", "variables", "context"):
                     value = candidate.get(key)
                     if isinstance(value, str) and value.strip():
-                        # A source name already obtained by OCR must be retained.
                         if key in {"title", "formula_name", "formula_no"} and metadata.get(key):
                             continue
                         metadata[key] = value.strip()
+                # Confidence describes this response, not an earlier text attempt.
+                metadata.pop("semantic_confidence", None)
+                metadata.pop("semantic_confidence_source", None)
                 _copy_semantic_confidence(metadata, candidate)
                 if collection == "formulas" and metadata.get("description"):
                     structured.setdefault("formula_descriptions", {})[content] = metadata["description"]
-    except Exception as exc:
-        logger.warning("upload VLM semantics unavailable: error_type=%s", type(exc).__name__)
-    return 1
+
+    calls = 0
+    table_targets = [target for target in targets if target["type"] == "table"]
+    formula_targets = [target for target in targets if target["type"] == "formula"]
+    if table_targets:
+        calls += 1
+        try:
+            merge(vlm.extract_region_structured(image_path, semantic_objects=table_targets), table_targets)
+        except Exception as exc:
+            logger.warning("upload table semantics unavailable: error_type=%s", type(exc).__name__)
+    if formula_targets:
+        calls += 1
+        if formula_semantic_calls is not None:
+            formula_semantic_calls["text"] += 1
+        try:
+            merge(vlm.describe_formulas_text(page_text, formula_targets), formula_targets)
+        except Exception as exc:
+            logger.warning("upload formula text semantics unavailable: error_type=%s", type(exc).__name__)
+        failed = []
+        for target in formula_targets:
+            metadata = destinations[target["object_ref"]][2]
+            if not _valid_description(metadata.get("description"), str(metadata.get("formula_name") or "")):
+                failed.append({**target, **{key: metadata[key] for key in ("formula_name", "formula_no") if metadata.get(key)}})
+        if failed:
+            calls += 1
+            if formula_semantic_calls is not None:
+                formula_semantic_calls["image"] += 1
+            try:
+                merge(vlm.extract_region_structured(image_path, semantic_objects=failed), failed)
+            except Exception as exc:
+                logger.warning("upload formula image semantics unavailable: error_type=%s", type(exc).__name__)
+    return calls
+
+
+def _append_formula_body_text(text: str, fragments: list[str]) -> str:
+    for fragment in fragments:
+        if fragment and fragment not in text:
+            text = (text.rstrip() + "\n\n" + fragment).strip()
+    return text
 
 
 def _table_summary(title: str, table_text: str, description_language: str = "unknown") -> str:
@@ -2212,9 +2261,14 @@ def _normalize_structured(value: Any) -> Dict[str, Any]:
     formula_descriptions: Dict[str, str] = {}
     formula_metadata: Dict[str, Dict[str, Any]] = {}
     formula_values: list[str] = []
+    formula_body_text: list[str] = []
     for item in _structured_list(raw, "formulas"):
         latex = str(_structured_value(item, "latex", "formula", "text") or "").strip()
         if not latex:
+            continue
+        label = _first_text(item, "layout_type", "type", "label") if isinstance(item, dict) else ""
+        if is_formula_body_text(latex, label):
+            formula_body_text.append(latex)
             continue
         formula_values.append(latex)
         metadata = _structured_metadata(
@@ -2276,6 +2330,8 @@ def _normalize_structured(value: Any) -> Dict[str, Any]:
         "tables": tables,
         "figures": figures,
     }
+    if formula_body_text:
+        normalized["formula_body_text"] = _unique_keep_order(formula_body_text)
     if formula_descriptions:
         normalized["formula_descriptions"] = {
             latex: formula_descriptions[latex]
@@ -2383,6 +2439,7 @@ def _ocr_element_payload(item: Any, kind: str) -> Dict[str, Any]:
     elif kind == "formula":
         payload = {
             "latex": item.latex or item.text,
+            "layout_type": raw.get("label") or raw.get("type"),
             "formula_name": raw.get("formula_name") or raw.get("name") or item.title,
             "formula_no": raw.get("formula_no") or raw.get("number"),
             "description": item.description,

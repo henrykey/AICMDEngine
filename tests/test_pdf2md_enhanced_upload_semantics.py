@@ -180,12 +180,17 @@ def test_glm_fallback_failure_does_not_start_semantic_retry(monkeypatch):
     assert result['elements']['tables'][0]['semantic_status'] == 'name_only'
 
 
-def test_recovered_formula_vlm_is_not_described_again():
-    payload = {'formulas': [{'layout_id': 'p1-formula', 'latex': 'F=ma', 'description': '力等于质量乘加速度。'}]}
+def test_recovered_formula_gets_normal_text_semantic_step():
+    payload = {'formulas': [{'layout_id': 'p1-formula', 'latex': 'F=ma', 'description': 'crop description'}]}
+    calls = []
     class VLM:
+        def describe_formulas_text(self, page_text, formulas):
+            calls.append('text')
+            return {'formulas': [{'object_ref': 'formulas:0', 'description': '力等于质量乘加速度。'}]}
         def extract_region_structured(self, *args, **kwargs):
-            pytest.fail('existing VLM semantic step must not be repeated')
-    assert pp._enrich_upload_semantics(VLM(), 'mock.png', {}, payload, True, {'p1-formula'}) == 0
+            pytest.fail('successful text semantics must not need an image')
+    assert pp._enrich_upload_semantics(VLM(), 'mock.png', {}, payload, True, page_text='OCR body') == 1
+    assert calls == ['text']
     assert payload['formulas'][0]['description'] == '力等于质量乘加速度。'
 
 
@@ -237,7 +242,7 @@ def test_disabled_vlm_keeps_ocr_name_but_does_not_claim_ocr_semantics():
 def test_ocr_number_only_does_not_block_vlm_formula_name():
     structured = pp._normalize_structured({'formulas': [{'latex': 'F=ma', 'formula_name': '(3)'}]})
     class VLM:
-        def extract_region_structured(self, image_path, semantic_objects=None):
+        def describe_formulas_text(self, page_text, semantic_objects):
             return {'formulas': [{'object_ref': 'formulas:0', 'formula_name': '牛顿第二定律',
                                   'description': '合力等于质量乘加速度。'}]}
     pp._enrich_upload_semantics(VLM(), 'mock.png', structured, None, True)
@@ -261,14 +266,14 @@ def test_both_ocr_routes_preserve_latex_and_pass_own_metadata(monkeypatch, route
         f.OcrElement(kind='formula', source='glm_ocr', latex='F=ma', title='牛顿第二定律',
                      context='物体受到的合力', raw={'variables': 'm 是质量', 'confidence': 0.97})])
     calls = []
-    def semantics(self, image_path, semantic_objects=None):
+    def semantics(self, page_text, semantic_objects):
         calls.append(semantic_objects)
         assert semantic_objects[0]['formula_name'] == '牛顿第二定律'
         assert semantic_objects[0]['context'] == '物体受到的合力'
         assert semantic_objects[0]['variables'] == 'm 是质量'
         return {'formulas': [{'object_ref': 'formulas:0', 'latex': 'WRONG', 'description': '合力与加速度成正比。',
                               'semantic_confidence': 0.15, 'semantic_confidence_source': 'vlm_ocr'}]}
-    monkeypatch.setattr(f.FakeVLMClient, 'extract_region_structured', semantics)
+    monkeypatch.setattr(f.FakeVLMClient, 'describe_formulas_text', semantics, raising=False)
     result = pp.process_page('/tmp/mock.pdf', 1, 'auto', {}, {
         'layout_ledger_enabled': False, 'render_cleanup_with_llm': False,
         'ocr_config': {'glm_ocr': {'enabled': True}},
@@ -287,3 +292,199 @@ def test_appendix_and_subformula_numbers_are_not_names_or_descriptions(number):
     assert formula['semantic_status'] == 'missing'
     assert formula['missing_fields'] == ['formula_name', 'description']
     assert formula['formula_no'] == number
+
+
+@pytest.mark.parametrize('text_result', ['valid', 'empty', 'placeholder', 'error', 'duplicate', 'wrong_id'])
+def test_formula_text_first_image_fallback_is_bounded_and_targeted(text_result):
+    payloads = {'formulas': [
+        {'layout_id': 'p1-f1', 'latex': 'F=ma', 'formula_name': '牛顿第二定律', 'confidence': 0.98},
+        {'layout_id': 'p1-f2', 'latex': 'E=mc^2'},
+    ]}
+    calls = []
+    class VLM:
+        def describe_formulas_text(self, page_text, formulas):
+            calls.append(('text', [f['object_ref'] for f in formulas]))
+            assert 'm 为质量' in page_text
+            first = {'object_ref': 'formulas:0', 'layout_id': 'p1-f1', 'description': '力等于质量乘加速度。',
+                     'semantic_confidence': 0.2, 'semantic_confidence_source': 'vlm_ocr'}
+            if text_result == 'error':
+                raise RuntimeError('mock text failure')
+            second = {'object_ref': 'formulas:1', 'description': '表达质量与能量的关系。'}
+            if text_result == 'placeholder':
+                second['description'] = '请结合上下文解释'
+            if text_result == 'wrong_id':
+                second['layout_id'] = 'foreign'
+            return {'formulas': [first] + ([] if text_result == 'empty' else [second, second] if text_result == 'duplicate' else [second])}
+        def extract_region_structured(self, image_path, semantic_objects=None):
+            refs = [f['object_ref'] for f in semantic_objects]
+            calls.append(('image', refs))
+            assert refs == (['formulas:0', 'formulas:1'] if text_result == 'error' else ['formulas:1'])
+            return {'formulas': [{'object_ref': ref, 'description': '根据原文解释物理量之间的关系。',
+                                  'latex': 'WRONG', 'confidence': 0.01} for ref in refs]}
+    count = pp._enrich_upload_semantics(VLM(), 'mock-page.png', {}, payloads, True, page_text='F=ma。式中 m 为质量。E=mc^2。')
+    assert calls[0] == ('text', ['formulas:0', 'formulas:1'])
+    assert count == len(calls) == (1 if text_result == 'valid' else 2)
+    result = pp._build_layout_output_elements('', payloads, 'full_glm_ocr')['formulas']
+    assert [f['latex'] for f in result] == ['F=ma', 'E=mc^2']
+    assert all(f['semantic_status'] == 'complete' for f in result)
+    assert result[0]['confidence'] == 0.98
+    if text_result != 'error':
+        assert result[0]['description'] == '力等于质量乘加速度。'
+        assert result[0]['semantic_confidence'] == 0.2
+
+
+def test_formula_text_and_image_failure_stop_with_missing_fields():
+    calls = []
+    class VLM:
+        def describe_formulas_text(self, page_text, formulas):
+            calls.append('text')
+            return {'formulas': [{'object_ref': 'formulas:0', 'formula_name': '牛顿第二定律', 'description': '变量说明见原文'}]}
+        def extract_region_structured(self, image_path, semantic_objects=None):
+            calls.append('image')
+            return {}
+    payload = {'formulas': [{'layout_id': 'p1-f1', 'latex': 'F=ma'}]}
+    assert pp._enrich_upload_semantics(VLM(), 'mock.png', {}, payload, True, page_text='OCR body') == 2
+    item = build('formulas', payload['formulas'][0])
+    assert calls == ['text', 'image']
+    assert item['semantic_status'] == 'name_only'
+    assert item['missing_fields'] == ['description']
+
+
+@pytest.mark.parametrize('label,content', [
+    ('inline_formula', r'$p=10$'), ('formula', r'$p$'), ('formula', r'\sigma_{s}'),
+    ('formula', '式中 p 为设计压力，D 为内径。'), ('formula', r'$p$ — 设计压力，MPa'),
+    ('formula', r'p: design pressure, MPa'),
+])
+def test_variable_explanations_stay_in_layout_text(label, content):
+    from tests.test_pdf2md_enhanced_object_recovery import ledger
+    raw = _layout_raw([
+        {'label': 'formula', 'bbox_2d': [10, 10, 90, 30], 'content': 'F=ma'},
+        {'label': label, 'bbox_2d': [10, 40, 90, 60], 'content': content},
+        {'label': 'formula', 'bbox_2d': [10, 70, 90, 90], 'content': 'E=mc^2'},
+    ], markdown='')
+    outcome = ledger.build_layout_outcome(raw, 1, 100, 100)
+    assert [f['latex'] for f in outcome['payloads']['formulas']] == ['F=ma', 'E=mc^2']
+    assert outcome['layout'][1]['type'] == 'text'
+    assert content in outcome['markdown']
+    assert [f['layout_id'] for f in outcome['payloads']['formulas']] == ['p1-o001-formula', 'p1-o003-formula']
+
+
+def test_formula_text_chat_has_no_image_and_preserves_identity(monkeypatch):
+    from tests.test_pdf2md_enhanced_object_recovery import VLMClient
+    client = VLMClient({'model': 'mock', 'api_key': 'unused', 'base_url': 'http://127.0.0.1:1', 'max_retries': 0})
+    calls = []
+    def wire(**kwargs):
+        content = kwargs['messages'][0]['content']
+        calls.append(content)
+        assert all(c['type'] == 'text' for c in content)
+        assert 'p1-f1' in content[0]['text'] and 'm 为质量' in content[0]['text']
+        return '{"formulas":[{"object_ref":"formulas:0","description":"解释力与加速度关系。"}]}', 'stream', 'stop'
+    monkeypatch.setattr(client, '_chat_completion_with_stream_fallback', wire)
+    result = client.describe_formulas_text('式中 m 为质量', [{'object_ref': 'formulas:0', 'layout_id': 'p1-f1', 'latex': 'F=ma'}])
+    assert len(calls) == 1
+    assert result['formulas'][0]['object_ref'] == 'formulas:0'
+
+
+def test_crop_latex_only_formula_is_sent_as_text_with_page_body(monkeypatch):
+    calls = []
+    def text(self, page_text, formulas):
+        assert 'm 为质量' in page_text
+        assert [f['layout_id'] for f in formulas] == ['p1-o002-formula']
+        calls.append('text')
+        return {'formulas': [{'object_ref': 'formulas:0', 'description': '力等于质量乘加速度。'}]}
+    def image(self, image_path, semantic_objects=None):
+        pytest.fail('text succeeded; no image semantic call expected')
+    monkeypatch.setattr(LayoutLedgerVLMClient, 'describe_formulas_text', text, raising=False)
+    monkeypatch.setattr(LayoutLedgerVLMClient, 'extract_region_structured', image, raising=False)
+    result = _run_layout_ledger_page(monkeypatch, _layout_raw([
+        {'label': 'text', 'bbox_2d': [10, 10, 90, 20], 'content': '式中 m 为质量'},
+        {'label': 'formula', 'bbox_2d': [10, 30, 90, 50], 'content': ''},
+    ], markdown='式中 m 为质量'), recovered={'formulas': [{'layout_id': 'p1-o002-formula', 'latex': 'F=ma'}]})
+    assert calls == ['text']
+    assert result['decision']['formula_semantic_calls'] == {'text': 1, 'image': 0}
+    assert result['elements']['formulas'][0]['description'] == '力等于质量乘加速度。'
+    assert result['elements']['formulas'][0]['source'] == 'glm_ocr_layout+vlm_object_crop'
+
+
+@pytest.mark.parametrize('layout', [True, False])
+def test_body_latex_survives_upload_without_formula_object(monkeypatch, layout):
+    from tests import test_pdf2md_enhanced_bad_text_policy as f
+    body = [r'$p$', '式中 p 为设计压力。']
+    if layout:
+        result = _run_layout_ledger_page(monkeypatch, _layout_raw([
+            {'label': 'formula', 'bbox_2d': [10, 10+i*30, 90, 30+i*30], 'content': value}
+            for i, value in enumerate(body)
+        ], markdown='OCR introduction'))
+    else:
+        page = f.FakePage('Source body', [(0, 0, 100, 20, 'Source body', 0, 0)])
+        f._patch_page_runtime(monkeypatch, page)
+        f.FakeGLMOcrClient.result = f.OcrResult(markdown='OCR introduction', formulas=[
+            f.OcrElement(kind='formula', source='glm_ocr', latex=value) for value in body])
+        result = pp.process_page('/tmp/mock.pdf', 1, 'auto', {}, {
+            'layout_ledger_enabled': False, 'render_cleanup_with_llm': False,
+            'ocr_config': {'glm_ocr': {'enabled': True}},
+        }, None)
+    assert result['elements']['formulas'] == []
+    for value in body:
+        assert value in result['render']['markdown']
+        assert value in result['rag']['page_text']
+        assert value in result['rag']['content']
+    assert result['decision']['formula_semantic_calls'] == {'text': 0, 'image': 0}
+
+
+def test_recovered_variable_atom_is_body_text_without_reconciliation_failure(monkeypatch):
+    result = _run_layout_ledger_page(monkeypatch, _layout_raw([
+        {'label': 'formula', 'bbox_2d': [10, 20, 90, 50], 'content': ''},
+    ], markdown='OCR body'), recovered={'formulas': [{'layout_id': 'p1-o001-formula', 'latex': r'$p$'}]})
+    assert result['elements']['formulas'] == []
+    assert result['layout'][0]['type'] == 'text'
+    assert result['layout'][0]['layout_id'] == 'p1-o001-formula'
+    assert result['reconciliation']['complete'] is True
+    assert r'$p$' in result['rag']['page_text']
+
+
+def test_text_semantics_receives_ocr_markdown_when_page_text_is_partial(monkeypatch):
+    from tests import test_pdf2md_enhanced_bad_text_policy as f
+    page = f.FakePage('Body', [(0, 0, 100, 20, 'Body', 0, 0)])
+    f._patch_page_runtime(monkeypatch, page)
+    f.FakeGLMOcrClient.result = f.OcrResult(markdown='F=ma。式中 m 为质量', page_text='Chapter 1', formulas=[
+        f.OcrElement(kind='formula', source='glm_ocr', latex='F=ma')])
+    texts = []
+    def text(self, page_text, formulas):
+        texts.append(page_text)
+        return {'formulas': [{'object_ref': 'formulas:0', 'description': '合力与加速度的关系。'}]}
+    monkeypatch.setattr(f.FakeVLMClient, 'describe_formulas_text', text, raising=False)
+    pp.process_page('/tmp/mock.pdf', 1, 'auto', {}, {
+        'layout_ledger_enabled': False, 'render_cleanup_with_llm': False,
+        'ocr_config': {'glm_ocr': {'enabled': True}},
+    }, None)
+    assert len(texts) == 1
+    assert 'Chapter 1' in texts[0] and 'm 为质量' in texts[0]
+
+
+@pytest.mark.parametrize('content', [r'\mathrm{MPa}', r'\Delta p', r'$\sigma$——许用应力'])
+def test_latex_units_and_variable_notation_are_body_text(content):
+    from tests.test_pdf2md_enhanced_object_recovery import ledger
+    assert ledger.is_formula_body_text(content) is True
+
+
+@pytest.mark.parametrize('content', [r'F=ma', r'\Delta p=\rho g h', r'\frac{a+b}{c}', r'\int_0^1 f(x) dx'])
+def test_main_equations_and_expressions_are_not_demoted(content):
+    from tests.test_pdf2md_enhanced_object_recovery import ledger
+    assert ledger.is_formula_body_text(content) is False
+
+
+def test_formula_image_fallback_cannot_overwrite_text_success():
+    payload = {'formulas': [{'latex': 'F=ma'}, {'latex': 'E=mc^2'}]}
+    class VLM:
+        def describe_formulas_text(self, page_text, formulas):
+            return {'formulas': [{'object_ref': 'formulas:0', 'description': '合力与加速度的关系。'}]}
+        def extract_region_structured(self, image_path, semantic_objects=None):
+            assert [t['object_ref'] for t in semantic_objects] == ['formulas:1']
+            return {'formulas': [
+                {'object_ref': 'formulas:0', 'description': '错误覆盖。'},
+                {'object_ref': 'formulas:1', 'description': '质量与能量的关系。'},
+            ]}
+    pp._enrich_upload_semantics(VLM(), 'mock.png', {}, payload, True)
+    assert payload['formulas'][0]['description'] == '合力与加速度的关系。'
+    assert payload['formulas'][1]['description'] == '质量与能量的关系。'

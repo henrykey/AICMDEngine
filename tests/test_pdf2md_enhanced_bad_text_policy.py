@@ -647,12 +647,12 @@ def test_formula_page_uses_hybrid_glm_when_enabled(monkeypatch):
     )
 
     semantic_calls = []
-    def semantics(self, image_path, semantic_objects=None):
+    def semantics(self, page_text, semantic_objects):
         semantic_calls.append(semantic_objects)
         assert semantic_objects[0]["latex"] == "t=\\frac{pD}{2\\sigma\\phi-p}"
         return {"formulas": [{"object_ref": "formulas:0", "formula_name": "壁厚计算公式",
                                "description": "用于计算承压部件所需壁厚。"}]}
-    monkeypatch.setattr(FakeVLMClient, "extract_region_structured", semantics)
+    monkeypatch.setattr(FakeVLMClient, "describe_formulas_text", semantics, raising=False)
 
     result = page_processor.process_page(
         source_path="/tmp/formula.pdf",

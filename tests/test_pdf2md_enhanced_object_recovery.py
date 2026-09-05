@@ -554,14 +554,21 @@ def test_real_local_upload_crop_and_client_parser_with_mocked_wire(monkeypatch, 
         candidate("formula", 3), candidate("figure", 4),
     ])
     wire_calls = []
+    text_calls = []
 
     def wire(self, **kwargs):
         message = kwargs["messages"][0]["content"]
+        if all(part["type"] == "text" for part in message):
+            text_calls.append(message[0]["text"])
+            assert 'p1-o003-formula' in message[0]["text"]
+            assert 'Fixture page text' in message[0]["text"]
+            return json.dumps({"formulas": [{"object_ref": "formulas:0", "layout_id": "p1-o003-formula",
+                                             "description": "Relates the two specified quantities."}]}), "stream", "stop"
         image = fitz.Pixmap(base64.b64decode(message[1]["image_url"]["url"].split(",", 1)[1]))
         wire_calls.append({"budget": kwargs["max_tokens"], "size": [image.width, image.height],
                            "prompt": message[0]["text"]})
         if "Generate semantic metadata for ONLY" in message[0]["text"]:
-            assert '"type": "formula"' not in message[0]["text"]  # crop already ran its VLM step
+            assert '"type": "formula"' not in message[0]["text"]  # formulas have a separate text-first semantic step
             return json.dumps({"tables": [{"object_ref": "tables:0", "title": "Table 1 Measurements",
                                            "description": "Compares measured quantities."}]}), "stream", "stop"
         response = next(responses)
@@ -581,6 +588,9 @@ def test_real_local_upload_crop_and_client_parser_with_mocked_wire(monkeypatch, 
                         "ocr_config": {"glm_ocr": {"enabled": True, "model": "glm-ocr",
                                                    "base_url": "http://127.0.0.1:1"}}},
     )))["page_result"]
+    assert len(text_calls) == 1
+    assert result["decision"]["formula_semantic_calls"] == {"text": 1, "image": 0}
+    assert result["elements"]["formulas"][0]["description"] == "Relates the two specified quantities."
     assert len(ocr_calls) == (2 if ocr_recovers else 3)
     assert len(wire_calls) == (3 if ocr_recovers else 5)
     assert all(call["budget"] == 12000 for call in wire_calls)
