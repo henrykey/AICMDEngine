@@ -488,3 +488,70 @@ def test_formula_image_fallback_cannot_overwrite_text_success():
     pp._enrich_upload_semantics(VLM(), 'mock.png', {}, payload, True)
     assert payload['formulas'][0]['description'] == '合力与加速度的关系。'
     assert payload['formulas'][1]['description'] == '质量与能量的关系。'
+
+
+def numbered_layout(contents, markdown='', extra=()):
+    blocks = [{'label': 'formula', 'content': text, 'bbox_2d': [100, 100+i*100, 600, 150+i*100]}
+              for i, text in enumerate(contents)]
+    raw = _layout_raw(blocks + list(extra), markdown)
+    raw['data_info'] = {'width': 1000, 'height': 1000}
+    return pp.build_layout_outcome(raw, 1, 1000, 1000)
+
+
+@pytest.mark.parametrize('text', [r'$$x=y \tag{B-9}$$', r'$$x=y \quad (\text{B-9})$$', '$x=y$ （B-9）'])
+def test_formula_number_from_math_not_only_metadata(text):
+    result = numbered_layout([text])
+    assert result['payloads']['formulas'][0]['formula_no'] == 'B-9'
+    assert result['payloads']['formulas'][0]['latex'] == text
+
+
+def test_formula_numbers_from_whole_page_markdown_bind_by_content():
+    result = numbered_layout(['$$x=y$$', '$$a=b$$'], '$$a=b \\quad (\\text{B-10})$$\n$x=y$ （B-9）')
+    assert [f['formula_no'] for f in result['payloads']['formulas']] == ['B-9', 'B-10']
+
+
+def test_formula_number_from_unique_right_hand_block():
+    result = numbered_layout(['$$x=y$$'], extra=[{'label': 'text', 'content': '（B-19）', 'bbox_2d': [800, 100, 900, 150]}])
+    assert result['payloads']['formulas'][0]['formula_no'] == 'B-19'
+    assert len(result['layout']) == 2
+
+
+@pytest.mark.parametrize('contents,markdown', [
+    (['$$x=y$$'], '按公式（B-9）计算\n$$x=y$$'),
+    (['$$x=y$$', '$$x=y$$'], '$$x=y \\tag{B-9}$$'),
+    (['$$x=y$$'], '$$x=y \\tag{B-9}$$\n$$x=y \\tag{B-10}$$'),
+])
+def test_formula_number_does_not_guess_from_references_or_duplicates(contents, markdown):
+    result = numbered_layout(contents, markdown)
+    assert all(not f['formula_no'] for f in result['payloads']['formulas'])
+
+
+def test_numbered_page_eight_and_thirteen_keep_identity_and_output_contract():
+    formulas = ['R=(T_1-T_2)/(t_2-t_1)', 'T_m=0.4T_1+0.6T_2',
+                't_m=0.4t_1+0.6t_2', r'T_m=\frac{1}{2}(T_1+T_2)',
+                r't_m=\frac{1}{2}(t_1+t_2)', 't_h=T_m-Kr_h', 't_c=t_m+Kr_c',
+                r't_t=\frac{1}{2}(t_h+t_c)']
+    # Same-page Markdown in a different order must still bind by formula content.
+    markdown = '\n'.join('$$' + f + r' \quad (\text{B-' + str(i+8) + '})$$'
+                         for i, f in reversed(list(enumerate(formulas))))
+    outcome = numbered_layout(['$$'+f+'$$' for f in formulas], markdown)
+    output = pp._build_layout_output_elements(markdown, outcome['payloads'], 'full_glm_ocr', 'zh')['formulas']
+    assert [f['formula_no'] for f in output] == ['B-'+str(i) for i in range(8, 16)]
+    assert [f['latex'] for f in output] == ['$$'+f+'$$' for f in formulas]
+    assert [f['layout_id'] for f in output] == [f'p1-o{i:03d}-formula' for i in range(1, 9)]
+    other = numbered_layout(['$$w_i=a/b$$', '$$p=x+y$$', '$$EEI=K/p$$'],
+                            '$$w_i=a/b$$ (B-18)\n$$p=x+y$$ (B-19)\n$$EEI=K/p$$ (B-20)')
+    assert [f['formula_no'] for f in other['payloads']['formulas']] == ['B-18', 'B-19', 'B-20']
+
+
+def test_ambiguous_right_number_does_not_bind_and_figure_is_unchanged():
+    extra = [{'label': 'text', 'content': '(B-9)', 'bbox_2d': [800, 100, 900, 250]},
+             {'label': 'figure', 'content': 'figure content', 'bbox_2d': [100, 700, 600, 800]}]
+    result = numbered_layout(['$$x=y$$', '$$a=b$$'], extra=extra)
+    assert all(not f['formula_no'] for f in result['payloads']['formulas'])
+    assert result['payloads']['figures'][0]['description'] == 'figure content'
+
+
+@pytest.mark.parametrize('latex', ['$$x=(1)$$', '$$x = (1)$$', '$$x=y+(2)$$'])
+def test_parenthesized_operand_is_not_formula_number(latex):
+    assert not numbered_layout([latex])['payloads']['formulas'][0]['formula_no']

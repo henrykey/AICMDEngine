@@ -111,6 +111,8 @@ def build_layout_outcome(
                     payloads[_collection_for_type(object_type)].append(payload)
         layout.append(entry)
 
+    _bind_formula_numbers(payloads["formulas"], blocks, markdown)
+
     return {
         "layout_status": "EXTRACTED",
         "layout_error": "",
@@ -124,6 +126,87 @@ def build_layout_outcome(
         "markdown": markdown or _markdown_from_layout(layout),
         "unmatched_recovery_refs": [],
     }
+
+
+# Only explicit equation labels, never prose references or inferred sequences.
+_FORMULA_NUMBER = r"[A-Za-z]?\s*[-.]?\s*\d+(?:\s*[-.]\s*\d+)*"
+_NUMBER_SUFFIX = re.compile(
+    rf"(?:\\tag\*?\{{\s*({_FORMULA_NUMBER})\s*\}}|"
+    rf"[（(]\s*(?:\\text\{{\s*)?({_FORMULA_NUMBER})(?:\s*\}})?\s*[）)])\s*$"
+)
+_MATH_BLOCK = re.compile(r"\$\$[\s\S]*?\$\$|(?<!\$)\$(?!\$)[^\n$]+\$(?!\$)|\\\[[\s\S]*?\\\]")
+
+
+def _formula_label(text: str) -> Tuple[str, str]:
+    # Work on a comparison copy; the original LaTeX is never rewritten.
+    text = text.strip()
+    for left, right in (("$$", "$$"), ("$", "$"), (r"\[", r"\]")):
+        if text.startswith(left) and text.endswith(right):
+            text = text[len(left):-len(right)].strip()
+            break
+    match = _NUMBER_SUFFIX.search(text)
+    if not match:
+        return text, ""
+    body = text[:match.start()].strip()
+    if match.group(2) and body and (
+        not text[match.start()-1].isspace() or body[-1] in "=+-*/^_<>,"
+    ):
+        return text, ""
+    body = re.sub(r"(?:\\(?:quad|qquad)|\\[,;! ])\s*$", "", body).strip()
+    return body, re.sub(r"\s+", "", match.group(1) or match.group(2))
+
+
+def _formula_key(text: str) -> str:
+    body, _ = _formula_label(text)
+    body, _ = _formula_label(body)
+    return re.sub(r"\s+", "", body)
+
+
+def _bind_formula_numbers(formulas: List[Dict[str, Any]], blocks: List[Dict[str, Any]], markdown: str) -> None:
+    """Recover labels from the same OCR response, with unique content/geometry binding."""
+    numbered_math: Dict[str, List[str]] = {}
+    for match in _MATH_BLOCK.finditer(markdown):
+        math = match.group()
+        _, number = _formula_label(math)
+        if not number:
+            # An outside label must immediately follow the closing math delimiter.
+            suffix = re.match(rf"[ \t]*([（(]\s*{_FORMULA_NUMBER}\s*[）)])", markdown[match.end():])
+            if suffix:
+                _, number = _formula_label(suffix.group(1))
+        key = _formula_key(math)
+        numbered_math.setdefault(key, []).append(number)
+
+    keys = [_formula_key(str(f.get("latex") or "")) for f in formulas]
+    right_labels: Dict[int, List[str]] = {}
+    for block in blocks:
+        if canonical_layout_type(block.get("layout_type")) != "text":
+            continue
+        body, number = _formula_label(str(block.get("content") or ""))
+        box = block.get("bbox") or []
+        if body or not number or len(box) != 4:
+            continue
+        matches = []
+        for i, formula in enumerate(formulas):
+            bounds = formula.get("bbox") or []
+            if len(bounds) != 4 or box[0] < bounds[2]:
+                continue
+            overlap = min(box[3], bounds[3]) - max(box[1], bounds[1])
+            if overlap >= 0.5 * min(box[3] - box[1], bounds[3] - bounds[1]):
+                matches.append(i)
+        if len(matches) == 1:
+            right_labels.setdefault(matches[0], []).append(number)
+
+    for i, formula in enumerate(formulas):
+        if formula.get("formula_no"):
+            continue
+        _, own_number = _formula_label(str(formula.get("latex") or ""))
+        candidates = [own_number] if own_number else []
+        numbers = numbered_math.get(keys[i], [])
+        if keys.count(keys[i]) == 1 and len(numbers) == 1 and numbers[0]:
+            candidates.append(numbers[0])
+        candidates.extend(right_labels.get(i, []))
+        if candidates and len(set(candidates)) == 1:
+            formula["formula_no"] = candidates[0]
 
 
 def _table_caption_before(block: Dict[str, Any], preceding: List[Dict[str, Any]]) -> str:
