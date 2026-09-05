@@ -1,0 +1,219 @@
+{
+  "image_size": [
+    1820,
+    2573
+  ],
+  "formulas": [
+    {
+      "layout_id": "p1-o001-formula",
+      "bbox": [
+        0.396694,
+        0.117152,
+        0.614795,
+        0.147367
+      ],
+      "latex": "$$\nR = \\frac {T _ {1} - T _ {2}}{t _ {2} - t _ {1}} = \\frac {\\text {热 流 体 温 降}}{\\text {冷 流 体 温 升}}\n$$"
+    },
+    {
+      "layout_id": "p1-o005-formula",
+      "bbox": [
+        0.424914,
+        0.248272,
+        0.586172,
+        0.263664
+      ],
+      "latex": "$$\nT _ {\\mathrm {m}} = 0. 4 T _ {1} + 0. 6 T _ {2}\n$$"
+    },
+    {
+      "layout_id": "p1-o007-formula",
+      "bbox": [
+        0.432977,
+        0.26908,
+        0.577303,
+        0.283617
+      ],
+      "latex": "$$\nt _ {\\mathrm {m}} = 0. 4 t _ {1} + 0. 6 t _ {2}\n$$"
+    },
+    {
+      "layout_id": "p1-o009-formula",
+      "bbox": [
+        0.428139,
+        0.308986,
+        0.579722,
+        0.33578
+      ],
+      "latex": "$$\nT _ {\\mathrm {m}} = \\frac {1}{2} \\left(T _ {1} + T _ {2}\\right)\n$$"
+    },
+    {
+      "layout_id": "p1-o010-formula",
+      "bbox": [
+        0.436202,
+        0.344616,
+        0.56924,
+        0.371695
+      ],
+      "latex": "$$\nt _ {\\mathrm {m}} = \\frac {1}{2} \\left(t _ {1} + t _ {2}\\right)\n$$"
+    },
+    {
+      "layout_id": "p1-o016-formula",
+      "bbox": [
+        0.317275,
+        0.502815,
+        0.687765,
+        0.531889
+      ],
+      "latex": "$$\nt _ {\\mathrm {h}} = T _ {\\mathrm {m}} - K \\left(\\frac {1}{\\alpha_ {\\mathrm {h}}} + r _ {\\mathrm {h}}\\right) \\Delta t _ {\\mathrm {m}} = T _ {\\mathrm {m}} - \\frac {Q}{A} \\left(\\frac {1}{\\alpha_ {\\mathrm {h}}} + r _ {\\mathrm {h}}\\right)\n$$"
+    },
+    {
+      "layout_id": "p1-o022-formula",
+      "bbox": [
+        0.326547,
+        0.63707,
+        0.679702,
+        0.665289
+      ],
+      "latex": "$$\nt _ {\\mathrm {c}} = t _ {\\mathrm {m}} + K \\left(\\frac {1}{\\alpha_ {\\mathrm {c}}} + r _ {\\mathrm {c}}\\right) \\Delta t _ {\\mathrm {m}} = t _ {\\mathrm {m}} + \\frac {Q}{A} \\left(\\frac {1}{\\alpha_ {\\mathrm {c}}} + r _ {\\mathrm {c}}\\right)\n$$"
+    },
+    {
+      "layout_id": "p1-o028-formula",
+      "bbox": [
+        0.441443,
+        0.77161,
+        0.567627,
+        0.798119
+      ],
+      "latex": "$$\nt _ {\\mathrm {t}} = \\frac {1}{2} \\left(t _ {\\mathrm {h}} + t _ {\\mathrm {c}}\\right)\n$$"
+    }
+  ],
+  "ocr": {
+    "status": "succeeded",
+    "words_result": [
+      {
+        "words": "…………………………(B-8)",
+        "location": {
+          "left": 1204,
+          "top": 324,
+          "width": 417,
+          "height": 29
+        }
+      },
+      {
+        "words": "图B-18中相应图线查得F。",
+        "location": {
+          "left": 216,
+          "top": 443,
+          "width": 371,
+          "height": 30
+        }
+      },
+      {
+        "words": "液体的平均温度(过渡流及湍流)按公式(B-9)、公式(B-10)计算:",
+        "location": {
+          "left": 280,
+          "top": 589,
+          "width": 873,
+          "height": 31
+        }
+      },
+      {
+        "words": "…………………………(B-9)",
+        "location": {
+          "left": 1204,
+          "top": 642,
+          "width": 417,
+          "height": 27
+        }
+      },
+      {
+        "words": "…………………………(B-10)",
+        "location": {
+          "left": 1189,
+          "top": 692,
+          "width": 432,
+          "height": 29
+        }
+      },
+      {
+        "words": "液体(层流)和气体的平均温度按公式(B-11)、公式(B-12)计算:",
+        "location": {
+          "left": 280,
+          "top": 742,
+          "width": 857,
+          "height": 31
+        }
+      },
+      {
+        "words": "…………………………(B-11)",
+        "location": {
+          "left": 1189,
+          "top": 812,
+          "width": 432,
+          "height": 28
+        }
+      },
+      {
+        "words": "…………………………(B-12)",
+        "location": {
+          "left": 1188,
+          "top": 902,
+          "width": 434,
+          "height": 31
+        }
+      },
+      {
+        "words": "a)热流体侧的壁温按公式(B-13)计算:",
+        "location": {
+          "left": 279,
+          "top": 1242,
+          "width": 554,
+          "height": 31
+        }
+      },
+      {
+        "words": "t=T-K(+r)M=T-(+r)….....…(B-13)",
+        "location": {
+          "left": 586,
+          "top": 1293,
+          "width": 1035,
+          "height": 72
+        }
+      },
+      {
+        "words": "b)冷流体侧的壁温按公式(B-14)计算:",
+        "location": {
+          "left": 281,
+          "top": 1586,
+          "width": 579,
+          "height": 31
+        }
+      },
+      {
+        "words": "l=ta+K(+re)Am=tn+(+r)………………(B-14)",
+        "location": {
+          "left": 601,
+          "top": 1635,
+          "width": 1023,
+          "height": 76
+        }
+      },
+      {
+        "words": ")一般情况下,换热管壁平均温度按公式(B-15)计算:",
+        "location": {
+          "left": 299,
+          "top": 1931,
+          "width": 771,
+          "height": 33
+        }
+      },
+      {
+        "words": "…………………………(B-15)",
+        "location": {
+          "left": 1187,
+          "top": 2000,
+          "width": 434,
+          "height": 31
+        }
+      }
+    ]
+  }
+}

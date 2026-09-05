@@ -555,3 +555,108 @@ def test_ambiguous_right_number_does_not_bind_and_figure_is_unchanged():
 @pytest.mark.parametrize('latex', ['$$x=(1)$$', '$$x = (1)$$', '$$x=y+(2)$$'])
 def test_parenthesized_operand_is_not_formula_number(latex):
     assert not numbered_layout([latex])['payloads']['formulas'][0]['formula_no']
+
+
+def test_number_ocr_recovers_only_unique_geometry_once(tmp_path):
+    import fitz
+    image = tmp_path / 'page.png'
+    doc = fitz.open(); page = doc.new_page(width=1000, height=1000)
+    page.get_pixmap().save(str(image)); doc.close()
+    formulas = [{'layout_id': 'a', 'bbox': [.1,.1,.6,.15], 'latex': 'x=y', 'description': 'keep'},
+                {'layout_id': 'b', 'bbox': [.1,.3,.6,.35], 'latex': 'a=b', 'formula_no': 'B-2'}]
+    class OCR:
+        supports_number_ocr = True
+        calls = 0
+        def extract_number_lines(self, path):
+            assert path == str(image)
+            self.calls += 1
+            return {'status': 'succeeded', 'words_result': [
+                {'words': '…………(B-1)', 'location': {'left':800,'top':100,'width':100,'height':50}},
+                {'words': '按公式(B-9)计算', 'location': {'left':100,'top':80,'width':500,'height':20}},
+                {'words': 'a=b……(B-99)', 'location': {'left':100,'top':300,'width':800,'height':50}}]}
+    client = OCR()
+    stats = pp._recover_formula_numbers(client, str(image), formulas)
+    assert client.calls == 1
+    assert formulas[0] == {'layout_id':'a','bbox':[.1,.1,.6,.15],'latex':'x=y','description':'keep','formula_no':'B-1'}
+    assert formulas[1]['formula_no'] == 'B-2'
+    assert stats['calls'] == 1 and stats['missing_objects'] == []
+    assert pp._recover_formula_numbers(client, str(image), formulas)['calls'] == 0
+    assert client.calls == 1
+
+
+def test_number_ocr_actual_page_eight_response(monkeypatch):
+    import json
+    from pathlib import Path
+    from types import SimpleNamespace
+    data = json.loads((Path(__file__).parent/'fixtures/pdf2md_formula_number_page8.json').read_text())
+    formulas = data['formulas']; before = copy.deepcopy(formulas)
+    monkeypatch.setattr(pp.fitz, 'Pixmap', lambda _: SimpleNamespace(width=1820,height=2573))
+    ocr = SimpleNamespace(supports_number_ocr=True, extract_number_lines=lambda _: data['ocr'])
+    stats = pp._recover_formula_numbers(ocr, 'whole-page.png', formulas)
+    assert [f['formula_no'] for f in formulas] == [f'B-{i}' for i in range(8,16)]
+    assert stats['calls'] == 1 and stats['missing_objects'] == []
+    assert [{k:v for k,v in f.items() if k != 'formula_no'} for f in formulas] == before
+
+
+def test_number_ocr_failure_does_not_lose_formulas(monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(pp.fitz, 'Pixmap', lambda _: SimpleNamespace(width=100,height=100))
+    def fail(_): raise TimeoutError()
+    formulas = [{'layout_id':'f1','latex':'x=y','bbox':[.1,.1,.6,.2]}]
+    before = copy.deepcopy(formulas)
+    stats = pp._recover_formula_numbers(SimpleNamespace(supports_number_ocr=True,extract_number_lines=fail), 'page', formulas)
+    assert formulas == before
+    assert stats == {'calls':1,'status':'failed','error_type':'TimeoutError',
+                     'missing_objects':[{'layout_id':'f1','missing_fields':['formula_no']}]}
+
+
+def test_number_ocr_is_wired_into_upload_once(monkeypatch):
+    from types import SimpleNamespace
+    from tests.test_pdf2md_enhanced_bad_text_policy import LayoutLedgerGLMOcrClient
+    calls = []
+    monkeypatch.setattr(LayoutLedgerGLMOcrClient, 'supports_number_ocr', True, raising=False)
+    def extract(self, path):
+        calls.append(path)
+        return {'status':'succeeded','words_result':[{'words':'……(B-19)',
+            'location':{'left':80,'top':10,'width':15,'height':10}}]}
+    monkeypatch.setattr(LayoutLedgerGLMOcrClient, 'extract_number_lines', extract, raising=False)
+    monkeypatch.setattr(pp.fitz, 'Pixmap', lambda _: SimpleNamespace(width=100,height=100))
+    result = _run_layout_ledger_page(monkeypatch, _layout_raw([
+        {'label':'formula','content':'$$x=y$$','bbox_2d':[10,10,60,20]}]))
+    assert calls == ['/tmp/layout-page.png']
+    assert result['elements']['formulas'][0]['formula_no'] == 'B-19'
+    assert result['rag']['elements']['formulas'][0]['formula_no'] == 'B-19'
+    assert result['decision']['formula_number_ocr']['calls'] == 1
+
+
+def test_number_ocr_transport_full_image_one_request(monkeypatch, tmp_path):
+    import io
+    import urllib.request
+    image = tmp_path/'page.png'; image.write_bytes(b'whole-image-bytes')
+    client = pp.OpenAICompatibleOcrClient({'enabled':True,'model':'glm-ocr',
+        'base_url':'https://open.bigmodel.cn/api/paas/v4','api_key':'fixture','max_retries':5})
+    calls = []
+    def post(request, timeout):
+        calls.append(request)
+        assert request.full_url == 'https://open.bigmodel.cn/api/paas/v4/files/ocr'
+        assert b'whole-image-bytes' in request.data and b'hand_write' in request.data
+        return io.BytesIO(b'{"status":"succeeded","words_result":[]}')
+    monkeypatch.setattr(urllib.request, 'urlopen', post)
+    assert client.extract_number_lines(str(image))['status'] == 'succeeded'
+    assert len(calls) == 1
+    def fail(request, timeout):
+        calls.append(request); raise TimeoutError()
+    monkeypatch.setattr(urllib.request, 'urlopen', fail)
+    with pytest.raises(TimeoutError): client.extract_number_lines(str(image))
+    assert len(calls) == 2  # no transport retry despite max_retries=5
+
+
+def test_number_ocr_ambiguous_line_is_not_assigned(monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(pp.fitz,'Pixmap',lambda _:SimpleNamespace(width=100,height=100))
+    formulas = [{'layout_id':str(i),'latex':'x=y','bbox':[.1,.1,.6,.2]} for i in range(2)]
+    ocr = SimpleNamespace(supports_number_ocr=True,extract_number_lines=lambda _: {
+        'status':'succeeded','words_result':[{'words':'……(B-19)','location':{'left':80,'top':10,'width':15,'height':10}}]})
+    stats = pp._recover_formula_numbers(ocr,'page',formulas)
+    assert len(stats['missing_objects']) == 2
+    assert all(not f.get('formula_no') for f in formulas)

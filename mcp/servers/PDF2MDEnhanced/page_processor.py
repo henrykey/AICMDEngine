@@ -351,6 +351,11 @@ def process_page(
                 page_text=semantic_page_text, formula_semantic_calls=formula_semantic_calls,
             )
 
+        number_formulas = (layout_outcome.get("payloads", {}).get("formulas", []) if layout_driven
+                           else list((structured.get("formula_metadata") or {}).values()))
+        formula_number_ocr = _recover_formula_numbers(glm_ocr, str(image_path), number_formulas)
+        glm_calls += formula_number_ocr["calls"]
+
     doc.close()
 
     markdown = _rebuild_render_tables_from_structured(markdown, structured)
@@ -475,6 +480,7 @@ def process_page(
             "metrics": metrics,
             "vlm_calls": vlm_calls,
             "formula_semantic_calls": formula_semantic_calls,
+            "formula_number_ocr": formula_number_ocr,
             "glm_calls": glm_calls,
             "source_page_no": display_page_no,
             "table_source": table_source,
@@ -1926,6 +1932,65 @@ def _set_object_semantics(item: Dict[str, Any], metadata: Dict[str, Any], name_k
     item["missing_fields"] = ([] if name else [name_key]) + ([] if description else ["description"])
     item["semantic_status"] = "complete" if description else "name_only" if name else "missing"
     _copy_semantic_confidence(item, metadata)
+
+
+def _recover_formula_numbers(ocr: Any, image_path: str, formulas: list[Dict[str, Any]]) -> Dict[str, Any]:
+    def missing():
+        return [{"layout_id": f.get("layout_id"), "missing_fields": ["formula_no"]}
+                for f in formulas if not f.get("formula_no")]
+    stats = {"calls": 0, "status": "not_needed", "missing_objects": missing()}
+    if not stats["missing_objects"]:
+        return stats
+    if not getattr(ocr, "supports_number_ocr", False):
+        stats["status"] = "unavailable"
+        return stats
+    try:
+        pix = fitz.Pixmap(image_path)
+        width, height = pix.width, pix.height
+        stats["calls"] = 1
+        data = ocr.extract_number_lines(image_path)
+        candidates: Dict[int, list[str]] = {}
+        for row in data.get("words_result") or []:
+            if not isinstance(row, dict):
+                continue
+            text = str(row.get("words") or "").strip()
+            # Require an equation-line suffix, never a prose reference or a number alone.
+            match = re.search(r"[（(]\s*([A-Za-z]?\s*[-.]?\s*\d+(?:\s*[-.]\s*\d+)*)\s*[）)]$", text)
+            if not match or re.search(r"[\u4e00-\u9fff]", text[:match.start()]):
+                continue
+            prefix = text[:match.start()]
+            if "=" not in prefix and re.sub(r"[\s.…·_—-]", "", prefix):
+                continue
+            loc = row.get("location") or {}
+            values = [loc.get(k) for k in ("left", "top", "width", "height")]
+            if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in values):
+                continue
+            left, top, w, h = values
+            if w <= 0 or h <= 0 or left < 0 or top < 0 or left+w > width or top+h > height:
+                continue
+            matches = []
+            for i, formula in enumerate(formulas):
+                box = formula.get("bbox") or []
+                if len(box) != 4:
+                    continue
+                x0, y0, x1, y1 = box[0]*width, box[1]*height, box[2]*width, box[3]*height
+                overlap = min(top+h, y1) - max(top, y0)
+                if left+w > x1 and y1 > y0 and overlap >= .5 * min(h, y1-y0):
+                    matches.append(i)
+            if len(matches) == 1:
+                candidates.setdefault(matches[0], []).append(re.sub(r"\s+", "", match.group(1)))
+        for i, numbers in candidates.items():
+            number = numbers[0]
+            if (not formulas[i].get("formula_no") and len(set(numbers)) == 1
+                    and sum(number in values for values in candidates.values()) == 1
+                    and not any(f.get("formula_no") == number for f in formulas)):
+                formulas[i]["formula_no"] = number
+        stats["status"] = "completed"
+    except Exception as exc:
+        stats["status"] = "failed"
+        stats["error_type"] = type(exc).__name__
+    stats["missing_objects"] = missing()
+    return stats
 
 
 def _enrich_upload_semantics(

@@ -52,6 +52,34 @@ class OpenAICompatibleOcrClient:
 
             self._client = OpenAI(api_key=self.api_key, base_url=self.base_url, default_headers=self.extra_headers)
 
+    @property
+    def supports_number_ocr(self) -> bool:
+        from urllib.parse import urlparse
+        return self.enabled and bool(self.api_key) and urlparse(self.base_url).hostname == "open.bigmodel.cn"
+
+    def extract_number_lines(self, image_path: str) -> Dict[str, Any]:
+        """One full-page request; this endpoint supplies label text/geometry, not LaTeX."""
+        if not self.supports_number_ocr:
+            raise ValueError("number_ocr_endpoint_unavailable")
+        import uuid
+        boundary = uuid.uuid4().hex
+        parts = []
+        for name, value in (("tool_type", "hand_write"), ("language_type", "CHN_ENG")):
+            parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n').encode())
+        parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="page.png"\r\nContent-Type: image/png\r\n\r\n').encode())
+        parts.append(Path(image_path).read_bytes())
+        parts.append(f'\r\n--{boundary}--\r\n'.encode())
+        request = urllib.request.Request(
+            "https://open.bigmodel.cn/api/paas/v4/files/ocr", data=b"".join(parts),
+            headers={"Authorization": f"Bearer {self.api_key}",
+                     "Content-Type": f"multipart/form-data; boundary={boundary}"}, method="POST")
+        # Deliberately no retries: missing numbers allow at most one additional request.
+        with urllib.request.urlopen(request, timeout=self.timeout_sec) as response:
+            data = json.loads(response.read())
+        if not isinstance(data, dict) or data.get("status") != "succeeded":
+            raise ValueError("number_ocr_failed")
+        return data
+
     def extract_page(self, image_path: str, prompt: Optional[str] = None) -> OcrResult:
         self.ensure_enabled()
         if self.use_layout_parsing:
