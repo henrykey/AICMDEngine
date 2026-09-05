@@ -172,6 +172,7 @@ async def extract_page_tables(
     ocr_config: Optional[Dict[str, Any]] = None,
     vlm_config: Optional[Dict[str, Any]] = None,
     routing_config: Optional[Dict[str, Any]] = None,
+    context: Optional[Dict[str, Any]] = None,
 ) -> str:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
@@ -189,6 +190,7 @@ async def extract_page_tables(
             ocr_config=ocr_config,
             vlm_config=_normalize_vlm_config(vlm_config),
             routing_config=routing_config,
+            context=context,
         ),
     )
 
@@ -299,6 +301,7 @@ async def extract_page_figures(
     ocr_config: Optional[Dict[str, Any]] = None,
     vlm_config: Optional[Dict[str, Any]] = None,
     routing_config: Optional[Dict[str, Any]] = None,
+    context: Optional[Dict[str, Any]] = None,
 ) -> str:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
@@ -315,6 +318,7 @@ async def extract_page_figures(
             ocr_config=ocr_config,
             vlm_config=_normalize_vlm_config(vlm_config),
             routing_config=routing_config,
+            context=context,
         ),
     )
 

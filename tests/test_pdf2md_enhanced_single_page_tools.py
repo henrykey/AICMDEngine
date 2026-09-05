@@ -2414,3 +2414,82 @@ def test_completion_tool_schemas_expose_description_language():
         if asyncio.iscoroutine(tool):
             tool = asyncio.run(tool)
         assert tool.parameters["properties"]["description_language"]["default"] == "unknown"
+
+
+@pytest.mark.parametrize("kind", ["tables", "figures"])
+def test_review_title_recovery_uses_candidates_without_reextracting_content(monkeypatch, kind):
+    monkeypatch.setattr(single_page_tools, "_prepare_context", lambda *a, **k:
+                        single_page_tools.SinglePageContext("image", __file__, "x.png", 1))
+    calls = []
+    class Vlm:
+        enabled = True
+        def __init__(self, *a, **k): pass
+        def _call_image_prompt(self, image, prompt, **kwargs):
+            calls.append(prompt)
+            return '{"candidate_index": 1}'
+    monkeypatch.setattr(single_page_tools, "DynamicVLMClient", Vlm)
+    monkeypatch.setattr(single_page_tools, "_extract_tables", lambda *a, **k: pytest.fail("must not extract structure"))
+    monkeypatch.setattr(single_page_tools, "_extract_figure_page_result", lambda *a, **k: pytest.fail("must not extract semantics"))
+    candidates = [{"text": "表 1 灭火剂"}, {"text": "表 2 设备"}] if kind == "tables" else [{"text": "图 1 系统"}, {"text": "图 2 设备"}]
+    result = json.loads(getattr(single_page_tools, "extract_page_" + kind + "_direct")(
+        file_data=PNG_DATA, context={"element_type": kind[:-1], "element_id": "selected", "layout_id": "layout",
+            "title_recovery": {"candidates": candidates}}))
+    item = result["items"][0]
+    assert item["title" if kind == "tables" else "caption"] == candidates[1]["text"]
+    assert item["title_source"] == "candidate_text"
+    assert item["element_id"] == "selected"
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("answer", ['{"candidate_index": 99, "caption": "invented"}', '{"caption": "invented"}', 'invalid'])
+def test_review_title_recovery_rejects_non_candidate_answers(monkeypatch, answer):
+    monkeypatch.setattr(single_page_tools, "_prepare_context", lambda *a, **k:
+                        single_page_tools.SinglePageContext("image", __file__, "x.png", 1))
+    class Vlm:
+        enabled = True
+        def __init__(self, *a, **k): pass
+        def _call_image_prompt(self, *a, **k): return answer
+    monkeypatch.setattr(single_page_tools, "DynamicVLMClient", Vlm)
+    result = json.loads(single_page_tools.extract_page_figures_direct(file_data=PNG_DATA,
+        context={"element_type": "figure", "element_id": "selected", "title_recovery": {"candidates": [{"text": "图 1 系统"}]}}))
+    assert result["items"][0]["caption"] == ""
+    assert result["items"][0]["title_source"] == "missing"
+
+
+@pytest.mark.parametrize("kind", ["tables", "figures"])
+def test_server_forwards_review_title_context(monkeypatch, kind):
+    captured = {}
+    def direct(**kwargs):
+        captured.update(kwargs)
+        return "{}"
+    monkeypatch.setattr(server, "extract_page_" + kind + "_direct", direct)
+    context = {"element_id": "selected", "element_type": kind[:-1], "title_recovery": {"candidates": []}}
+    tool = getattr(server, "extract_page_" + kind)
+    asyncio.run(getattr(tool, "fn", tool)(file_data=PNG_DATA, context=context))
+    assert captured["context"] == context
+
+
+def test_review_title_image_recovery_and_failure_are_bounded(monkeypatch):
+    monkeypatch.setattr(single_page_tools, "_prepare_context", lambda *a, **k:
+                        single_page_tools.SinglePageContext("image", __file__, "x.png", 1))
+    calls = []
+    class Vlm:
+        enabled = True
+        def __init__(self, *a, **k): pass
+        def _call_image_prompt(self, image, prompt, **kwargs):
+            calls.append(prompt)
+            return '{"caption": "图 1 系统布置图"}'
+    monkeypatch.setattr(single_page_tools, "DynamicVLMClient", Vlm)
+    context = {"element_type": "figure", "element_id": "selected", "title_recovery": {
+        "target_bbox": [.1, .2, .9, .8], "image_bbox": [.1, .14, .9, .86]}}
+    result = json.loads(single_page_tools.extract_page_figures_direct(file_data=PNG_DATA, context=context))
+    assert result["items"][0]["caption"] == "图 1 系统布置图"
+    assert result["items"][0]["title_source"] == "image_caption"
+    assert len(calls) == 1
+    assert "target_bbox" in calls[0]
+    def failed(*a, **k): raise RuntimeError("model unavailable")
+    monkeypatch.setattr(Vlm, "_call_image_prompt", failed)
+    result = json.loads(single_page_tools.extract_page_figures_direct(file_data=PNG_DATA, context=context))
+    assert result["items"][0]["caption"] == ""
+    assert result["items"][0]["title_source"] == "missing"
+    assert "title_recovery_failed" in result["warnings"]
