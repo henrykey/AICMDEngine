@@ -119,6 +119,8 @@ def process_page(
             vlm.max_retries,
         )
         vlm_calls = 0
+        page_semantic_attempted = False
+        semantic_layout_ids = set()
         glm_calls = 0
         glm_ocr_config = dict(rc.get("glm_ocr") or {})
         glm_ocr_config["description_language"] = description_language
@@ -176,6 +178,11 @@ def process_page(
                         glm_calls += recovery_glm_calls
                         vlm_calls += recovery_vlm_calls
                         layout_outcome["recovery"] = recovery_diagnostics
+                        semantic_layout_ids = {
+                            item["layout_id"] for item in recovery_diagnostics["objects"]
+                            if item["type"] == "formula"
+                            and any(attempt.get("provider") == "vlm_ocr" for attempt in item["attempts"])
+                        }
                 except Exception as exc:
                     layout_outcome = failed_layout_outcome("layout_analysis_failed")
                     logger.warning(
@@ -254,6 +261,7 @@ def process_page(
                     rag_page_text = ""
                     vlm_calls += 1
                     try:
+                        page_semantic_attempted = True
                         dual = vlm.full_page_dual_output(str(image_path))
                         markdown = _clean_markdown(dual.get("render") or "")
                         rag_obj = dual.get("rag") or {}
@@ -327,6 +335,16 @@ def process_page(
             markdown = _merge_region_vlm_markdown(markdown, structured)
             rag_page_text = ""
 
+        # OCR owns structure; every OCR table/formula gets its normal VLM semantic pass.
+        # This is before output validation and never loops on missing semantic fields.
+        if route_selected in {"hybrid_glm_ocr", "full_glm_ocr"}:
+            vlm_calls += _enrich_upload_semantics(
+                vlm, str(image_path), structured,
+                layout_outcome.get("payloads") if layout_driven else None,
+                bool(rc.get("vlm_ocr_enabled") and vlm.enabled and not page_semantic_attempted),
+                semantic_layout_ids,
+            )
+
     doc.close()
 
     markdown = _rebuild_render_tables_from_structured(markdown, structured)
@@ -347,8 +365,7 @@ def process_page(
         "open_formula": None,
     }
 
-    # Table reliability strategy:
-    # prefer parsing from render markdown; fallback to VLM tables; final fallback to placeholders.
+    # Preserve identified structures and their metadata; use render only when none exist.
     if not layout_driven:
         structured["tables"] = _select_rag_tables(markdown, structured.get("tables") or [])
     rag_content = _build_rag_content(markdown, structured, rag_page_text=rag_page_text)
@@ -388,6 +405,41 @@ def process_page(
                 "missing": failed_layout_ids,
                 "reason": "" if reconciliation["complete"] else "layout_objects_incomplete",
             }
+
+    # Keep coverage and field completeness separate, with lossless object references.
+    semantic_objects = []
+    for collection in ("tables", "formulas"):
+        for index, item in enumerate(output_elements.get(collection) or []):
+            if item["missing_fields"]:
+                issue = {"collection": collection, "index": index,
+                         "missing_fields": list(item["missing_fields"]),
+                         "semantic_status": item["semantic_status"]}
+                if item.get("layout_id"):
+                    issue["layout_id"] = item["layout_id"]
+                semantic_objects.append(issue)
+    if layout_driven:
+        for entry in layout_outcome.get("layout") or []:
+            if entry.get("status") != "FAILED" or entry.get("type") not in {"table", "formula"}:
+                continue
+            table = entry["type"] == "table"
+            semantic_objects.append({
+                "collection": "tables" if table else "formulas", "index": None,
+                "layout_id": entry["layout_id"],
+                "missing_fields": (["markdown"] if table else ["latex"])
+                + ([] if table and entry.get("title") else ["title" if table else "formula_name"])
+                + ["description"],
+                "semantic_status": "name_only" if table and entry.get("title") else "missing",
+            })
+    semantic_status["objects"] = semantic_objects
+    if semantic_objects:
+        semantic_status["complete"] = False
+        semantic_status["missing"] = _unique_keep_order(
+            list(semantic_status.get("missing") or []) + [
+                (f"{issue['collection']}[{issue['index']}]" if issue["index"] is not None else issue["layout_id"]) + f".{field}"
+                for issue in semantic_objects for field in issue["missing_fields"]
+            ]
+        )
+        semantic_status["reason"] = semantic_status.get("reason") or "object_semantic_fields_missing"
 
     rag_obj = {
         "content": rag_content,
@@ -1063,13 +1115,17 @@ def _safe_object_call_info(vlm: DynamicVLMClient) -> Dict[str, Any]:
 
 def _object_success_payload(block: Dict[str, Any], candidate: Dict[str, Any]) -> Dict[str, Any]:
     keys = {
-        "table": ("markdown", "title"), "formula": ("latex", "description", "variables", "context"),
+        "table": ("markdown", "title"),
+        "formula": ("latex", "formula_name", "formula_no", "description", "variables", "context"),
         "figure": ("description", "caption"),
     }[block["type"]]
-    return {
+    payload = {
         **{key: candidate[key] for key in keys if isinstance(candidate.get(key), str)},
         "layout_id": block["layout_id"], "source": "glm_ocr_layout+vlm_object_crop",
     }
+    if block["type"] == "formula":
+        _copy_semantic_confidence(payload, candidate)
+    return payload
 
 
 def _crop_layout_block_image(
@@ -1634,17 +1690,14 @@ def _build_output_elements(
         metadata = table_metadata.get(table_text) if isinstance(table_metadata, dict) else None
         metadata = metadata if isinstance(metadata, dict) else {}
         title = str(metadata.get("title") or "").strip()
-        if not title and not metadata.get("layout_id"):
-            title = _title_for_table(table_text, lines)
         item = {
             "source": table_source if not table_text.startswith("[TABLE_PLACEHOLDER]") else "pymupdf",
             "title": title,
             "markdown": table_text,
-            "semantic_summary": str(metadata.get("description") or "").strip()
-            or _table_summary(title, table_text, description_language),
-            "context": str(metadata.get("context") or "").strip() or _context_for_anchor(title, lines),
+            "context": str(metadata.get("context") or "").strip(),
         }
         _copy_optional_element_metadata(item, metadata)
+        _set_object_semantics(item, metadata, "title", description_language)
         tables.append(item)
 
     formula_descriptions = structured.get("formula_descriptions") or {}
@@ -1656,19 +1709,16 @@ def _build_output_elements(
             continue
         metadata = formula_metadata.get(latex) if isinstance(formula_metadata, dict) else None
         metadata = metadata if isinstance(metadata, dict) else {}
-        context = str(metadata.get("context") or "").strip() or _context_for_formula(latex, lines)
-        semantic_summary = str(formula_descriptions.get(latex) or "").strip() or _formula_summary(
-            context,
-            description_language,
-        )
+        context = str(metadata.get("context") or "").strip()
         item = {
             "source": formula_source,
             "latex": latex,
-            "semantic_summary": semantic_summary,
-            "variables": str(metadata.get("variables") or "").strip() or _extract_formula_variables_context(lines),
+            "variables": str(metadata.get("variables") or "").strip(),
             "context": context,
         }
         _copy_optional_element_metadata(item, metadata)
+        _set_object_semantics(item, {**metadata, "description": formula_descriptions.get(latex) or ""},
+                              "formula_name", description_language)
         formulas.append(item)
 
     figure_metadata = structured.get("figure_metadata") or {}
@@ -1802,18 +1852,146 @@ def _title_for_table(table_text: str, lines: list[str]) -> str:
     return titles[0] if len(set(titles)) == 1 else ""
 
 
+def _number_only(value: str) -> bool:
+    return bool(re.fullmatch(
+        r"(?i)(?:(?:equation|eq\.?|formula|公式|式)\s*)?[（(]?\s*"
+        r"(?:[A-Z]?[.\-]?\d+(?:[.\-]\d+)*[A-Z]?|[IVXLCDM]+)\s*[)）]?[.:：]?",
+        value.strip(),
+    ))
+
+
+def _valid_description(value: Any, name: str = "") -> str:
+    description = str(value or "").strip()
+    if not description or _number_only(description):
+        return ""
+    compact = lambda text: re.sub(r"[\s:：。.!！]+", "", text).casefold()
+    if name:
+        remainder = re.sub(re.escape(name), "", description, count=1, flags=re.I).strip(" :：。.")
+        if compact(description) == compact(name) or _number_only(remainder):
+            return ""
+    # Strip known non-semantic filler, retaining substantive sentences if supplied.
+    parts = re.split(r"(?<=[。.!！;；])\s*|\n+", description)
+    invalid = r"包含\s*\d+\s*行|contains?\s+\d+\s+rows|语义(?:说明)?缺失|变量说明见原文|请?结合上下文解释|see the source document|refer to (?:the )?(?:source|context)|semantic (?:description )?(?:missing|unavailable)"
+    return " ".join(part for part in parts if part.strip() and not re.search(invalid, part, re.I)).strip()
+
+
+def _named_semantics(name: str, description: str, language: str) -> str:
+    name, description = name.strip(), _valid_description(description, name)
+    if not name:
+        return description
+    if not description:
+        return name
+    if re.sub(r"\s+", "", name).casefold() in re.sub(r"\s+", "", description).casefold():
+        return description
+    return name + ("：" if _uses_chinese_description(language) else ": ") + description
+
+
+def _copy_semantic_confidence(target: Dict[str, Any], source: Dict[str, Any]) -> None:
+    score = source.get("semantic_confidence")
+    provenance = source.get("semantic_confidence_source")
+    if (isinstance(score, (int, float)) and not isinstance(score, bool)
+            and math.isfinite(score) and 0 <= score <= 1
+            and isinstance(provenance, str) and provenance.strip()):
+        target["semantic_confidence"] = score
+        target["semantic_confidence_source"] = provenance.strip()
+
+
+def _set_object_semantics(item: Dict[str, Any], metadata: Dict[str, Any], name_key: str, language: str) -> None:
+    name = str(metadata.get(name_key) or "").strip()
+    number = str(metadata.get("formula_no") or "").strip() if name_key == "formula_name" else ""
+    if name_key == "formula_name" and _number_only(name):
+        number = number or name
+        name = ""
+    item[name_key] = name
+    if number:
+        item["formula_no"] = number
+    description = _valid_description(metadata.get("description"), name)
+    display_name = name
+    if name and number and number not in name and number not in description:
+        display_name = f"{name} {number}"
+    item["description"] = description
+    item["semantic_summary"] = _named_semantics(name, description, language)
+    if display_name != name:
+        item["semantic_summary"] = item["semantic_summary"].replace(name, display_name, 1)
+    item["missing_fields"] = ([] if name else [name_key]) + ([] if description else ["description"])
+    item["semantic_status"] = "complete" if description else "name_only" if name else "missing"
+    _copy_semantic_confidence(item, metadata)
+
+
+def _enrich_upload_semantics(
+    vlm: DynamicVLMClient, image_path: str, structured: Dict[str, Any],
+    payloads: Optional[Dict[str, Any]], enabled: bool,
+    semantic_layout_ids: Optional[set[str]] = None,
+) -> int:
+    targets = []
+    destinations = {}
+    for collection, content_key, metadata_key in (
+        ("tables", "markdown", "table_metadata"), ("formulas", "latex", "formula_metadata")
+    ):
+        values = (payloads.get(collection) if payloads is not None else structured.get(collection)) or []
+        for index, value in enumerate(values):
+            if payloads is not None:
+                metadata = value
+                if metadata.get("layout_id") in (semantic_layout_ids or set()):
+                    continue
+                content = str(value.get(content_key) or "")
+            else:
+                content = str(value)
+                metadata = structured.setdefault(metadata_key, {}).setdefault(content, {})
+            if collection == "formulas" and _number_only(str(metadata.get("formula_name") or "")):
+                metadata["formula_no"] = metadata.get("formula_no") or metadata["formula_name"]
+                metadata["formula_name"] = ""
+            ref = f"{collection}:{index}"
+            target = {key: metadata[key] for key in (
+                "layout_id", "bbox", "bbox_space", "title", "formula_name", "formula_no", "variables", "context"
+            ) if metadata.get(key) is not None}
+            target.update({"object_ref": ref, "type": collection[:-1], content_key: content})
+            targets.append(target)
+            destinations[ref] = (collection, content, metadata)
+            # OCR descriptions are not evidence of a completed VLM semantic pass.
+            metadata.pop("description", None)
+            metadata.pop("semantic_confidence", None)
+            metadata.pop("semantic_confidence_source", None)
+            if collection == "formulas":
+                structured.setdefault("formula_descriptions", {}).pop(content, None)
+    if not targets or not enabled:
+        return 0
+    try:
+        response = vlm.extract_region_structured(image_path, semantic_objects=targets)
+        for collection in ("tables", "formulas"):
+            candidates = response.get(collection) or []
+            if not isinstance(candidates, list):
+                continue
+            refs = [item.get("object_ref") for item in candidates if isinstance(item, dict)]
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                ref = candidate.get("object_ref")
+                if not isinstance(ref, str) or ref not in destinations or refs.count(ref) != 1:
+                    continue
+                expected_collection, content, metadata = destinations[ref]
+                if collection != expected_collection:
+                    continue
+                if candidate.get("layout_id") and candidate["layout_id"] != metadata.get("layout_id"):
+                    continue
+                for key in ("title", "formula_name", "formula_no", "description", "variables", "context"):
+                    value = candidate.get(key)
+                    if isinstance(value, str) and value.strip():
+                        # A source name already obtained by OCR must be retained.
+                        if key in {"title", "formula_name", "formula_no"} and metadata.get(key):
+                            continue
+                        metadata[key] = value.strip()
+                _copy_semantic_confidence(metadata, candidate)
+                if collection == "formulas" and metadata.get("description"):
+                    structured.setdefault("formula_descriptions", {})[content] = metadata["description"]
+    except Exception as exc:
+        logger.warning("upload VLM semantics unavailable: error_type=%s", type(exc).__name__)
+    return 1
+
+
 def _table_summary(title: str, table_text: str, description_language: str = "unknown") -> str:
-    cols, rows = _table_shape(table_text)
-    headers = _header_tokens(table_text)
-    if title:
-        return title
-    if not _uses_chinese_description(description_language):
-        if headers:
-            return f"Table: contains {rows} rows and {cols} columns; fields include {', '.join(headers[:6])}."
-        return f"Table: contains {rows} rows and {cols} columns."
-    if headers:
-        return f"表格：包含 {rows} 行、{cols} 列，字段包括 {'、'.join(headers[:6])}。"
-    return f"表格：包含 {rows} 行、{cols} 列。"
+    # Structure counts are not a semantic description (HTML has no pipe rows).
+    return str(title or "").strip()
 
 
 def _context_for_anchor(anchor: str, lines: list[str]) -> str:
@@ -1825,24 +2003,9 @@ def _context_for_anchor(anchor: str, lines: list[str]) -> str:
     return ""
 
 
-def _context_for_formula(latex: str, lines: list[str]) -> str:
-    _ = latex
-    for idx, line in enumerate(lines):
-        if "式中" in line:
-            return _nearby_context(lines, idx) or line.strip()
-    for idx, line in enumerate(lines):
-        if re.search(r"按.*式|计算|公式", line):
-            return _nearby_context(lines, idx) or line.strip()
-    return ""
-
-
 def _formula_summary(context: str, description_language: str = "unknown") -> str:
-    ctx = (context or "").strip()
-    if ctx:
-        return ctx[:160]
-    if _uses_chinese_description(description_language):
-        return "公式：变量说明见原文。"
-    return "Formula: see the source document for variable definitions."
+    # Nearby context remains input for semantic completion, not its output.
+    return ""
 
 
 def _uses_chinese_description(description_language: str) -> bool:
@@ -1852,20 +2015,6 @@ def _uses_chinese_description(description_language: str) -> bool:
         "zh_hans",
         "chinese",
     }
-
-
-def _extract_formula_variables_context(lines: list[str]) -> str:
-    for idx, line in enumerate(lines):
-        if "式中" not in line:
-            continue
-        block = [line.strip()]
-        for nxt in lines[idx + 1 : idx + 5]:
-            t = nxt.strip()
-            if not t:
-                break
-            block.append(t)
-        return "\n".join(block)
-    return ""
 
 
 def _guess_figure_type(text: str) -> str:
@@ -2043,6 +2192,7 @@ def _normalize_structured(value: Any) -> Dict[str, Any]:
             description=("description", "semanticDesc", "semantic_summary", "summary"),
             context=("context", "surrounding_text"),
         )
+        _copy_semantic_confidence(metadata, item if isinstance(item, dict) else {})
         for key in (
             "columns",
             "normalized_rows",
@@ -2069,9 +2219,12 @@ def _normalize_structured(value: Any) -> Dict[str, Any]:
         formula_values.append(latex)
         metadata = _structured_metadata(
             item,
+            formula_name=("formula_name", "name", "title"),
+            formula_no=("formula_no", "number"),
             variables=("variables",),
             context=("context", "surrounding_text"),
         )
+        _copy_semantic_confidence(metadata, item if isinstance(item, dict) else {})
         if metadata:
             formula_metadata[latex] = metadata
         description = _first_text(
@@ -2230,6 +2383,8 @@ def _ocr_element_payload(item: Any, kind: str) -> Dict[str, Any]:
     elif kind == "formula":
         payload = {
             "latex": item.latex or item.text,
+            "formula_name": raw.get("formula_name") or raw.get("name") or item.title,
+            "formula_no": raw.get("formula_no") or raw.get("number"),
             "description": item.description,
             "variables": raw.get("variables"),
             "context": item.context,
@@ -2362,14 +2517,16 @@ def _detect_table_source(markdown: str, structured: Dict[str, Any]) -> str:
 
 
 def _select_rag_tables(markdown: str, vlm_tables: list[str]) -> list[str]:
+    # Render placeholders/pipe parsing must not replace identified OCR/VLM objects,
+    # drop HTML tables, or detach the semantic metadata keyed by their content.
+    if vlm_tables:
+        return [str(x).strip() for x in vlm_tables if str(x).strip()]
     placeholders = _extract_table_placeholders(markdown)
     if placeholders:
         return placeholders
     parsed = _extract_markdown_tables(markdown)
     if parsed:
         return parsed
-    if vlm_tables:
-        return [str(x).strip() for x in vlm_tables if str(x).strip()]
     anchors = _extract_table_anchors(markdown)
     return [f"[TABLE_PLACEHOLDER] {a}: table structure unavailable; see original page." for a in anchors]
 

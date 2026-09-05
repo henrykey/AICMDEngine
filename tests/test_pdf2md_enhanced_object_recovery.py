@@ -560,6 +560,10 @@ def test_real_local_upload_crop_and_client_parser_with_mocked_wire(monkeypatch, 
         image = fitz.Pixmap(base64.b64decode(message[1]["image_url"]["url"].split(",", 1)[1]))
         wire_calls.append({"budget": kwargs["max_tokens"], "size": [image.width, image.height],
                            "prompt": message[0]["text"]})
+        if "Generate semantic metadata for ONLY" in message[0]["text"]:
+            assert '"type": "formula"' not in message[0]["text"]  # crop already ran its VLM step
+            return json.dumps({"tables": [{"object_ref": "tables:0", "title": "Table 1 Measurements",
+                                           "description": "Compares measured quantities."}]}), "stream", "stop"
         response = next(responses)
         if "Return ONLY one complete valid HTML" in message[0]["text"]:
             return response.get("markdown", ""), "stream", "stop"
@@ -578,15 +582,19 @@ def test_real_local_upload_crop_and_client_parser_with_mocked_wire(monkeypatch, 
                                                    "base_url": "http://127.0.0.1:1"}}},
     )))["page_result"]
     assert len(ocr_calls) == (2 if ocr_recovers else 3)
-    assert len(wire_calls) == (2 if ocr_recovers else 4)
+    assert len(wire_calls) == (3 if ocr_recovers else 5)
     assert all(call["budget"] == 12000 for call in wire_calls)
-    assert all(w < 625 and h < 834 for w, h in (call["size"] for call in wire_calls))
+    assert all(w < 625 and h < 834 for w, h in (call["size"] for call in wire_calls[:-1]))
+    assert wire_calls[-1]["size"] == [1250, 1667]  # normal page semantic pass
     assert ocr_calls[0][1:] == (1250, 1667)
     assert ocr_calls[1][1] < 625 and ocr_calls[1][2] < 834  # actual 150 DPI crop
     if not ocr_recovers:
         assert ocr_calls[2][1] < ocr_calls[1][1] and ocr_calls[2][2] < ocr_calls[1][2]
     assert all("SECRET_ORIGINAL_FRAGMENT" not in call["prompt"] for call in wire_calls)
     assert result["elements"] == result["rag"]["elements"]
+    assert result["elements"]["tables"][0]["description"] == "Compares measured quantities."
+    if crop_succeeds:
+        assert result["elements"]["tables"][1]["semantic_status"] == "missing"
     assert len(result["elements"]["tables"]) == (2 if crop_succeeds else 1)
     assert len(result["elements"]["formulas"]) == len(result["elements"]["figures"]) == 1
     assert result["reconciliation"]["complete"] is crop_succeeds

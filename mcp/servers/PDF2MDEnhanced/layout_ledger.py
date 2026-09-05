@@ -435,6 +435,8 @@ def _payload_from_entry(entry: Dict[str, Any], block: Dict[str, Any]) -> Optiona
         return {
             **common,
             "latex": content,
+            "formula_name": _first_text(raw, "formula_name", "name", "title"),
+            "formula_no": _first_text(raw, "formula_no", "number"),
             "description": _first_text(raw, "description", "semanticDesc", "summary"),
             "variables": _first_text(raw, "variables"),
             "context": _first_text(raw, "context", "surrounding_text"),

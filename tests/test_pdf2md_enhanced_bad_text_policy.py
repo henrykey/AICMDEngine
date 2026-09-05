@@ -386,12 +386,14 @@ def test_real_pdf_auto_glm_to_vlm_preserves_structured_element_contract(monkeypa
     assert result["decision"]["fallback_reason"] == "glm_ocr_insufficient_structured_output"
     assert result["decision"]["glm_calls"] == FixtureGLMOcrClient.calls == 1
     assert result["decision"]["vlm_calls"] == FixtureVLMClient.calls == 1
-    assert result["semantic_status"] == {"complete": True, "missing": [], "reason": ""}
+    assert result["semantic_status"]["complete"] is False
+    assert result["semantic_status"]["missing"] == ["formulas[0].formula_name"]
+    assert result["elements"]["formulas"][0]["semantic_status"] == "complete"
 
     table = result["elements"]["tables"][0]
     assert table["title"] == "Table 1 Fixture measurements"
     assert table["markdown"].splitlines()[-1] == "| beta | 2.50 |"
-    assert table["semantic_summary"] == "Synthetic calibration values for the local persistence contract."
+    assert table["semantic_summary"] == "Table 1 Fixture measurements: Synthetic calibration values for the local persistence contract."
     assert table["bbox"] == [48, 150, 328, 234]
     assert table["confidence"] == 0.99
     assert table["status"] == "EXTRACTED"
@@ -644,6 +646,14 @@ def test_formula_page_uses_hybrid_glm_when_enabled(monkeypatch):
         ],
     )
 
+    semantic_calls = []
+    def semantics(self, image_path, semantic_objects=None):
+        semantic_calls.append(semantic_objects)
+        assert semantic_objects[0]["latex"] == "t=\\frac{pD}{2\\sigma\\phi-p}"
+        return {"formulas": [{"object_ref": "formulas:0", "formula_name": "壁厚计算公式",
+                               "description": "用于计算承压部件所需壁厚。"}]}
+    monkeypatch.setattr(FakeVLMClient, "extract_region_structured", semantics)
+
     result = page_processor.process_page(
         source_path="/tmp/formula.pdf",
         page_no=1,
@@ -659,8 +669,9 @@ def test_formula_page_uses_hybrid_glm_when_enabled(monkeypatch):
     assert result["route_selected"] == "full_glm_ocr"
     assert result["decision"]["glm_calls"] == 1
     assert result["elements"]["formulas"][0]["source"] == "glm_ocr"
-    assert result["elements"]["formulas"][0]["semantic_summary"] == "用于计算承压部件所需壁厚。"
+    assert result["elements"]["formulas"][0]["semantic_summary"] == "壁厚计算公式: 用于计算承压部件所需壁厚。"
     assert result["semantic_status"]["complete"] is True
+    assert len(semantic_calls) == result["decision"]["vlm_calls"] == 1
 
 
 def test_formula_page_without_ocr_result_is_not_marked_complete(monkeypatch):
@@ -1579,3 +1590,18 @@ def test_layout_reconciliation_turns_missing_success_payload_into_explicit_failu
     assert reconciliation["failed"] == 1
     assert reconciliation["unmatched_layout_ids"] == ["p1-o001-table"]
     assert reconciliation["accounted_for"] is False
+
+
+def test_full_html_table_semantics_use_title_instead_of_zero_dimensions():
+    html = '<table><tr><td rowspan="2">气体</td><td>水</td></tr><tr><td>可用</td></tr></table>'
+    assert page_processor._table_summary('', html, 'zh') == ''
+    structured = page_processor._normalize_structured({'tables': [
+        {'title': '表 1 灭火剂', 'markdown': html, 'description': '比较灭火剂适用性。'}]})
+    table = page_processor._build_output_elements('', structured, 'full_glm_ocr', 'zh')['tables'][0]
+    assert '表 1 灭火剂' in table['semantic_summary']
+    assert '比较灭火剂适用性' in table['semantic_summary']
+    assert table['markdown'] == html
+
+
+def test_formula_context_placeholder_is_not_semantic_description():
+    assert page_processor._formula_summary('', 'zh') == ''

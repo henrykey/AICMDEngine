@@ -116,11 +116,11 @@ def test_process_page_passes_description_language_to_vlm_client(monkeypatch, tmp
 
 
 @pytest.mark.parametrize("language,expected", [
-    ("zh", "公式：变量说明见原文。"),
-    ("en", "Formula: see the source document for variable definitions."),
-    ("unknown", "Formula: see the source document for variable definitions."),
+    ("zh", ""),
+    ("en", ""),
+    ("unknown", ""),
 ])
-def test_formula_fallback_summary_uses_description_language(language, expected):
+def test_formula_fallback_does_not_invent_description(language, expected):
     assert page_processor._formula_summary("", language) == expected
 
 
@@ -1829,8 +1829,8 @@ def test_local_task_chain_persists_layout_and_finalizes_legacy_rag(monkeypatch, 
 
 
 @pytest.mark.parametrize("language,expected_summary", [
-    ("zh", "表格：包含 3 行、2 列。"),
-    ("en", "Table: contains 3 rows and 2 columns."),
+    ("zh", ""),
+    ("en", ""),
 ])
 def test_single_page_table_schema_is_not_used_by_task_output_elements(language, expected_summary):
     markdown = "| A | B |\n| --- | --- |\n| 1 | 2 |"
@@ -1847,6 +1847,9 @@ def test_single_page_table_schema_is_not_used_by_task_output_elements(language, 
             "title": "",
             "markdown": markdown,
             "semantic_summary": expected_summary,
+            "description": "",
+            "semantic_status": "missing",
+            "missing_fields": ["title", "description"],
             "context": "",
         }
     ]
