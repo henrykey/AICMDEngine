@@ -37,8 +37,10 @@ Optional fields inside `query_enhancement`:
 | Field | Meaning |
 | --- | --- |
 | `annotations` | Explicitly attached `{text, kind}` notes, units or titles; references `a0`, `a1`, etc. No implicit page context. |
-| `max_model_calls` | 0 (default), 1 or 2 logical semantic calls. Requires caller-supplied `vlm_config` for real execution. Tests use stubs. |
+| `max_model_calls` | 0 (default), 1 or 2 logical semantic calls. This is a cap, not a requirement. Calls occur only when `query_strategy` is `semantic_review` or `model_required`; deterministic complete projections therefore remain zero-call. |
+| `query_strategy` | Optional explicit model policy: `semantic_review` or `model_required` enables bounded semantic calls; omitted means deterministic source projection only. |
 | `object_image_path` | Explicit local crop of this object, sent only in an enabled semantic call. Never inferred from page/file arguments. |
+| `object_image_data` | Explicit PNG/JPEG data URI or base64 for one table crop from another service. The bytes must decode through the existing image library, match the declared MIME, and remain within byte/pixel limits. The validated file is temporary and deleted after all retries; it never grants arbitrary local-file access. |
 | `source_assertions` | Independent observations `{source: 'r2c0', text: 'expected source text'}`; exact mismatch blocks the projection. Positions resolve to merged origins. This is supplied evidence, not automatic image verification. |
 | `content_conflicts` | Caller-reported source conflict; blocks the whole projection. |
 | `requires_previous_context` | Explicit missing continuation dependency; blocks the whole projection. |
@@ -46,6 +48,18 @@ Optional fields inside `query_enhancement`:
 The supplied table, including render HTML, Markdown, prior rows, and existing
 metadata, is returned unchanged. Existing `file_*`, OCR and page context inputs are
 not used by this branch. Supply only the target table and explicit annotations.
+
+Temporary crops created from `object_image_data` are owned by this request and
+removed on provider initialization failure, call failure, retry exhaustion and
+normal return. Caller-supplied `object_image_path` files are never deleted.
+Provider initialization exceptions return `model_initialization_failed` with
+`model_calls: 0`, without exposing configuration values or exception text.
+
+The PNG/JPEG restriction applies to the new `object_image_data` input only.
+Existing single-page image extensions remain PNG/JPEG/WebP/BMP/TIF/TIFF.
+The shared VLM transport sends PNG/JPEG/WebP bytes unchanged with their matching
+MIME; BMP/TIFF are converted to PNG in memory using the existing PyMuPDF
+dependency. Conversion neither overwrites the source nor creates temporary files.
 
 ## Response and quality
 
@@ -83,7 +97,7 @@ The example abbreviates fields/records. Each field contains an ordered
   Mixed fractions retain whole/numerator/denominator without float conversion.
 - Explicit comparisons provide lower/upper bounds and inclusion flags. ASCII,
   fullwidth comparisons and a limited set of LaTeX comparison wrappers are supported.
-  `A~B`, arbitrary expressions, interpolation and cross-table rules are not executed.
+`A~B`, arbitrary expressions, interpolation and cross-table rules are not executed. A tilde range such as `150~475` remains unresolved unless the caller supplies explicit header/footnote evidence and a model proposal binds that evidence; the query layer does not infer open/closed endpoints.
 - Every non-whitespace source character must be bound or explicitly unresolved.
   Header paths, titles, units, groups and conditions all participate in coverage.
   Matching existing source-cell bbox/bbox_space metadata is preserved, never invented.
@@ -99,11 +113,24 @@ not be published or queried as a complete table. Old table data is never cleared
 The three quality dimensions are returned after source parsing; malformed requests
 can return early with only the reason and unavailable status.
 
+Deterministic blockers (`content_conflicts`, mismatching `source_assertions`, and
+`requires_previous_context`) are checked before provider creation or invocation.
+They return `model_calls: 0`, preserve the supplied table, and report the blocking
+reason. A supplied image can support a provider review but cannot upgrade
+`source_bound_not_image_verified` to image-verified; provider/mock reports are
+diagnostic evidence only.
+
+`query_strategy` is an explicit enum. Unknown values and a nonzero strategy with
+`max_model_calls: 0` return `lookup_status: unavailable` with a configuration
+reason. `model_required` cannot be satisfied by the deterministic projection: at
+least one successful model proposal is required.
+
 Important reasons: `unknown_table_identity`, `revision_or_page_mismatch`,
 `content_hash_mismatch`, `single_table_required`, `table_structure_unavailable`,
 `ambiguous_header`, `invalid_source_reference`, `unmapped_source_cells`,
 `content_conflict`, `missing_previous_context`, `unsupported_condition`,
-`model_response_truncated`, `input_budget_exceeded`, `model_call_failed`.
+`model_response_truncated`, `input_budget_exceeded`, `model_call_failed`,
+`model_initialization_failed`.
 
 ## Semantic conversion and reference queries
 

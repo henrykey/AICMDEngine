@@ -3,7 +3,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 from decimal import Decimal
+import base64
 import hashlib
+import tempfile
+from pathlib import Path
 import re
 
 IDENTITY = ("tenant_id", "doc_id", "version", "table_id", "table_pk")
@@ -12,7 +15,7 @@ REASONS = {
     "unknown_table_identity", "request_id_required", "source_html_required", "content_hash_mismatch",
     "revision_or_page_mismatch", "single_table_required", "input_budget_exceeded",
     "table_structure_unavailable", "overlapping_source_cells", "invalid_annotation",
-    "invalid_model_budget", "identity_or_hash_mismatch", "invalid_source_reference", "content_conflict",
+    "invalid_model_budget", "invalid_query_strategy", "model_initialization_failed", "identity_or_hash_mismatch", "invalid_source_reference", "content_conflict",
     "model_response_truncated", "invalid_projection", "invalid_section_key", "invalid_field",
     "ambiguous_header", "incomplete_record", "empty_section", "invalid_unresolved",
     "invalid_source_assertion", "missing_previous_context", "unsupported_condition", "unmapped_source_cells",
@@ -92,6 +95,54 @@ def interval_contains(interval, value):
 
 def _issue(code, sources=None):
     return {"reason": code, "sources": sources or []}
+
+
+def _object_image_args(request):
+    """Accept an explicitly supplied single-object image without opening arbitrary files."""
+    path = request.get("object_image_path")
+    encoded = request.get("object_image_data")
+    if path and encoded:
+        raise ValueError("invalid_source_reference")
+    if path:
+        return {"image_path": path}
+    if not encoded:
+        return {}
+    if not isinstance(encoded, str) or len(encoded) > 14_000_000:
+        raise ValueError("input_budget_exceeded")
+    declared_mime = None
+    if encoded.startswith("data:"):
+        header, sep, encoded = encoded.partition(",")
+        match = re.fullmatch(r"data:(image/(?:png|jpeg|jpg));base64", header, re.IGNORECASE)
+        if not sep or not match:
+            raise ValueError("invalid_source_reference")
+        declared_mime = match.group(1).lower().replace("jpg", "jpeg")
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError):
+        raise ValueError("invalid_source_reference")
+    actual_mime = "image/png" if data.startswith(b"\x89PNG\r\n\x1a\n") else "image/jpeg" if data.startswith(b"\xff\xd8\xff") else None
+    if not actual_mime or (declared_mime and declared_mime != actual_mime):
+        raise ValueError("invalid_source_reference")
+    if len(data) > 10 * 1024 * 1024:
+        raise ValueError("input_budget_exceeded")
+    try:
+        import fitz
+        image = fitz.Pixmap(data)
+        if image.width <= 0 or image.height <= 0 or image.width * image.height > 20_000_000:
+            raise ValueError("input_budget_exceeded")
+    except ValueError:
+        raise
+    except Exception:
+        raise ValueError("invalid_source_reference")
+    handle = tempfile.NamedTemporaryFile(prefix="pdf2md_table_crop_", suffix=".png" if actual_mime == "image/png" else ".jpg", delete=False)
+    try:
+        handle.write(data)
+        handle.close()
+    except Exception:
+        handle.close()
+        Path(handle.name).unlink(missing_ok=True)
+        raise
+    return {"image_path": handle.name, "_owned_image_path": handle.name}
 
 
 def _sources(markup, parse_grid):
@@ -291,54 +342,71 @@ def enhance_table(request, parse_grid, vlm_factory, vlm_config=None, description
             raise ValueError("input_budget_exceeded")
         out["source_cells"] = sources
         out["cell_status"] = meta["cell_status"]
+        deterministic_issues = []
+        for assertion in request.get("source_assertions", []):
+            if not isinstance(assertion, dict):
+                raise ValueError("invalid_source_assertion")
+            ref = assertion.get("source")
+            if ref not in positions or not isinstance(assertion.get("text"), str):
+                raise ValueError("invalid_source_assertion")
+            if sources[positions[ref]]["text"] != assertion["text"]:
+                deterministic_issues.append(_issue("content_conflict", [ref]))
+        if request.get("content_conflicts"):
+            deterministic_issues.append(_issue("content_conflict", list(sources)))
+        if request.get("requires_previous_context"):
+            deterministic_issues.append(_issue("missing_previous_context", list(sources)))
         proposal = _automatic(markup, {k: v for k, v in sources.items() if not k.startswith("a")}, positions, binding)
         sections, issues, used = [], [], set()
         if proposal:
             sections, issues, used = validate_proposal(proposal, binding, sources, positions)
         else:
             issues = [_issue("ambiguous_header", list(sources))]
+        issues = deterministic_issues + issues
         budget = request.get("max_model_calls", 0)
         if type(budget) is not int or not 0 <= budget <= 2:
             raise ValueError("invalid_model_budget")
-        if budget:
+        strategy = str(request.get("query_strategy") or "").strip().lower()
+        if strategy not in {"", "semantic_review", "model_required"}:
+            raise ValueError("invalid_query_strategy")
+        if strategy and budget == 0:
+            raise ValueError("invalid_model_budget")
+        should_call_model = bool(budget and strategy in {"semantic_review", "model_required"}
+                                 and not deterministic_issues)
+        if should_call_model:
             config = {**(vlm_config or {}), "description_language": description_language, "max_retries": 0}
             config["timeout_sec"] = max(1, min(int(config.get("timeout_sec", 60)), 60))
-            client = vlm_factory(config)
-            for attempt in range(budget):
-                out["model_calls"] += 1
+            prepared_image = _object_image_args(request)
+            owned_image = prepared_image.pop("_owned_image_path", None)
+            try:
                 try:
-                    image_args = {"image_path": request["object_image_path"]} if request.get("object_image_path") else {}
-                    candidate = client.explain_table_query({"binding": binding, "source_cells": sources,
-                        "positions": positions, "unresolved": issues}, description_language, **image_args)
-                    if client.last_call_info.get("truncated"):
-                        raise ValueError("model_response_truncated")
-                    new_sections, new_issues, new_used = validate_proposal(candidate, binding, sources, positions)
-                    sections, issues, used = new_sections, new_issues, new_used
-                    if not issues:
-                        break
-                except (ValueError, TypeError, KeyError, AttributeError) as exc:
-                    code = str(exc) if isinstance(exc, ValueError) and str(exc) in REASONS else "invalid_model_response"
-                    issues = issues + [_issue(code)]
+                    client = vlm_factory(config)
                 except Exception:
-                    # Never echo provider errors, prompts, or table content into diagnostics.
-                    issues = issues + [_issue("model_call_failed")]
-        conflicts = []
-        for assertion in request.get("source_assertions", []):
-            ref = assertion.get("source")
-            if ref not in positions or not isinstance(assertion.get("text"), str):
-                raise ValueError("invalid_source_assertion")
-            if sources[positions[ref]]["text"] != assertion["text"]:
-                conflicts.append(ref)
-        if conflicts:
-            issues.append(_issue("content_conflict", conflicts))
-        if request.get("content_conflicts"):
-            issues.append(_issue("content_conflict", list(sources)))
+                    raise ValueError("model_initialization_failed") from None
+                for attempt in range(budget):
+                    out["model_calls"] += 1
+                    try:
+                        image_args = dict(prepared_image)
+                        candidate = client.explain_table_query({"binding": binding, "source_cells": sources,
+                            "positions": positions, "unresolved": issues}, description_language, **image_args)
+                        if client.last_call_info.get("truncated"):
+                            raise ValueError("model_response_truncated")
+                        new_sections, new_issues, new_used = validate_proposal(candidate, binding, sources, positions)
+                        sections, issues, used = new_sections, new_issues, new_used
+                        if not issues:
+                            break
+                    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+                        code = str(exc) if isinstance(exc, ValueError) and str(exc) in REASONS else "invalid_model_response"
+                        issues = issues + [_issue(code)]
+                    except Exception:
+                        # Never echo provider errors, prompts, or table content into diagnostics.
+                        issues = issues + [_issue("model_call_failed")]
+            finally:
+                if owned_image:
+                    Path(owned_image).unlink(missing_ok=True)
         for ref, cell in sources.items():
             value = scalar(cell["text"])
             if value["kind"] == "text" and re.search(r"(?:[<>≤≥~～]\s*-?\d|\d\s*[~～])", cell["text"]):
                 issues.append(_issue("unsupported_condition", [ref]))
-        if request.get("requires_previous_context"):
-            issues.append(_issue("missing_previous_context", list(sources)))
         # Hash equality proves association, not correctness against the original page.
         out["quality"] = {"content_consistency": "conflict" if any(issue["reason"] == "content_conflict" for issue in issues) else "source_bound_not_image_verified",
                           "structure_coverage": "complete" if set(sources) <= used else "unavailable",

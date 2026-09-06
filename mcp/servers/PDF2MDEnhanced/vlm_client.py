@@ -516,7 +516,26 @@ class DynamicVLMClient:
     def _call_image_prompt(self, image_path: str, prompt: str, max_tokens: int, safe_errors: bool = False) -> str:
         self.ensure_enabled()
         with open(image_path, "rb") as f:
-            encoded = base64.b64encode(f.read()).decode("utf-8")
+            image_bytes = f.read()
+        if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            mime = "image/png"
+        elif image_bytes.startswith(b"\xff\xd8\xff"):
+            mime = "image/jpeg"
+        elif image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP":
+            mime = "image/webp"
+        else:
+            # Existing single-page inputs include BMP/TIFF; convert in memory
+            # with the same image dependency used for page rendering.
+            import fitz
+            try:
+                pixmap = fitz.Pixmap(image_bytes)
+                if pixmap.colorspace and pixmap.colorspace.n > 3:
+                    pixmap = fitz.Pixmap(fitz.csRGB, pixmap)
+                image_bytes = pixmap.tobytes("png")
+            except Exception:
+                raise ValueError("invalid_image_payload") from None
+            mime = "image/png"
+        encoded = base64.b64encode(image_bytes).decode("utf-8")
 
         last_err = None
         for attempt in range(self.max_retries + 1):
@@ -531,7 +550,7 @@ class DynamicVLMClient:
                             "role": "user",
                             "content": [
                                 {"type": "text", "text": prompt},
-                                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded}"}},
+                                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}},
                             ],
                         }
                     ],

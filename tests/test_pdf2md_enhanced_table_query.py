@@ -81,7 +81,7 @@ def proposal(req):
     (lambda p: p.update(unresolved=[{'reason':'missing_previous_context','sources':['r2c0']}]), 'missing_previous_context'),
 ])
 def test_model_failures_do_not_publish_or_mutate(monkeypatch, mutation, reason):
-    req = request(); req['max_model_calls'] = 1
+    req = request(); req['max_model_calls'] = 1; req['query_strategy'] = 'semantic_review'
     p = proposal(req); mutation(p)
     monkeypatch.setattr(DynamicVLMClient, 'explain_table_query', lambda *a: p)
     result = run(req)
@@ -92,7 +92,7 @@ def test_model_failures_do_not_publish_or_mutate(monkeypatch, mutation, reason):
 
 
 def test_bounded_retry_language_and_truncation(monkeypatch):
-    req = request(); req['max_model_calls'] = 2
+    req = request(); req['max_model_calls'] = 2; req['query_strategy'] = 'semantic_review'
     calls = []
     def model(self, payload, language):
         calls.append((deepcopy(payload), language, self.max_retries))
@@ -107,7 +107,7 @@ def test_bounded_retry_language_and_truncation(monkeypatch):
 
 
 def test_provider_failure_safe_and_bounded(monkeypatch):
-    req = request(); req['max_model_calls'] = 2
+    req = request(); req['max_model_calls'] = 2; req['query_strategy'] = 'semantic_review'
     def fail(*args):
         raise TimeoutError('SECRET private table response')
     monkeypatch.setattr(DynamicVLMClient, 'explain_table_query', fail)
@@ -115,6 +115,242 @@ def test_provider_failure_safe_and_bounded(monkeypatch):
     assert 'SECRET' not in json.dumps(result)
     assert result['query_enhancement']['model_calls'] == 2
     assert result['query_enhancement']['lookup_sections'] == []
+
+
+@pytest.mark.parametrize('field,reason', [
+    ('content_conflicts', 'content_conflict'),
+    ('requires_previous_context', 'missing_previous_context'),
+    ('source_assertions', 'content_conflict'),
+])
+def test_deterministic_blockers_skip_provider(monkeypatch, field, reason):
+    req = request(); req['max_model_calls'] = 2
+    if field == 'content_conflicts':
+        req[field] = [{'reason': 'image disagreement'}]
+    elif field == 'requires_previous_context':
+        req[field] = True
+    else:
+        req[field] = [{'source': 'r1c0', 'text': 'WRONG'}]
+    calls = []
+    monkeypatch.setattr(DynamicVLMClient, 'explain_table_query', lambda *args, **kwargs: calls.append(1))
+    out = run(req)['query_enhancement']
+    assert out['model_calls'] == 0 and calls == []
+    assert out['lookup_sections'] == []
+    assert reason in [item['reason'] for item in out['unresolved']]
+
+
+def test_model_budget_is_cap_and_semantic_review_is_explicit(monkeypatch):
+    req = request(); req['max_model_calls'] = 2
+    calls = []
+    monkeypatch.setattr(DynamicVLMClient, 'explain_table_query', lambda *args, **kwargs: calls.append(1) or proposal(req))
+    out = run(req)['query_enhancement']
+    assert out['lookup_status'] == 'complete' and out['model_calls'] == 0 and calls == []
+    req['query_strategy'] = 'semantic_review'
+    out = run(req)['query_enhancement']
+    assert out['lookup_status'] == 'complete' and out['model_calls'] == 1 and len(calls) == 1
+
+
+@pytest.mark.parametrize('strategy,budget,reason', [
+    ('model_required', 0, 'invalid_model_budget'),
+    ('semantci_review', 1, 'invalid_query_strategy'),
+    ('semantic_review', 0, 'invalid_model_budget'),
+])
+def test_model_strategy_configuration_errors_are_explicit(strategy, budget, reason):
+    req = request(); req['query_strategy'] = strategy; req['max_model_calls'] = budget
+    out = run(req)['query_enhancement']
+    assert out['lookup_status'] == 'unavailable'
+    assert out['unresolved'][0]['reason'] == reason
+
+
+def test_blocker_precheck_has_provider_factory_and_method_zero_calls(monkeypatch):
+    req = request(); req['query_strategy'] = 'semantic_review'; req['max_model_calls'] = 1
+    req['content_conflicts'] = [{'reason': 'independent image disagrees'}]
+    factory_calls = []; method_calls = []
+    def factory(config):
+        factory_calls.append(config)
+        return DynamicVLMClient(config)
+    monkeypatch.setattr(single_page_tools, 'DynamicVLMClient', factory)
+    monkeypatch.setattr(DynamicVLMClient, 'explain_table_query', lambda *a, **k: method_calls.append(1))
+    before = deepcopy(req['table'])
+    out = run(req)['query_enhancement']
+    assert out['model_calls'] == 0 and factory_calls == [] and method_calls == []
+    assert out['unresolved'][0]['reason'] == 'content_conflict'
+    assert req['table'] == before
+
+
+def test_model_required_cannot_be_satisfied_by_deterministic_projection(monkeypatch):
+    req = request(); req['query_strategy'] = 'model_required'; req['max_model_calls'] = 1
+    monkeypatch.setattr(DynamicVLMClient, 'explain_table_query', lambda *a, **k: (_ for _ in ()).throw(TimeoutError()))
+    out = run(req)['query_enhancement']
+    assert out['model_calls'] == 1
+    assert out['lookup_status'] == 'unavailable'
+    assert any(item['reason'] == 'model_call_failed' for item in out['unresolved'])
+
+
+def _real_image_bytes(kind, width=4, height=3):
+    import fitz
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, width, height), False)
+    return pix.tobytes(kind)
+
+
+@pytest.mark.parametrize('kind,mime', [('png', 'image/png'), ('jpeg', 'image/jpeg')])
+def test_cross_service_image_requires_real_decodable_payload(monkeypatch, kind, mime):
+    req = request(); req['query_strategy'] = 'semantic_review'; req['max_model_calls'] = 1
+    import base64
+    req['object_image_data'] = 'data:' + mime + ';base64,' + base64.b64encode(_real_image_bytes(kind)).decode()
+    seen = []
+    monkeypatch.setattr(DynamicVLMClient, 'explain_table_query', lambda self, payload, language, **kw: seen.append(kw['image_path']) or proposal(req))
+    out = run(req)['query_enhancement']
+    assert out['model_calls'] == 1 and len(seen) == 1
+    assert not __import__('pathlib').Path(seen[0]).exists()
+
+
+@pytest.mark.parametrize('payload', [
+    'data:image/png;base64,' + __import__('base64').b64encode(b'\x89PNG\r\n\x1a\n').decode(),
+    'data:image/jpeg;base64,' + __import__('base64').b64encode(b'\xff\xd8\xff').decode(),
+    'data:image/png;base64,' + __import__('base64').b64encode(b'\xff\xd8\xff').decode(),
+])
+def test_invalid_or_mismatched_image_rejected_before_provider(monkeypatch, payload):
+    req = request(); req['query_strategy'] = 'semantic_review'; req['max_model_calls'] = 1
+    req['object_image_data'] = payload
+    calls = []
+    monkeypatch.setattr(DynamicVLMClient, 'explain_table_query', lambda *a, **k: calls.append(1))
+    out = run(req)['query_enhancement']
+    assert out['model_calls'] == 0 and calls == []
+    assert out['lookup_status'] == 'unavailable'
+    assert out['unresolved'][0]['reason'] == 'invalid_source_reference'
+
+
+def test_image_transport_uses_real_mime_and_bytes(monkeypatch, tmp_path):
+    import base64, json
+    image = tmp_path / 'crop.jpg'; image.write_bytes(_real_image_bytes('jpeg'))
+    client = DynamicVLMClient({'context_window': 12000})
+    client.enabled = True
+    client._client = object()
+    seen = []
+    def wire(**kwargs):
+        message = kwargs['messages'][0]['content'][1]['image_url']['url']
+        mime, encoded = message.split(';base64,', 1)
+        seen.append((mime, base64.b64decode(encoded)))
+        return ('{}', 'mock', 'stop')
+    monkeypatch.setattr(client, '_chat_completion_with_stream_fallback', wire)
+    client._call_image_prompt(str(image), 'input', 128, safe_errors=True)
+    assert seen == [('data:image/jpeg', image.read_bytes())]
+
+
+def test_provider_exception_still_cleans_validated_image(monkeypatch):
+    import base64
+    req = request(); req['query_strategy'] = 'semantic_review'; req['max_model_calls'] = 1
+    req['object_image_data'] = 'data:image/png;base64,' + base64.b64encode(_real_image_bytes('png')).decode()
+    paths = []
+    def fail(self, payload, language, **kwargs):
+        paths.append(kwargs['image_path'])
+        raise TimeoutError('provider unavailable')
+    monkeypatch.setattr(DynamicVLMClient, 'explain_table_query', fail)
+    out = run(req)['query_enhancement']
+    assert out['model_calls'] == 1 and out['lookup_status'] == 'unavailable'
+    assert len(paths) == 1 and not __import__('pathlib').Path(paths[0]).exists()
+
+
+@pytest.mark.parametrize('failure', ['factory', 'client_config'])
+@pytest.mark.parametrize('owned', [True, False])
+def test_provider_initialization_failure_cleans_only_owned_image(monkeypatch, tmp_path, failure, owned):
+    import base64
+    original_tempfile = query.tempfile.NamedTemporaryFile
+    monkeypatch.setattr(query.tempfile, 'NamedTemporaryFile',
+                        lambda **kwargs: original_tempfile(dir=tmp_path, **kwargs))
+    req = request(); req.update(query_strategy='semantic_review', max_model_calls=1)
+    image_bytes = _real_image_bytes('png')
+    caller_image = tmp_path / 'caller.png'
+    if owned:
+        req['object_image_data'] = base64.b64encode(image_bytes).decode()
+    else:
+        caller_image.write_bytes(image_bytes)
+        req['object_image_path'] = str(caller_image)
+    before = deepcopy(req)
+    created = []
+    methods = []
+    monkeypatch.setattr(DynamicVLMClient, 'explain_table_query', lambda *a, **k: methods.append(1))
+
+    def factory(config):
+        images = list(tmp_path.glob('pdf2md_table_crop_*'))
+        assert len(images) == int(owned)
+        created.append(1)
+        if failure == 'factory':
+            raise RuntimeError('SECRET provider initialization detail')
+        return DynamicVLMClient(config)
+
+    result, error = None, None
+    try:
+        result = query.enhance_table(req, single_page_tools._html_table_to_grid, factory,
+                                     {'max_tokens': 'SECRET_invalid'})
+    except Exception as exc:
+        error = exc
+    assert list(tmp_path.glob('pdf2md_table_crop_*')) == []
+    if not owned:
+        assert caller_image.read_bytes() == image_bytes
+    assert error is None
+    assert created == [1] and methods == []
+    assert req == before and result['table'] == before['table']
+    out = result['query_enhancement']
+    assert out['model_calls'] == 0 and out['lookup_status'] == 'unavailable'
+    assert out['unresolved'] == [{'reason': 'model_initialization_failed', 'sources': []}]
+    assert 'SECRET' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('outcomes', [('failure', 'success'), ('truncated', 'success'), ('failure', 'failure')])
+def test_query_image_cleanup_after_retries(monkeypatch, outcomes):
+    import base64
+    from pathlib import Path
+    req = request(); req.update(query_strategy='semantic_review', max_model_calls=2)
+    req['object_image_data'] = base64.b64encode(_real_image_bytes('png')).decode()
+    paths = []
+
+    def model(self, payload, language, image_path):
+        assert Path(image_path).exists()
+        outcome = outcomes[len(paths)]
+        paths.append(image_path)
+        if outcome == 'failure':
+            raise TimeoutError('SECRET provider failure')
+        self.last_call_info = {'truncated': outcome == 'truncated'}
+        return proposal(req)
+
+    monkeypatch.setattr(DynamicVLMClient, 'explain_table_query', model)
+    result = run(req)
+    assert result['table'] == req['table']
+    assert result['query_enhancement']['model_calls'] == 2
+    assert result['query_enhancement']['lookup_status'] == ('complete' if outcomes[-1] == 'success' else 'unavailable')
+    assert len(paths) == 2 and all(not Path(path).exists() for path in paths)
+
+
+def test_cross_service_image_pixel_limit_is_enforced_before_provider(monkeypatch):
+    import base64
+    req = request(); req['query_strategy'] = 'semantic_review'; req['max_model_calls'] = 1
+    req['object_image_data'] = 'data:image/png;base64,' + base64.b64encode(_real_image_bytes('png', 5000, 5000)).decode()
+    calls = []
+    monkeypatch.setattr(DynamicVLMClient, 'explain_table_query', lambda *a, **k: calls.append(1))
+    out = run(req)['query_enhancement']
+    assert out['model_calls'] == 0 and calls == []
+    assert out['unresolved'][0]['reason'] == 'input_budget_exceeded'
+
+
+def test_cross_service_object_image_data_is_bounded_and_cleaned(monkeypatch):
+    import base64
+    req = request(); req['max_model_calls'] = 1; req['query_strategy'] = 'semantic_review'
+    req['object_image_data'] = 'data:image/png;base64,' + base64.b64encode(_real_image_bytes('png')).decode()
+    paths = []
+    def model(self, payload, language, **kwargs):
+        paths.append(kwargs.get('image_path'))
+        assert kwargs.get('image_path') and __import__('pathlib').Path(kwargs['image_path']).exists()
+        return proposal(req)
+    monkeypatch.setattr(DynamicVLMClient, 'explain_table_query', model)
+    out = run(req)['query_enhancement']
+    assert out['model_calls'] == 1 and len(paths) == 1
+    assert not __import__('pathlib').Path(paths[0]).exists()
+
+
+@pytest.mark.parametrize('expression', ['150~475', '22~33'])
+def test_tilde_interval_remains_unresolved_without_boundary_evidence(expression):
+    assert query.parse_interval(expression) is None
 
 
 def test_annotation_omission_and_content_conflict():
@@ -165,7 +401,7 @@ def test_default_path_has_no_new_arguments(monkeypatch):
 
 def test_text_span_conditions_are_required_and_source_bound(monkeypatch):
     markup = '<table><tr><th>Material</th><th>Curve</th></tr><tr><td>Alloy Z if annealed</td><td>Q</td></tr></table>'
-    req = request(markup); req['max_model_calls'] = 1
+    req = request(markup); req['max_model_calls'] = 1; req['query_strategy'] = 'semantic_review'
     p = {'binding': {**req['target'], 'request_id':'req','source_html_sha256':req['source_html_sha256']},
          'lookup_sections':[{'key':'section_1','fields':[{'key':'c0','header_path':['r0c0']},{'key':'c1','header_path':['r0c1']}],
          'records':[{'values':{'c0':'r1c0','c1':'r1c1'}}]}], 'unresolved':[]}
@@ -227,7 +463,7 @@ def test_same_material_different_conditions_and_units(monkeypatch):
     p['lookup_sections'][0]['fields'][1]['unit_sources'] = ['a2']
     p['lookup_sections'][0]['records'][0]['conditions'] = ['a0']
     p['lookup_sections'][0]['records'][1]['conditions'] = ['a1']
-    req['max_model_calls'] = 1
+    req['max_model_calls'] = 1; req['query_strategy'] = 'semantic_review'
     monkeypatch.setattr(DynamicVLMClient,'explain_table_query',lambda *args:p)
     out = run(req)['query_enhancement']
     assert len(out['lookup_sections'][0]['records']) == 2
@@ -273,13 +509,13 @@ def test_numeric_token_cannot_be_sliced_to_a_different_number(monkeypatch):
     req=request('<table><tr><th>X</th></tr><tr><td>-123</td></tr></table>')
     p=proposal(req); p['lookup_sections'][0]['records'][0]['values']['c0']={'source':'r1c0','start':1,'end':4}
     p['lookup_sections'][0]['records'][0]['groups']=[{'source':'r1c0','start':0,'end':1}]
-    req['max_model_calls']=1
+    req['max_model_calls']=1; req['query_strategy'] = 'semantic_review'
     monkeypatch.setattr(DynamicVLMClient,'explain_table_query',lambda *args:p)
     assert run(req)['query_enhancement']['lookup_status']=='unavailable'
 
 
 def test_registered_tool_reaches_real_semantic_method_with_wire_stub(monkeypatch):
-    req=request(); req['max_model_calls']=1
+    req=request(); req['max_model_calls']=1; req['query_strategy'] = 'semantic_review'
     seen=[]
     def wire(self,prompt,max_tokens,safe_errors=False):
         payload=json.loads(prompt.split('\nInput: ',1)[1])

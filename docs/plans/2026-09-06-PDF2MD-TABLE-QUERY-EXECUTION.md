@@ -6,7 +6,7 @@ real-model semantic acceptance and product/runtime acceptance remain unexecuted.
 ## Checkout and scope
 
 - AICMDEngine: `/Users/kehongwei/workspace/AICMDEngine`, `main`,
-  HEAD `cdef76b8c5420f34fbb97ac00c2d04490074e05b`, initially clean.
+  HEAD `64446cffb5664e76dddf8a327a8a5bba1164a6a8`, initially clean.
 - Membership: HEAD `c62b34ec3786efb8006e826dd7945a0c561b4006`, read only.
   Existing untracked plan and `scripts/probe_complex_table_queries.py` preserved.
 - No commit, push, real model/provider call, dependency download, image build,
@@ -22,8 +22,15 @@ real-model semantic acceptance and product/runtime acceptance remain unexecuted.
   merged origins, layered header bindings, units, conditions, groups and text
   spans; deterministic values and explicit interval boundaries; bounded semantic
   proposals and validation; independent source assertions; fail-closed output.
+  Deterministic source assertions, caller conflicts and missing previous context
+  now block before provider creation (`model_calls: 0`). `max_model_calls` is an
+  upper bound; model use requires explicit `query_strategy=semantic_review` or
+  `model_required`.
 - `vlm_client.py`: text or explicit object-image interpretation through existing
   transport. Safe error diagnostics enabled for this path, default behavior retained.
+  Cross-service crops may use bounded PNG/JPEG data input, materialized only for
+  the call and deleted afterward; image presence never changes image-verification
+  quality state.
 - `Dockerfile`, `Dockerfile.cn`: include the new runtime module in explicit COPY
   manifests. This was a source manifest check, not an image build.
 - `tests/test_pdf2md_enhanced_table_query.py`: synthetic offline tests, including
@@ -52,7 +59,11 @@ Final regression command:
 .venv/bin/python -m pytest -q --no-cov tests/test_pdf2md_enhanced_table_query.py tests/test_pdf2md_enhanced_single_page_tools.py tests/test_pdf2md_enhanced_object_recovery.py tests/test_pdf2md_enhanced_upload_semantics.py
 ```
 
-Result: **310 passed** (48 new query tests and 262 existing tests); 64 pre-existing
+Follow-up table-query result: **68 table-query tests passed**. The affected suite
+result is **330 passed** after the image and strategy corrections below. New tests cover pre-call
+blockers, explicit model strategy, temporary cross-service image input, real
+decodability/MIME/transport checks, and unresolved tilde ranges; 64
+pre-existing
 environment/deprecation warnings. `python -m py_compile` passed for the four
 changed/new Python runtime modules and the new test file. `git diff --check` passed.
 `codegraph sync` passed.
@@ -103,3 +114,61 @@ never rewritten.
    cross-table evaluation remain unsupported and cannot be silently executed.
 5. Original uploads and deployed containers remain unchanged. Product acceptance
    requires separately authorized real MCP calls and Membership integration.
+
+## Follow-up verification
+
+- The sample manifest and all three sample directories/files were readable;
+  originals and expected answers under `/tmp/docintel-complex-table-samples-20260906/`
+  were not modified.
+- Mock/provider-stub tests verify only the image-conflict response contract.
+  Real-model cases still requiring authorized execution are the GB/T 150
+  serial/source mismatch, ASME continuation/curve association, and GB/T 151
+  header/grade association. Expected results are source-scoped `content_conflict`
+  or unresolved semantic binding while preserving the original table.
+- The unchanged private verification script now reports ambiguous ASME/GB/T 151
+  cases as blocked because it does not set the new explicit `query_strategy`; this
+  is the intended zero-call default. Callers requiring provider/model interpretation
+  must add `query_strategy=semantic_review`.
+- Truncated headers, MIME mismatches, undecodable images and pixel-over-limit
+  inputs are rejected before provider creation with `model_calls: 0`. JPEG input
+  is sent as `data:image/jpeg` with the exact validated bytes; PNG remains
+  `data:image/png`.
+
+## Initialization cleanup and legacy image-format follow-up
+
+Starting HEAD remained `64446cffb5664e76dddf8a327a8a5bba1164a6a8` on `main`.
+The five uncommitted files from the previous rounds were preserved. No Membership,
+sample or runtime inspection/mutation was performed in this follow-up.
+
+The new offline regressions first returned **8 failed, 5 passed**:
+two owned-image cases leaked files when the factory raised or the real client
+failed to parse `max_tokens`; two caller-owned cases exposed unsafe/non-specific
+initialization error handling; WebP/BMP/TIF/TIFF failed before reaching the wire.
+PNG/JPEG and the retry cleanup controls passed. After the minimal fix all **13
+new cases passed**.
+
+- Provider creation now executes inside the crop owner's `try/finally`.
+  Factory exceptions and real client configuration errors return
+  `model_initialization_failed`, zero model calls, and the unchanged table.
+  Tests check removal of owned files and byte preservation of caller-owned files.
+  Retry tests cover call failure then success, truncation then success, and
+  exhausted failures; all paths remove the owned crop.
+- Shared image sending preserves PNG/JPEG bytes/MIME and sends WebP with
+  `image/webp`. BMP/TIFF use existing PyMuPDF decoding and PNG encoding in memory.
+  The default single-page tool tests run through actual context preparation,
+  structured extraction and shared image sending, stubbing only client setup and
+  the provider wire. They decode outgoing bytes, check dimensions/pixels and MIME,
+  assert unchanged input files, and verify the tool's work directory is removed.
+  No conversion files or new runtime dependencies are introduced.
+
+This evidence is offline implementation/transport-contract verification. Real
+provider support, automatic source-image error detection, the running image and
+Membership integration remain unverified. Ambiguous tilde ranges remain blocked;
+human assertions and stub responses do not prove real-model semantic correctness.
+
+Final affected-suite run (command above): **343 passed, 64 warnings** (75 query
+contracts, 110 single-page contracts, 74 object-recovery contracts, 84 upload
+semantic contracts). Compilation of the two changed runtime modules and both
+test modules passed; `git diff --check` passed. The two synthetic temporary crops
+left by the deliberately failing pre-fix tests were removed by exact path.
+No commits, pushes, builds, restarts, deployments or external model calls occurred.

@@ -62,6 +62,59 @@ GBT16749_PAGE12_QWEN_RESPONSE = (
 ).read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize('suffix,format_name,mime', [
+    ('.png', 'PNG', 'image/png'), ('.jpg', 'JPEG', 'image/jpeg'),
+    ('.webp', 'WEBP', 'image/webp'), ('.bmp', 'BMP', 'image/png'),
+    ('.tif', 'TIFF', 'image/png'), ('.tiff', 'TIFF', 'image/png'),
+])
+def test_default_single_page_image_reaches_provider_with_matching_mime(
+        monkeypatch, tmp_path, suffix, format_name, mime):
+    from PIL import Image
+    source = tmp_path / ('input' + suffix)
+    Image.new('RGB', (7, 5), (32, 64, 96)).save(source, format=format_name)
+    original_bytes = source.read_bytes()
+    contexts, sent = [], []
+    prepare = single_page_tools._prepare_context
+
+    def record_context(work_dir, **kwargs):
+        ctx = prepare(work_dir, **kwargs)
+        contexts.append((work_dir, ctx.image_path))
+        return ctx
+
+    def client_factory(config):
+        client = DynamicVLMClient(config)
+        client.enabled = True
+        client._client = object()
+        return client
+
+    def wire(self, **kwargs):
+        url = kwargs['messages'][0]['content'][1]['image_url']['url']
+        prefix, encoded = url.split(';base64,', 1)
+        payload = base64.b64decode(encoded, validate=True)
+        sent.append(payload)
+        assert prefix == 'data:' + mime
+        with Image.open(io.BytesIO(payload)) as image:
+            image.load()
+            assert image.size == (7, 5)
+            assert image.format == {'image/png': 'PNG', 'image/jpeg': 'JPEG', 'image/webp': 'WEBP'}[mime]
+            if format_name in {'BMP', 'TIFF'}:
+                assert image.convert('RGB').getpixel((0, 0)) == (32, 64, 96)
+        if format_name in {'PNG', 'JPEG', 'WEBP'}:
+            assert payload == original_bytes
+        return json.dumps({'tables': [{'markdown': '| A | B |\n| --- | --- |\n| 1 | 2 |'}]}), 'stub', 'stop'
+
+    monkeypatch.setattr(single_page_tools, '_prepare_context', record_context)
+    monkeypatch.setattr(single_page_tools, 'DynamicVLMClient', client_factory)
+    monkeypatch.setattr(DynamicVLMClient, '_chat_completion_with_stream_fallback', wire)
+    result = json.loads(single_page_tools.extract_page_tables_direct(file_path=str(source), describe=False))
+    assert result['model_calls']['vlm_ocr'] == 1 and len(result['items']) == 1
+    assert len(sent) == 1 and len(contexts) == 1
+    assert contexts[0][1] == str(source)
+    assert not contexts[0][0].exists()
+    assert source.read_bytes() == original_bytes
+    assert list(tmp_path.iterdir()) == [source]
+
+
 @pytest.mark.parametrize("language,expected_language", [
     ("zh", "Chinese"),
     ("en", "English"),
