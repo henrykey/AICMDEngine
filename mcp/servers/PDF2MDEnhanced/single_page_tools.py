@@ -76,7 +76,15 @@ def extract_page_tables_direct(
     vlm_config: Optional[Dict[str, Any]] = None,
     routing_config: Optional[Dict[str, Any]] = None,
     context: Optional[Dict[str, Any]] = None,
+    query_enhancement: Optional[Dict[str, Any]] = None,
 ) -> str:
+    if query_enhancement is not None:
+        from .table_query import enhance_table
+
+        if output_format != "json":
+            raise ValueError("query enhancement requires JSON output")
+        return json.dumps(enhance_table(query_enhancement, _html_table_to_grid,
+                          DynamicVLMClient, vlm_config, description_language), ensure_ascii=False)
     result = _extract_single_page(
         tool="extract_page_tables",
         target="tables",

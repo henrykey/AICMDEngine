@@ -173,6 +173,7 @@ async def extract_page_tables(
     vlm_config: Optional[Dict[str, Any]] = None,
     routing_config: Optional[Dict[str, Any]] = None,
     context: Optional[Dict[str, Any]] = None,
+    query_enhancement: Optional[Dict[str, Any]] = None,
 ) -> str:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
@@ -191,6 +192,7 @@ async def extract_page_tables(
             vlm_config=_normalize_vlm_config(vlm_config),
             routing_config=routing_config,
             context=context,
+            query_enhancement=query_enhancement,
         ),
     )
 

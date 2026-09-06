@@ -32,6 +32,8 @@
 - Use `node test_llm.js` for quick LLM connectivity checks when needed.
 - If adding tests, place them alongside the relevant layer (`src/` for backend, `ui/` for frontend) and document new commands here.
 
+- PDF2MD query enhancement offline contracts: `.venv/bin/python -m pytest -q --no-cov tests/test_pdf2md_enhanced_table_query.py` (synthetic fixtures, provider stubs).
+
 ## Commit & Pull Request Guidelines
 - Commit history is lightweight and sentence-case (e.g., "Release v1.0.0..."). Keep summaries short and clear.
 - PRs should include a brief summary, testing notes, and screenshots for UI changes.
