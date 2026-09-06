@@ -100,6 +100,12 @@ def build_layout_outcome(
         error = _entry_error(entry, str(block.get("bbox_error") or ""))
         if error:
             entry["error"] = error
+            if object_type == "figure" and error["code"] == "layout_figure_content_missing":
+                # Geometry establishes an object even when its semantics still need recovery.
+                payloads["figures"].append({**_payload_from_entry(entry, block),
+                    "status": "FAILED", "content_status": "geometry_only",
+                    "description": "", "semantic_summary": "", "semantic_status": "missing",
+                    "missing_fields": ["description"]})
         else:
             if object_type == "table":
                 _normalize_table_math(entry)
@@ -272,11 +278,20 @@ def apply_recovered_payloads(outcome: Dict[str, Any], recovered: Any) -> None:
             payload = _recovered_payload(entry, candidate)
             if payload is None:
                 continue
+            if object_type == "figure":
+                payload.pop("content_status", None)
             if object_type == "formula" and is_formula_body_text(payload.get("latex")):
                 # A recovered variable explanation belongs to body text, not an object array.
                 entry["type"] = "text"
             else:
-                outcome["payloads"][collection].append(payload)
+                existing = outcome["payloads"][collection]
+                retained = [i for i, value in enumerate(existing)
+                            if value.get("layout_id") == entry["layout_id"]
+                            and value.get("content_status") == "geometry_only"]
+                if object_type == "figure" and len(retained) == 1:
+                    existing[retained[0]] = payload
+                else:
+                    existing.append(payload)
             entry["status"] = "EXTRACTED"
             entry["review_required"] = False
             entry["content"] = _payload_content(object_type, payload)
@@ -343,7 +358,20 @@ def reconcile_layout(
                     True,
                 )
         elif refs:
-            unmatched_payloads.append(layout_id)
+            retained_figure = (item.get("type") == "figure" and item.get("status") == "FAILED"
+                               and (item.get("error") or {}).get("code") == "layout_figure_content_missing"
+                               and len(refs) == 1 and refs[0][0] == "figures")
+            if retained_figure:
+                collection, index = refs[0]
+                payload = output_elements[collection][index]
+                retained_figure = (payload.get("content_status") == "geometry_only"
+                                   and payload.get("bbox") == item.get("bbox")
+                                   and payload.get("bbox_space") == "normalized_page"
+                                   and payload.get("semantic_status") == "missing")
+            if retained_figure:
+                item["payload_ref"] = {"collection": collection, "index": index}
+            else:
+                unmatched_payloads.append(layout_id)
 
     by_type = {
         name: {"identified": 0, "extracted": 0, "failed": 0}
@@ -544,6 +572,9 @@ def _payload_from_entry(entry: Dict[str, Any], block: Dict[str, Any]) -> Optiona
         return {
             **common,
             **_table_math_metadata(entry),
+            # Preserve supplied cell evidence through the layout route. Coordinates
+            # retain their declared space; no bounds or confidence are invented.
+            **{key: raw[key] for key in ("source_cells", "cell_status", "source_cell_row_offset") if key in raw},
             # A layout-bound caption is the only reliable title source.  Model/raw
             # metadata may belong to a preceding table on the same page.
             "title": entry.get("title") or "",

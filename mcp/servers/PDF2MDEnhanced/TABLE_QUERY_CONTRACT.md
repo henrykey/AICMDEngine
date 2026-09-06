@@ -192,3 +192,7 @@ Fixtures in Git are synthetic. Private samples, human bindings and their reports
 remain under `/tmp/docintel-complex-table-samples-20260906/`. Real provider calls,
 model-assisted image consistency, runtime deployment and Membership integration
 require separate acceptance. Do not treat these offline tests as product rollout.
+
+### Diagnostic attempt history
+
+`query_enhancement.diagnostics` is an additive v1 field containing ordered, content-free events. Each event has `stage` and `reasons` (reason codes only); model attempts additionally have a one-based `attempt`. Stages are `source_validation`, `deterministic_projection`, `strategy_validation`, `model_initialization`, `model_projection`, and `condition_validation`. A successful retry retains the earlier failure event even though final `unresolved` is empty. `model_calls` remains the actual logical call count. Diagnostic history neither relaxes source validation nor establishes image verification. No prompts, source content, provider exceptions, or provider configuration are included.

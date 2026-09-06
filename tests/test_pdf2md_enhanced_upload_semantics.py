@@ -660,3 +660,78 @@ def test_number_ocr_ambiguous_line_is_not_assigned(monkeypatch):
     stats = pp._recover_formula_numbers(ocr,'page',formulas)
     assert len(stats['missing_objects']) == 2
     assert all(not f.get('formula_no') for f in formulas)
+
+
+@pytest.mark.parametrize("heading,value", [("Experiment", "Microscope"), ("Product", "Assembly"), ("项目", "趋势图")])
+def test_layout_table_preserves_supplied_cell_geometry_across_content_domains(heading, value):
+    html = f'<table><tr><th>{heading}</th><th>Image</th></tr><tr><td>{value}</td><td></td></tr></table>'
+    cells = [{"row": 1, "col": 1, "rowspan": 1, "colspan": 1, "text": "",
+              "bbox": [0.5, 0.4, 0.9, 0.7], "bbox_space": "normalized_page", "confidence": 0.98}]
+    raw = _layout_raw([{"index": 1, "label": "table", "bbox_2d": [10, 20, 90, 70],
+                        "content": html, "source_cells": cells, "source_cell_row_offset": 1}])
+    before = copy.deepcopy(raw)
+    outcome = pp.build_layout_outcome(raw, 1, 100, 100)
+    table = pp._build_layout_output_elements(html, outcome["payloads"], "full_glm_ocr", "en")["tables"][0]
+    assert table["source_cells"] == cells
+    assert table["source_cell_row_offset"] == 1
+    assert table["markdown"] == html
+    assert table["layout_id"] == "p1-o001-table"
+    assert raw == before
+
+
+
+def test_geometry_only_figures_survive_without_claiming_semantic_success():
+    outcome = pp.build_layout_outcome(_layout_raw([
+        {"index": 1, "label": "figure", "bbox_2d": [10, 10, 40, 40], "content": ""},
+        {"index": 2, "label": "figure", "bbox_2d": [50, 10, 90, 40], "content": ""},
+        {"index": 3, "label": "figure", "content": ""},
+    ]), 1, 100, 100)
+    before = copy.deepcopy(outcome)
+    elements = pp._build_layout_output_elements("", outcome["payloads"], "full_glm_ocr", "en")
+    assert len(elements["figures"]) == 2
+    assert [f["layout_id"] for f in elements["figures"]] == ["p1-o001-figure", "p1-o002-figure"]
+    assert all(f["description"] == "" and f["semantic_status"] == "missing" for f in elements["figures"])
+    assert all(f["content_status"] == "geometry_only" for f in elements["figures"])
+    assert outcome == before
+    result = pp.reconcile_layout(outcome["layout_status"], outcome["layout"], elements)
+    assert result["accounted_for"] is True
+    assert result["complete"] is False
+    assert result["failed"] == 3
+    assert len(pp.recovery_blocks(outcome)) == 2
+    assert outcome["layout"][0]["payload_ref"] == {"collection": "figures", "index": 0}
+
+
+def test_recovered_figure_replaces_only_its_geometry_placeholder():
+    outcome = pp.build_layout_outcome(_layout_raw([
+        {"index": 1, "label": "figure", "bbox_2d": [10, 10, 40, 40], "content": ""},
+        {"index": 2, "label": "figure", "bbox_2d": [50, 10, 90, 40], "content": ""},
+    ]), 1, 100, 100)
+    pp.apply_recovered_payloads(outcome, {"figures": [{"layout_id": "p1-o001-figure",
+        "description": "A microscope arrangement with a light source.", "content_status": "geometry_only"}]})
+    elements = pp._build_layout_output_elements("", outcome["payloads"], "full_glm_ocr", "en")
+    assert len(elements["figures"]) == 2
+    assert elements["figures"][0]["description"] == "A microscope arrangement with a light source."
+    assert "content_status" not in elements["figures"][0]
+    assert elements["figures"][1]["content_status"] == "geometry_only"
+    result = pp.reconcile_layout(outcome["layout_status"], outcome["layout"], elements)
+    assert result["accounted_for"] is True
+    assert result["extracted"] == 1
+    assert result["failed"] == 1
+    assert result["duplicate_layout_ids"] == []
+
+
+@pytest.mark.parametrize("corruption", ["bbox", "duplicate", "semantic_status"])
+def test_geometry_only_reconciliation_rejects_mismatched_payload(corruption):
+    outcome = pp.build_layout_outcome(_layout_raw([
+        {"index": 1, "label": "image", "bbox_2d": [10, 10, 40, 40], "content": ""},
+    ]), 1, 100, 100)
+    elements = pp._build_layout_output_elements("", outcome["payloads"], "full_glm_ocr", "en")
+    if corruption == "duplicate":
+        elements["figures"].append(copy.deepcopy(elements["figures"][0]))
+    elif corruption == "bbox":
+        elements["figures"][0]["bbox"] = [0.5, 0.5, 0.9, 0.9]
+    else:
+        elements["figures"][0]["semantic_status"] = "complete"
+    result = pp.reconcile_layout(outcome["layout_status"], outcome["layout"], elements)
+    assert result["accounted_for"] is False
+    assert result["complete"] is False

@@ -1773,6 +1773,10 @@ def _build_layout_output_elements(
         for payload in values:
             if not isinstance(payload, dict):
                 continue
+            if collection == "figures" and payload.get("content_status") == "geometry_only":
+                # Keep the layout-bound image independently from semantic completion.
+                output[collection].append(dict(payload))
+                continue
             normalized = _normalize_structured({collection: [payload]})
             built = _build_output_elements(
                 markdown,

@@ -549,3 +549,26 @@ def test_both_runtime_manifests_include_query_module():
     root=Path(__file__).resolve().parents[1]/'mcp/servers/PDF2MDEnhanced'
     for name in ('Dockerfile','Dockerfile.cn'):
         assert 'table_query.py' in next(line for line in (root/name).read_text().splitlines() if line.startswith('COPY __init__.py'))
+
+
+def test_diagnostic_stages_preserve_retry_history_without_provider_content(monkeypatch):
+    req = request()
+    req.update(max_model_calls=2, query_strategy='semantic_review')
+    calls = []
+    def model(self, payload, language):
+        calls.append(1)
+        if len(calls) == 1:
+            raise TimeoutError('SECRET provider response')
+        self.last_call_info = {}
+        return proposal(req)
+    monkeypatch.setattr(DynamicVLMClient, 'explain_table_query', model)
+    out = run(req)['query_enhancement']
+    assert out['lookup_status'] == 'complete'
+    assert out['model_calls'] == 2
+    assert out['diagnostics'] == [
+        {'stage': 'deterministic_projection', 'reasons': []},
+        {'stage': 'model_projection', 'attempt': 1, 'reasons': ['model_call_failed']},
+        {'stage': 'model_projection', 'attempt': 2, 'reasons': []},
+        {'stage': 'condition_validation', 'reasons': []},
+    ]
+    assert 'SECRET' not in json.dumps(out)

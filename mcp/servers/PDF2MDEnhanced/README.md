@@ -448,3 +448,10 @@ Runs a single-page comprehensive repair pass and returns separate `tables`, `for
 - `process_task_page` failures mark the page as `FAILED` and persist the error message.
 - Via MCP Router, page-level failures are surfaced as MCP errors instead of silent success payloads.
 - `get_task_status` and `finalize_task` include `failed_page_errors` so clients can show page-specific failure reasons directly.
+
+
+### Layout-bound figures without semantic text
+
+The layout route retains figures with valid normalized-page geometry even when OCR returns no description. Their figure payload contains `content_status: geometry_only`, `semantic_status: missing`, empty description/semantic summary, and `missing_fields: [description]`. The layout entry remains `FAILED` with `layout_figure_content_missing`, stays eligible for bounded recovery, and does not count as complete. Missing/invalid geometry does not produce this payload.
+
+Reconciliation accepts exactly one such figure reference only for the matching failed layout entry and exact normalized bbox. Successful recovery replaces that layout ID's retained payload in place and removes the geometry-only marker; it preserves unrelated figures. This separates object existence from semantic completion, not image-asset availability or successful table-cell binding. No additional model calls or guessed geometry are introduced. Non-layout routes and automatic discovery of previously unidentified images remain separate work.

@@ -300,8 +300,9 @@ def enhance_table(request, parse_grid, vlm_factory, vlm_config=None, description
     table = request.get("table", {})
     result = {"table": table, "query_enhancement": {"contract_version": "1", "lookup_status": "unavailable",
               "lookup_sections": [], "degraded": True, "manualReviewRequired": True,
-              "unresolved": [], "model_calls": 0}}
+              "unresolved": [], "model_calls": 0, "diagnostics": []}}
     out = result["query_enhancement"]
+    stage = "source_validation"
     try:
         target = request.get("target")
         if not isinstance(table, dict) or not isinstance(target, dict):
@@ -362,6 +363,9 @@ def enhance_table(request, parse_grid, vlm_factory, vlm_config=None, description
         else:
             issues = [_issue("ambiguous_header", list(sources))]
         issues = deterministic_issues + issues
+        out["diagnostics"].append({"stage": "deterministic_projection",
+                                   "reasons": [issue["reason"] for issue in issues]})
+        stage = "strategy_validation"
         budget = request.get("max_model_calls", 0)
         if type(budget) is not int or not 0 <= budget <= 2:
             raise ValueError("invalid_model_budget")
@@ -373,6 +377,7 @@ def enhance_table(request, parse_grid, vlm_factory, vlm_config=None, description
         should_call_model = bool(budget and strategy in {"semantic_review", "model_required"}
                                  and not deterministic_issues)
         if should_call_model:
+            stage = "model_initialization"
             config = {**(vlm_config or {}), "description_language": description_language, "max_retries": 0}
             config["timeout_sec"] = max(1, min(int(config.get("timeout_sec", 60)), 60))
             prepared_image = _object_image_args(request)
@@ -392,21 +397,30 @@ def enhance_table(request, parse_grid, vlm_factory, vlm_config=None, description
                             raise ValueError("model_response_truncated")
                         new_sections, new_issues, new_used = validate_proposal(candidate, binding, sources, positions)
                         sections, issues, used = new_sections, new_issues, new_used
+                        out["diagnostics"].append({"stage": "model_projection", "attempt": attempt + 1,
+                                                   "reasons": [issue["reason"] for issue in new_issues]})
                         if not issues:
                             break
                     except (ValueError, TypeError, KeyError, AttributeError) as exc:
                         code = str(exc) if isinstance(exc, ValueError) and str(exc) in REASONS else "invalid_model_response"
                         issues = issues + [_issue(code)]
+                        out["diagnostics"].append({"stage": "model_projection", "attempt": attempt + 1, "reasons": [code]})
                     except Exception:
                         # Never echo provider errors, prompts, or table content into diagnostics.
                         issues = issues + [_issue("model_call_failed")]
+                        out["diagnostics"].append({"stage": "model_projection", "attempt": attempt + 1,
+                                                   "reasons": ["model_call_failed"]})
             finally:
                 if owned_image:
                     Path(owned_image).unlink(missing_ok=True)
+        stage = "condition_validation"
+        before_conditions = len(issues)
         for ref, cell in sources.items():
             value = scalar(cell["text"])
             if value["kind"] == "text" and re.search(r"(?:[<>≤≥~～]\s*-?\d|\d\s*[~～])", cell["text"]):
                 issues.append(_issue("unsupported_condition", [ref]))
+        out["diagnostics"].append({"stage": "condition_validation",
+                                   "reasons": [issue["reason"] for issue in issues[before_conditions:]]})
         # Hash equality proves association, not correctness against the original page.
         out["quality"] = {"content_consistency": "conflict" if any(issue["reason"] == "content_conflict" for issue in issues) else "source_bound_not_image_verified",
                           "structure_coverage": "complete" if set(sources) <= used else "unavailable",
@@ -421,6 +435,7 @@ def enhance_table(request, parse_grid, vlm_factory, vlm_config=None, description
             out["candidate_sections"] = sections
     except (ValueError, TypeError, KeyError, AttributeError) as exc:
         out["unresolved"] = [_issue(str(exc) if isinstance(exc, ValueError) and str(exc) in REASONS else "invalid_request")]
+        out["diagnostics"].append({"stage": stage, "reasons": [out["unresolved"][0]["reason"]]})
     return result
 
 

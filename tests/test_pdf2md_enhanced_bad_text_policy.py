@@ -1481,7 +1481,12 @@ def test_process_page_layout_recovery_rejects_wrong_explicit_layout_id(monkeypat
     )
 
     assert result["layout"][1]["status"] == "FAILED"
-    assert result["elements"]["figures"] == []
+    assert len(result["elements"]["figures"]) == 1
+    retained = result["elements"]["figures"][0]
+    assert retained["layout_id"] == "p1-o002-figure"
+    assert retained["content_status"] == "geometry_only"
+    assert retained["description"] == ""
+    assert "Wrong correlation" not in str(retained)
     assert result["reconciliation"]["unmatched_payload_layout_ids"] == ["p1-o002-figure:layout_id_mismatch"]
     assert result["layout"][2]["status"] == "EXTRACTED"
 
