@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .semantic_language import normalize_language, validate_descriptions
+
 import base64
 import json
 import logging
@@ -11,8 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 def _description_language_instruction(value: Any) -> str:
-    language = str(value or "").strip().lower()
-    if language in {"zh", "zh-cn", "zh_hans", "chinese"}:
+    if normalize_language(value) == "zh":
         output_language = "Chinese"
     else:
         output_language = "English"
@@ -460,6 +461,8 @@ class DynamicVLMClient:
             "truncated": finish == "length",
             "call_mode": call.get("mode") if call.get("mode") in {"stream", "non_stream"} else "unknown",
         }
+        if isinstance(data, dict):
+            validate_descriptions(data, self.description_language)
         return data if isinstance(data, dict) else {}
 
     def extract_table_html(

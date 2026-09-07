@@ -195,14 +195,18 @@ def test_object_client_final_prompt_uses_description_language(language, expected
     client = VLMClient({"description_language": language})
     calls = []
 
+    expected = candidate("figure")
+    if expected_language == "Chinese":
+        expected["description"] = "两段管道通过柔性接头相互连接。"
+
     def mock_call(path, prompt, max_tokens):
         calls.append(prompt)
-        return json.dumps(candidate("figure"))
+        return json.dumps(expected)
 
     client._call_image_prompt = mock_call
     assert client.extract_object_structured(
         "crop.png", block("figure"), compact=compact,
-    ) == candidate("figure")
+    ) == expected
 
     assert f"written in {expected_language}" in calls[0]
     assert "visible titles, labels, table cells, symbols, and formulas verbatim" in calls[0]

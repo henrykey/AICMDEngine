@@ -1,0 +1,3 @@
+# Fixed-version independent comparator; runtime dependencies are in requirements.txt.
+pandas==2.2.3
+lxml==6.1.1

@@ -3,7 +3,7 @@
 `extract_page_tables` accepts optional `query_enhancement`. Omit it to retain the
 existing extraction behavior and response. The new branch operates on exactly one
 supplied table; it does not OCR a page or discover adjacent objects. JSON output is
-required. No additional packages are required.
+required. The shared grid parser uses pandas and lxml from this service's requirements.txt.
 
 ## Request
 
@@ -175,12 +175,11 @@ quality gate and preserve these semantics in the existing table lifecycle.
 | `source_cells`, span bindings | Preserve source lineage; attach existing page/object metadata. |
 | `unresolved`, `candidate_sections` | Review diagnostics, never promote partial candidates to whole-table success. |
 
-Read-only call-chain check: `ReviewAutoCompletionJobService` chooses
-`extract_page_tables`; `StructuredElementSemanticEnhancementService.run` instead
-calls `StructuredElementSemanticRepairBackfillService.repairDocument` →
-`StructuredElementSemanticRepairService.repairPage` → tenant-aware chat/model
-repair. Updating MCP alone does not wire that semantic-enhancement path. No
-Membership source, persistence, index or UI changes are included here.
+The previously documented Membership local chat/model repair chain was a historical
+snapshot and is not a verified current call chain. The separate
+`enhance_object_semantics` MCP endpoint now exists; the consumer must verify its
+current routing and deployment. Do not recreate a local model path from the old
+snapshot. No Membership source, persistence, index or UI changes are included.
 
 ## Offline verification
 
@@ -196,3 +195,54 @@ require separate acceptance. Do not treat these offline tests as product rollout
 ### Diagnostic attempt history
 
 `query_enhancement.diagnostics` is an additive v1 field containing ordered, content-free events. Each event has `stage` and `reasons` (reason codes only); model attempts additionally have a one-based `attempt`. Stages are `source_validation`, `deterministic_projection`, `strategy_validation`, `model_initialization`, `model_projection`, and `condition_validation`. A successful retry retains the earlier failure event even though final `unresolved` is empty. `model_calls` remains the actual logical call count. Diagnostic history neither relaxes source validation nor establishes image verification. No prompts, source content, provider exceptions, or provider configuration are included.
+
+## Generic quality additions (2026-09-07)
+
+The existing source-coordinate grid parser remains authoritative. It now preserves
+empty rows, plus per-cell `raw_html` and `raw_text` before whitespace cleaning.
+Existing `text` and query span offsets retain their v1 cleaned-text meaning; raw
+fields preserve source strings without silently changing consumers' offsets.
+Explicit leading `thead` rows also work when their cells use `td`. All-`td` headers
+without structural evidence still require a source-bound semantic proposal.
+Caption text participates in source coverage through `captionN` references;
+footers require review. Unparsed source cells and rowspans beyond observed rows
+block projection instead of manufacturing rows. Body merges, conditional prose,
+and ragged rows have distinct reasons: `body_spanning_cells`,
+`conditional_source_requires_review`, `ragged_table_rows`. Additional reasons are
+`footer_requires_review` and `embedded_image_requires_asset`.
+
+`requires_previous_context` now adds `dependencies` with the existing binding,
+`required_evidence=caller_supplied_continuation_context`, and `auto_fetch=false`.
+No inferred previous-page number or cross-page model call is introduced.
+Tilde labels remain available as source text and diagnostic candidates; v1 still
+blocks executable projection without endpoint evidence. This change does not
+publish partially queryable sections or enable interval guessing.
+
+The production grid parser now uses pandas/lxml in the existing
+`_html_table_to_grid` implementation. It suppresses header promotion and footer
+reordering, replaces each DOM cell with a unique token, expands those tokens, and
+then restores original cell strings. Values never pass through pandas inference.
+Each merged position is checked against its token origin; duplicate text is not
+identity evidence. Standard omitted td/tr closing tags are parsed by lxml; raw
+render HTML remains exact. `raw_html` uses the exact cell interior where balanced
+source tags are available; otherwise it is the lxml-normalized interior, with
+raw_text preserved. No synthetic rowspan overflow is eligible for query publication.
+
+Runtime dependencies are `pandas>=2.2.3,<3` and `lxml==6.1.1`; both Dockerfiles
+install the same requirements. Independent comparison still uses pandas 2.2.3.
+Input expansion is checked before pandas allocation (200,000 logical positions),
+in addition to HTML/cell/span limits. Text outside cells/captions is included as
+`noteN` source evidence, and rowspan=0 is resolved within its declared row group.
+Both isolated Docker COPY tests now execute the actual parser, not merely import
+the semantic module. No image was built.
+
+`select_candidate_labels` is an offline diagnostic helper for exact string labels
+such as `150~475`. It returns `status=diagnostic_only`, requires all bound conditions
+to be explicitly established, and does not perform range membership or make a
+candidate publishable. `select_records` still rejects unavailable projections.
+
+Reproducible source-only audit:
+`.venv/bin/python scripts/audit_pdf2md_content_quality.py --input SNAPSHOT --output /tmp/quality.json --pandas-reference /tmp/pandas-result.json --query-spec /tmp/queries.json`.
+The output contains table ordinals, counts and reasons, not source text. Coordinate
+self-consistency, equality with pandas, manual-header queries, and automatic
+semantic projection are distinct evidence levels.

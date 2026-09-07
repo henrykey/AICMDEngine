@@ -2455,7 +2455,8 @@ def test_explicit_language_is_not_overridden_by_detected_ocr_text(monkeypatch):
         vlm_config={"model": "vlm", "api_key": "x", "base_url": "http://x"},
     ))
 
-    assert result["tables"][0]["semanticDesc"]
+    assert result["tables"][0]["semanticDesc"] == ""
+    assert result["tables"][0]["semantic_reason"] == "description_language_mismatch"
     assert all("MUST be written in English" in prompt for prompt in FakeGLMOcrClient.prompts)
 
 

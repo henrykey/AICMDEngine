@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .semantic_language import detect_description_language, normalize_language, validate_descriptions
+
 import base64
 import hashlib
 import html
@@ -235,6 +237,7 @@ def extract_page_layout_enhanced_direct(
     routing_config: Optional[Dict[str, Any]] = None,
     storage_config: Optional[Dict[str, Any]] = None,
     image_prefix: str = "figures",
+    description_language: str = "unknown",
 ) -> str:
     _ = storage_config
     _ = image_prefix
@@ -247,6 +250,7 @@ def extract_page_layout_enhanced_direct(
         ocr_config=ocr_config,
         vlm_config=vlm_config,
         routing_config=routing_config,
+        description_language=description_language,
     )
     return _serialize_result(result, output_format)
 
@@ -388,6 +392,9 @@ def _extract_single_page(
             input_type=input_type,
             routing_config=routing_config,
         )
+        if context and "structure_target" in context:
+            return _recover_structure_target(tool, target, ctx, context["structure_target"],
+                                             description_language, vlm_config, ocr_config, Path(work_dir))
         if context and "title_recovery" in context and target in {"tables", "figures"}:
             return _recover_review_title(tool, target, ctx, context, vlm_config, ocr_config)
         _initialize_description_language(ctx, description_language)
@@ -416,6 +423,9 @@ def _extract_single_page(
         tables = _extract_tables(ctx, glm, vlm, describe, model_calls, warnings, description_language, allow_native=True, table_rows_format=table_rows_format)
         formulas = _extract_formulas(ctx, glm, vlm, describe, model_calls, warnings, description_language)
         figures = _extract_figures(ctx, glm, vlm, model_calls, warnings, description_language)
+        for item in tables + formulas + figures:
+            if validate_descriptions(item, ctx.description_language):
+                warnings.append("vlm_ocr_failed_description_language_mismatch")
         figure_semantics_missing = any(
             item.startswith("vlm_ocr_unavailable_for_figure_description") or item.startswith("vlm_ocr_failed")
             for item in warnings
@@ -502,6 +512,7 @@ def _extract_layout_enhanced(
     ocr_config: Optional[Dict[str, Any]],
     vlm_config: Optional[Dict[str, Any]],
     routing_config: Optional[Dict[str, Any]],
+    description_language: str = "unknown",
 ) -> Dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="pdf2md_enh_layout_enh_") as work_dir:
         ctx = _prepare_context(
@@ -513,6 +524,7 @@ def _extract_layout_enhanced(
             input_type=input_type,
             routing_config=routing_config,
         )
+        _initialize_description_language(ctx, description_language)
         rc = _routing_defaults(_merge_routing_ocr_config(routing_config, ocr_config))
         glm = OpenAICompatibleOcrClient(rc.get("glm_ocr") or {}, source="glm_ocr")
         vlm = DynamicVLMClient(vlm_config or _vlm_ocr_config(ocr_config))
@@ -535,6 +547,10 @@ def _extract_layout_enhanced(
         figures = _figures_from_layout_blocks(blocks)
         if figures:
             figures = _enhance_layout_figures_with_vlm(ctx, figures, blocks, vlm, model_calls, warnings)
+
+        for item in figures:
+            if validate_descriptions(item, ctx.description_language):
+                warnings.append("vlm_ocr_description_language_mismatch")
 
         return {
             "tool": "extract_page_layout_enhanced",
@@ -1198,6 +1214,9 @@ def _formula_page_result(
     markdown: str,
     items: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    for item in items:
+        if validate_descriptions(item, ctx.description_language):
+            warnings.append("vlm_ocr_description_language_mismatch")
     semantic_missing = any("vlm_ocr" in warning for warning in warnings)
     return {
         "tool": "extract_page_formulas",
@@ -1275,6 +1294,9 @@ def _figure_page_result(
     markdown: str,
     items: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    for item in items:
+        if validate_descriptions(item, ctx.description_language):
+            warnings.append("vlm_ocr_description_language_mismatch")
     return {
         "tool": "extract_page_figures",
         "source": _source_payload(ctx),
@@ -1440,7 +1462,7 @@ def _enhance_layout_figures_with_vlm(
 
     try:
         model_calls["vlm_ocr"] += 1
-        result = _call_vlm_structured(vlm, ctx.image_path, _prompt_layout_figures(blocks, ctx.page_text))
+        result = _call_vlm_structured(vlm, ctx.image_path, _prompt_layout_figures(blocks, ctx.page_text, ctx.description_language))
     except Exception as exc:
         warnings.append(f"vlm_ocr_failed: {exc}")
         return figures
@@ -1498,6 +1520,9 @@ def _base_result(
     warnings: List[str],
     items: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    for item in items:
+        if validate_descriptions(item, ctx.description_language):
+            warnings.append("vlm_ocr_description_language_mismatch")
     result = {
         "tool": tool,
         "source": _source_payload(ctx),
@@ -1766,8 +1791,7 @@ def _vlm_ocr_config(ocr_config: Optional[Dict[str, Any]]) -> Optional[Dict[str, 
 
 
 def _normalize_description_language(value: Optional[str]) -> str:
-    normalized = str(value or "").strip().lower()
-    return "zh" if normalized.startswith("zh") else "en"
+    return "zh" if normalize_language(value) == "zh" else "en"
 
 
 def _initialize_description_language(ctx: SinglePageContext, value: Optional[str]) -> None:
@@ -1798,15 +1822,7 @@ def _cache_description_language(ctx: SinglePageContext, result: OcrResult) -> No
 
 
 def _detect_description_language(value: Optional[str]) -> Optional[str]:
-    text = re.sub(r"(?s)\$\$.*?\$\$|\$[^$]*\$", " ", str(value or ""))
-    text = re.sub(r"(?is)</?[A-Za-z][^<>]*>", " ", text)
-    han_count = len(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", text))
-    latin_words = re.findall(r"\b[A-Za-z][A-Za-z'-]{1,}\b", text)
-    if han_count >= 4:
-        return "zh"
-    if sum(len(word) for word in latin_words) >= 12 and len(latin_words) >= 3:
-        return "en"
-    return None
+    return detect_description_language(value)
 
 
 def _description_language_instruction(value: Optional[str]) -> str:
@@ -1958,7 +1974,7 @@ def _prompt_figure_page(page_text: str, description_language: str = "en") -> str
     )
 
 
-def _prompt_layout_figures(blocks: List[Dict[str, Any]], page_text: str) -> str:
+def _prompt_layout_figures(blocks: List[Dict[str, Any]], page_text: str, description_language: str = "unknown") -> str:
     image_blocks = [
         {
             "block_index": block.get("index"),
@@ -1991,7 +2007,7 @@ def _prompt_layout_figures(blocks: List[Dict[str, Any]], page_text: str) -> str:
         "字段要求：caption/capture/name/figureName 都表示图名/图题；有可见图题/图注时必须抄录原文并填入这些字段。"
         "description/semanticDesc 都表示图的语义描述，必须是纯文本；禁止 HTML、XML、Markdown、列表标记、标签和代码围栏。"
         "语种要求：图名必须抄录图片中可见图题/图注的原文；description/semanticDesc 和 context "
-        "必须优先使用图题/图注的语种，其次使用正文/图片中文字的主要语种；中文页面请用中文描述，不要翻译成英文。"
+        f"{_description_language_instruction(description_language) if description_language and description_language != 'unknown' else '必须优先使用图题/图注的语种，其次使用正文/图片中文字的主要语种；中文页面请用中文描述，不要翻译成英文。'}"
         "未见图题时图名字段都留空，不要编造图名。\n"
         f"image blocks:\n{json.dumps(image_blocks, ensure_ascii=False)}\n"
         f"nearby text/layout context:\n{json.dumps(context_blocks, ensure_ascii=False)}\n"
@@ -2378,93 +2394,108 @@ def _extract_html_table(text: str) -> str:
 
 
 def _html_table_to_grid(text: str) -> tuple[List[List[str]], Dict[str, Any]]:
+    """Expand source IDs through pandas, then restore strings from their exact origin."""
+    from io import StringIO
+    import pandas as pd
+    from lxml import html as lxml_html
+
     table = _extract_html_table(text)
+    empty = {"warnings": [], "degraded": False, "manualReviewRequired": False, "reason": ""}
     if not table:
-        return [], {"warnings": [], "degraded": False, "manualReviewRequired": False, "reason": ""}
-    html_rows = [row_match.group(1) for row_match in re.finditer(r"(?is)<tr\b[^>]*>(.*?)</tr>", table)]
-    grid: List[List[Optional[str]]] = [[] for _ in html_rows]
-    cell_status: List[Dict[str, Any]] = []
-    source_cells: List[Dict[str, Any]] = []
-    has_spans = False
-    has_colspan = False
-    clipped_rowspan = False
-    for row_index, row_html in enumerate(html_rows):
-        row = grid[row_index]
-        col_index = 0
-        for cell_match in re.finditer(r"(?is)<(td|th)\b([^>]*)>(.*?)</\1>", row_html):
-            while col_index < len(row) and row[col_index] is not None:
-                col_index += 1
-            attrs = cell_match.group(2)
-            cell_text, source_status = _clean_html_cell_with_status(cell_match.group(3))
-            rowspan = max(1, _html_int_attr(attrs, "rowspan"))
-            colspan = max(1, _html_int_attr(attrs, "colspan"))
-            if rowspan > 1 or colspan > 1:
-                has_spans = True
-            if colspan > 1:
-                has_colspan = True
-            if row_index + rowspan > len(html_rows):
-                clipped_rowspan = True
-            source_cells.append(
-                {
-                    "row": row_index,
-                    "col": col_index,
-                    "text": cell_text,
-                    "rowspan": rowspan,
-                    "colspan": colspan,
-                    "confidence": 1.0,
-                }
-            )
-            for r in range(min(rowspan, len(html_rows) - row_index)):
-                target = grid[row_index + r]
-                _ensure_optional_row_width(target, col_index + colspan)
-                for c in range(colspan):
-                    target[col_index + c] = cell_text
-                    status = source_status if r == 0 and c == 0 else "merged_fill"
-                    entry: Dict[str, Any] = {"row": row_index + r, "col": col_index + c, "status": status}
-                    if status == "merged_fill":
-                        entry["source_row"] = row_index
-                        entry["source_col"] = col_index
-                    cell_status.append(entry)
-            col_index += colspan
-    normalized = [
-        [cell if cell is not None else "" for cell in row]
-        for row in grid
-        if any(_cell_to_text(cell) for cell in row)
-    ]
-    if not normalized:
-        return [], {"warnings": ["html_table_parse_empty"], "degraded": True, "manualReviewRequired": True, "reason": "html table could not be parsed into rows"}
-    width = max(len(row) for row in normalized)
-    for row_idx, row in enumerate(normalized):
-        old_width = len(row)
-        _ensure_row_width(row, width)
-        for col_idx in range(old_width, width):
-            cell_status.append({"row": row_idx, "col": col_idx, "status": "blank_in_source"})
-    warnings: List[str] = []
-    reason = ""
-    if has_spans:
-        warnings.append("html_table_contains_rowspan_or_colspan")
-    if has_colspan:
-        warnings.append("complex_header")
-    if clipped_rowspan:
+        return [], empty
+    if len(table) > 200000 or len(re.findall(r"(?i)<t[dh]\b", table)) > 2000:
+        raise ValueError("input_budget_exceeded")
+    root = lxml_html.fragment_fromstring(table, create_parent="div")
+    tables = root.xpath(".//table")
+    if len(tables) != 1:
+        raise ValueError("single_table_required")
+    rows = tables[0].xpath("./tr | ./thead/tr | ./tbody/tr | ./tfoot/tr")
+    originals = list(re.finditer(r"(?is)<(td|th)\b[^>]*>(.*?)</\1>", table))
+    cells = [cell for row in rows for cell in row if cell.tag in {"td", "th"}]
+    if not cells:
+        return [], {**empty, "warnings": ["html_table_parse_empty"]}
+    annotations = [str(value) for value in tables[0].xpath(".//text()[not(ancestor::td or ancestor::th or ancestor::caption)]") if str(value).strip()]
+    sources, tokens = [], {}
+    overflow = False
+    for r, row in enumerate(rows):
+        for node in list(row):
+            if node.tag not in {"td", "th"}:
+                continue
+            index = len(sources)
+            inner = (originals[index].group(2) if len(originals) == len(cells) else
+                     html.escape(node.text or "", quote=False) + "".join(lxml_html.tostring(child, encoding="unicode") for child in node))
+            value, status = _clean_html_cell_with_status(inner)
+            try:
+                rowspan, colspan = int(node.get("rowspan", "1")), int(node.get("colspan", "1"))
+            except ValueError:
+                raise ValueError("table_structure_unavailable")
+            if rowspan == 0:
+                siblings = row.getparent().xpath("./tr")
+                rowspan = len(siblings) - siblings.index(row)
+            if not 1 <= rowspan <= 100 or not 1 <= colspan <= 100:
+                raise ValueError("input_budget_exceeded")
+            overflow = overflow or r + rowspan > len(rows)
+            token = f"sourcecell{index}x"
+            sources.append({"row": r, "text": value, "raw_html": inner,
+                            "raw_text": html.unescape(re.sub(r"(?is)<[^>]+>", "", inner)),
+                            "rowspan": rowspan, "colspan": colspan, "confidence": 1.0,
+                            "html_tag": node.tag, "row_group": row.getparent().tag})
+            tokens[token] = (sources[-1], status)
+            # pandas sees only opaque IDs: no inference/normalization can alter source values.
+            for child in list(node):
+                node.remove(child)
+            node.tag, node.text = "td", token
+            node.set("rowspan", str(min(rowspan, len(rows) - r)))
+            node.set("colspan", str(colspan))
+    # Suppress header promotion and tfoot reordering, preserving DOM row order.
+    for node in root.xpath(".//thead | .//tfoot"):
+        node.tag = "tbody"
+    for child in list(tables[0]):
+        tables[0].remove(child)
+    for row in rows:
+        tables[0].append(row)
+    if sum(c["rowspan"] * c["colspan"] for c in sources) > 200000:
+        raise ValueError("input_budget_exceeded")
+    width_bound = max(sum(cell["colspan"] for cell in sources if cell["row"] <= r < cell["row"] + cell["rowspan"]) for r in range(len(rows)))
+    if len(rows) * width_bound > 200000:
+        raise ValueError("input_budget_exceeded")
+    frames = pd.read_html(StringIO(lxml_html.tostring(root, encoding="unicode")), flavor="lxml",
+                          header=None, keep_default_na=False, thousands=None, displayed_only=False)
+    matrix = frames[0].fillna("").values.tolist()
+    grid, statuses = [], []
+    for r, row in enumerate(matrix):
+        output = []
+        for c, token in enumerate(row):
+            if token not in tokens:
+                output.append("")
+                statuses.append({"row": r, "col": c, "status": "blank_in_source"})
+                continue
+            cell, status = tokens[token]
+            if "col" not in cell:
+                if cell["row"] != r:
+                    raise ValueError("table_structure_unavailable")
+                cell["col"] = c
+            origin = cell["row"] == r and cell["col"] == c
+            output.append(cell["text"])
+            statuses.append({"row": r, "col": c, "status": status if origin else "merged_fill",
+                             **({} if origin else {"source_row": cell["row"], "source_col": cell["col"]})})
+        grid.append(output)
+    if any("col" not in cell for cell in sources):
+        raise ValueError("table_structure_unavailable")
+    spans = any(c["rowspan"] > 1 or c["colspan"] > 1 for c in sources)
+    wide = any(c["colspan"] > 1 for c in sources)
+    warnings = (["html_table_contains_rowspan_or_colspan"] if spans else []) + (["complex_header"] if wide else [])
+    if overflow:
         warnings.append("rowspan_exceeds_observed_rows")
-    if has_colspan:
-        reason = "colspan expanded into logical columns; verify complex headers"
-    elif clipped_rowspan:
-        reason = "rowspan exceeded observed table rows and was clipped to avoid pseudo rows"
-    orientation, orientation_reliable = _table_orientation_status(table)
-    if not orientation_reliable:
+    orientation, reliable = _table_orientation_status(table)
+    if not reliable:
         warnings.append("orientation_defaulted_to_0")
-    return normalized, {
-        "warnings": warnings,
-        "degraded": has_colspan or clipped_rowspan,
-        "manualReviewRequired": has_colspan or clipped_rowspan,
-        "reason": reason,
-        "orientation": orientation,
-        "columns": normalized[0] if normalized else [],
-        "normalized_rows": normalized[1:] if len(normalized) > 1 else [],
-        "source_cells": source_cells,
-        "cell_status": _dedupe_cell_status(cell_status),
-    }
+    return grid, {"grid_parser": "pandas_lxml_source_tokens", "source_annotations": annotations, "warnings": warnings,
+                  "degraded": wide or overflow, "manualReviewRequired": wide or overflow,
+                  "reason": "colspan expanded into logical columns; verify complex headers" if wide else
+                            "rowspan exceeded observed table rows and was clipped to avoid pseudo rows" if overflow else "",
+                  "orientation": orientation, "columns": grid[0], "normalized_rows": grid[1:],
+                  "source_cells": sources, "cell_status": _dedupe_cell_status(statuses)}
 
 
 def _grid_to_markdown(grid: List[List[str]]) -> str:
@@ -3256,4 +3287,62 @@ def _dedupe(items: List[str]) -> List[str]:
             continue
         seen.add(value)
         out.append(value)
+    return out
+
+
+
+def _recover_structure_target(tool, kind, ctx, target, language, vlm_config, ocr_config, directory):
+    """Recover one explicitly identified missing parent, never scan surrounding pages."""
+    from .layout_ledger import reliable_normalized_bbox
+    from .page_processor import _recover_layout_objects, _build_layout_output_elements, _attach_figure_assets
+    calls = {"glm_ocr": 0, "vlm_ocr": 0}
+    def failed(reason):
+        out = _base_result(tool, ctx, calls, [reason], [])
+        out["structure_recovery"] = {"status": "unresolved", "reason": reason}
+        return out
+    if (kind != "tables" or not isinstance(target, dict) or target.get("type") != "table"
+            or not isinstance(target.get("layout_id"), str) or not target["layout_id"]
+            or not reliable_normalized_bbox(target)):
+        return failed("invalid_structure_target")
+    if target.get("page_no") != ctx.page_no or target.get("source_sha1") != _file_sha1(ctx.source_path):
+        return failed("structure_target_source_mismatch")
+    if len(json.dumps(target, ensure_ascii=False)) > 200000:
+        return failed("input_budget_exceeded")
+    if "source_cells" in target and (not isinstance(target["source_cells"], list) or len(target["source_cells"]) > 2000
+                                      or any(not isinstance(cell, dict) for cell in target["source_cells"])):
+        return failed("invalid_structure_target")
+    budget = target.get("max_model_calls", 1)
+    if type(budget) is not int or not 0 <= budget <= 4:
+        return failed("invalid_model_budget")
+    if budget == 0:
+        return failed("model_budget_exhausted")
+    _initialize_description_language(ctx, language)
+    try:
+        vlm = DynamicVLMClient({**(vlm_config or _vlm_ocr_config(ocr_config) or {}),
+                               "description_language": _effective_description_language(ctx), "max_retries": 0})
+        glm = OpenAICompatibleOcrClient(_routing_defaults(_merge_routing_ocr_config({}, ocr_config)).get("glm_ocr") or {}, source="glm_ocr")
+    except Exception:
+        return failed("model_initialization_failed")
+    entry = {"layout_id": target["layout_id"], "type": "table", "reading_order": 1,
+             "bbox": target["bbox"], "bbox_space": "normalized_page", "status": "FAILED", "content": "",
+             "error": {"stage": "layout_content"}, "review_required": True}
+    outcome = {"layout": [entry], "payloads": {"tables": [], "formulas": [], "figures": []}}
+    gc, vc, diagnostics = _recover_layout_objects(Path(ctx.image_path), directory, outcome, [entry], vlm,
+        bool(vlm.enabled), 1, 0, glm=glm, max_model_calls=budget)
+    calls.update(glm_ocr=gc, vlm_ocr=vc)
+    for table in outcome["payloads"]["tables"]:
+        if isinstance(target.get("source_cells"), list):
+            table["source_cells"] = target["source_cells"]
+    _attach_figure_assets(ctx.image_path, outcome["payloads"], ctx.page_no)
+    elements = _build_layout_output_elements("", outcome["payloads"], "full_glm_ocr", ctx.description_language)
+    out = _base_result(tool, ctx, calls, [], elements["tables"])
+    out["figures"] = elements["figures"]
+    out["structure_recovery"] = {"status": "complete" if elements["tables"] else "unresolved",
+                                 "layout_id": target["layout_id"], "diagnostics": diagnostics,
+                                 "binding": {"request_id": target.get("request_id"), "source_sha1": target["source_sha1"],
+                                             "page_no": ctx.page_no, "bbox": target["bbox"], "bbox_space": "normalized_page"},
+                                 "evidence_basis": "explicit_target_crop_not_quality_verified"}
+    if target.get("requires_previous_context"):
+        out["structure_recovery"]["dependencies"] = [{"reason": "missing_previous_context", "page_no": ctx.page_no,
+                                                       "layout_id": target["layout_id"], "auto_fetch": False}]
     return out

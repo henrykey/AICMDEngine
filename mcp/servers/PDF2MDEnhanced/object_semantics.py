@@ -1,6 +1,7 @@
 """Single-object semantic completion. Source structures are never rewritten."""
 from __future__ import annotations
 import json
+from .semantic_language import description_mismatch
 from .vlm_client import DynamicVLMClient
 
 GROUPS = {"table": "tables", "formula": "formulas", "figure": "figures"}
@@ -10,7 +11,8 @@ FIELDS = {"semantic_desc", "formula_name", "table_title"}
 def enhance_object_semantics(request, vlm_config=None, *, provider_factory=None):
     calls = 0
     def failed(reason):
-        return {"status": "failed", "reason": reason, "model_calls": calls}
+        return {"status": "failed", "reason": reason, "model_calls": calls,
+                "request_id": request.get("request_id") if isinstance(request, dict) else None}
     if (not isinstance(request, dict) or not isinstance(request.get("element_type"), str) or request.get("element_type") not in GROUPS
             or not isinstance(request.get("element_id"), str) or not request["element_id"].strip()
             or not isinstance(request.get("candidate_object"), dict)
@@ -36,7 +38,8 @@ def enhance_object_semantics(request, vlm_config=None, *, provider_factory=None)
         "fields empty. Never infer unseen visual details from text. Never invent values or variables. "
         "Escape backslashes correctly in JSON; prefer Unicode variable symbols. "
         "Confidence is semantic confidence, not structural OCR confidence. "
-        f"All descriptions and names MUST be written in {'Chinese' if language == 'zh' else 'English'}. "
+        f"All generated descriptions MUST be written in {'Chinese' if language == 'zh' else 'English'}. "
+        "Copy source names and titles verbatim; do not translate them. "
         f"Schema: {json.dumps(schema, ensure_ascii=False)}. Evidence: "
         + json.dumps(request, ensure_ascii=False))
     try:
@@ -70,6 +73,14 @@ def enhance_object_semantics(request, vlm_config=None, *, provider_factory=None)
             return failed("invalid_object_proposal")
     except (ValueError, TypeError):
         return failed("invalid_object_proposal")
+    rejected = []
+    if "semantic_desc" in fields and description_mismatch(repair.get("semantic_desc"), language):
+        repair["semantic_desc"] = ""
+        rejected.append("semantic_desc")
+    unresolved = [f for f in fields if not str(repair.get(f) or "").strip()]
+    quality = {"evidence_basis": "supplied_text_not_image_verified", "unresolved_fields": unresolved,
+               "reasons": ["description_language_mismatch"] if rejected else []}
+    if not any(str(repair.get(f) or "").strip() for f in fields):
+        return {**failed("description_language_mismatch"), "quality": quality}
     return {"status": "complete", "request_id": request.get("request_id"), "repairs": proposal, "model_calls": calls,
-            "quality": {"evidence_basis": "supplied_text_not_image_verified",
-                        "unresolved_fields": [f for f in fields if not repair.get(f)]}}
+            "quality": quality}

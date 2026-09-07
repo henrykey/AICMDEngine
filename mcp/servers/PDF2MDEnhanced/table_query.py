@@ -4,6 +4,7 @@ from __future__ import annotations
 from copy import deepcopy
 from decimal import Decimal
 import base64
+import html
 import hashlib
 import tempfile
 from pathlib import Path
@@ -17,6 +18,8 @@ REASONS = {
     "table_structure_unavailable", "overlapping_source_cells", "invalid_annotation",
     "invalid_model_budget", "invalid_query_strategy", "model_initialization_failed", "identity_or_hash_mismatch", "invalid_source_reference", "content_conflict",
     "model_response_truncated", "invalid_projection", "invalid_section_key", "invalid_field",
+    "footer_requires_review", "embedded_image_requires_asset",
+    "body_spanning_cells", "conditional_source_requires_review", "ragged_table_rows",
     "ambiguous_header", "incomplete_record", "empty_section", "invalid_unresolved",
     "invalid_source_assertion", "missing_previous_context", "unsupported_condition", "unmapped_source_cells",
 }
@@ -153,29 +156,46 @@ def _sources(markup, parse_grid):
     if any(int(n) > 100 for n in re.findall(r'(?i)(?:rowspan|colspan)\s*=\s*[\"\']?(\d+)', markup)):
         raise ValueError("input_budget_exceeded")
     grid, meta = parse_grid(markup)
-    if not grid or "rowspan_exceeds_observed_rows" in meta.get("warnings", []):
+    if not grid or not meta.get("source_cells") or "rowspan_exceeds_observed_rows" in meta.get("warnings", []):
         raise ValueError("table_structure_unavailable")
     sources, positions = {}, {}
+    mapped = {(item["row"], item["col"]): (item.get("source_row", item["row"]), item.get("source_col", item["col"]))
+              for item in meta["cell_status"]}
     for cell in meta["source_cells"]:
         ref = f"r{cell['row']}c{cell['col']}"
         sources[ref] = deepcopy(cell)
         for r in range(cell["row"], cell["row"] + cell["rowspan"]):
             for c in range(cell["col"], cell["col"] + cell["colspan"]):
                 position = f"r{r}c{c}"
-                if position in positions:
+                if position in positions or mapped.get((r, c)) != (cell["row"], cell["col"]):
                     raise ValueError("overlapping_source_cells")
                 positions[position] = ref
+    if len(meta["source_cells"]) != len(re.findall(r"(?i)<t[dh]\b", markup)):
+        raise ValueError("table_structure_unavailable")
+    for index, match in enumerate(re.finditer(r"(?is)<caption\b[^>]*>(.*?)</caption>", markup)):
+        ref = f"caption{index}"
+        sources[ref] = {"text": html.unescape(re.sub(r"(?is)<[^>]+>", " ", match.group(1))).strip(), "kind": "caption"}
+        positions[ref] = ref
+    for index, text in enumerate(meta.get("source_annotations", [])):
+        ref = f"note{index}"
+        sources[ref] = {"text": text, "kind": "note"}
+        positions[ref] = ref
     return sources, positions, meta
 
 
 def _automatic(markup, sources, positions, binding):
+    if re.search(r"(?i)<tfoot\b", markup):
+        return None
     if any(re.search(r"(?i)\b(if|except|unless|only|note|see|interpolat\w*)\b|仅|除外|条件|插值|注[:：]|续表", cell["text"])
            for cell in sources.values()):
         return None
-    rows = re.findall(r"(?is)<tr\b[^>]*>(.*?)</tr>", markup)
+    captions = [ref for ref, cell in sources.items() if cell.get("kind") == "caption"]
+    sources = {ref: cell for ref, cell in sources.items() if "row" in cell}
+    rows = range(max(cell["row"] + cell["rowspan"] for cell in sources.values()))
     headers = []
-    for r, row in enumerate(rows):
-        if re.search(r"(?i)<th\b", row) and not re.search(r"(?i)<td\b", row):
+    for r in rows:
+        cells = [cell for cell in sources.values() if cell["row"] == r]
+        if cells and all(cell.get("html_tag") == "th" or cell.get("row_group") == "thead" for cell in cells):
             headers.append(r)
         else:
             break
@@ -198,7 +218,7 @@ def _automatic(markup, sources, positions, binding):
             return None
         records.append({"values": {f"c{c}": ref for c, ref in enumerate(refs)}})
     return {"binding": binding, "lookup_sections": [{"key": "section_1", "fields": fields,
-             "records": records}], "unresolved": []}
+             "records": records, "title_sources": captions}], "unresolved": []}
 
 
 def validate_proposal(proposal, binding, sources, positions):
@@ -344,6 +364,8 @@ def enhance_table(request, parse_grid, vlm_factory, vlm_config=None, description
         out["source_cells"] = sources
         out["cell_status"] = meta["cell_status"]
         deterministic_issues = []
+        if re.search(r"(?i)<(?:img|svg)\b", markup):
+            deterministic_issues.append(_issue("embedded_image_requires_asset", list(sources)))
         for assertion in request.get("source_assertions", []):
             if not isinstance(assertion, dict):
                 raise ValueError("invalid_source_assertion")
@@ -355,13 +377,25 @@ def enhance_table(request, parse_grid, vlm_factory, vlm_config=None, description
         if request.get("content_conflicts"):
             deterministic_issues.append(_issue("content_conflict", list(sources)))
         if request.get("requires_previous_context"):
+            out["dependencies"] = [{"reason": "missing_previous_context", "binding": deepcopy(binding),
+                                    "required_evidence": "caller_supplied_continuation_context", "auto_fetch": False}]
             deterministic_issues.append(_issue("missing_previous_context", list(sources)))
         proposal = _automatic(markup, {k: v for k, v in sources.items() if not k.startswith("a")}, positions, binding)
         sections, issues, used = [], [], set()
         if proposal:
             sections, issues, used = validate_proposal(proposal, binding, sources, positions)
         else:
-            issues = [_issue("ambiguous_header", list(sources))]
+            if any(re.search(r"(?i)\b(if|except|unless|only|note|see|interpolat\w*)\b|仅|除外|条件|插值|注[:：]|续表", c["text"]) for c in sources.values()):
+                reason = "conditional_source_requires_review"
+            elif re.search(r"(?i)<tfoot\b", markup):
+                reason = "footer_requires_review"
+            elif any(c.get("colspan", 1) > 1 and c.get("row", 0) > 0 for c in sources.values()):
+                reason = "body_spanning_cells"
+            elif sum(ref.startswith("r") for ref in positions) != (max(c["row"] + c["rowspan"] for c in sources.values() if "row" in c) * max(c["col"] + c["colspan"] for c in sources.values() if "col" in c)):
+                reason = "ragged_table_rows"
+            else:
+                reason = "ambiguous_header"
+            issues = [_issue(reason, list(sources))]
         issues = deterministic_issues + issues
         out["diagnostics"].append({"stage": "deterministic_projection",
                                    "reasons": [issue["reason"] for issue in issues]})
@@ -458,3 +492,17 @@ def select_records(projection, section_key, where, satisfied_conditions=()):
         if all(matches(key, expected) for key, expected in where.items()):
             matched.append(deepcopy(record))
     return matched
+
+
+
+def select_candidate_labels(projection, section_key, where, satisfied_conditions=()):
+    """Diagnostic exact-string matching only; never grants v1 query publication."""
+    if not where or any(not isinstance(value, str) for value in where.values()):
+        return {"status": "diagnostic_only", "records": []}
+    sections = [s for s in projection.get("candidate_sections", []) if s["key"] == section_key]
+    if len(sections) != 1 or set(where) - set(sections[0]["columns"]):
+        raise ValueError("invalid_query_scope")
+    rows = [r for r in sections[0]["records"]
+            if all(r["values"][key]["raw_text"] == value for key, value in where.items())
+            and all(c["binding_id"] in satisfied_conditions for c in r["conditions"])]
+    return {"status": "diagnostic_only", "records": deepcopy(rows)}

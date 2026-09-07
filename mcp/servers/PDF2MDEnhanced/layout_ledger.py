@@ -77,6 +77,13 @@ def build_layout_outcome(
     payloads: Dict[str, List[Dict[str, Any]]] = {"tables": [], "formulas": [], "figures": []}
     for reading_order, block in enumerate(blocks, 1):
         object_type = canonical_layout_type(block.get("layout_type"))
+        # Complete source HTML is stronger structural evidence than a formula label.
+        content = str(block.get("content") or "").strip()
+        if object_type == "formula" and re.fullmatch(r"(?is)<table\b[^>]*>.*</table>", content):
+            parser = _TableStructureParser()
+            parser.feed(content)
+            if not parser.invalid and not parser.stack and len(re.findall(r"(?i)<table\b", content)) == 1:
+                object_type = "table"
         if object_type == "formula" and is_formula_body_text(block.get("content"), block.get("layout_type")):
             object_type = "text"
         layout_id = f"p{page_no}-o{reading_order:03d}-{object_type}"
@@ -952,3 +959,56 @@ def _unique(values: List[str]) -> List[str]:
             seen.add(value)
             out.append(value)
     return out
+
+
+
+def reliable_normalized_bbox(item):
+    bbox = item.get("bbox")
+    return (item.get("bbox_space") == "normalized_page" and isinstance(bbox, list) and len(bbox) == 4
+            and all(isinstance(x, (int, float)) and not isinstance(x, bool) and 0 <= x <= 1 for x in bbox)
+            and bbox[0] < bbox[2] and bbox[1] < bbox[3])
+
+
+def attach_object_relationships(payloads, page_no):
+    """Only unique geometric containment establishes parent/cell identity."""
+    def contains(parent, child):
+        a, b = parent["bbox"], child["bbox"]
+        return a[0] <= b[0] and a[1] <= b[1] and a[2] >= b[2] and a[3] >= b[3]
+    tables = [t for t in payloads.get("tables", []) if t.get("layout_id") and reliable_normalized_bbox(t)]
+    for item in payloads.get("formulas", []) + payloads.get("figures", []):
+        relation = {"status": "unresolved", "page_no": page_no, "bbox_space": "normalized_page"}
+        item["parent_relation"] = relation
+        if not reliable_normalized_bbox(item):
+            relation["reason"] = "unreliable_object_bbox"
+            continue
+        parents = [t for t in tables if contains(t, item)]
+        if len(parents) != 1:
+            relation["reason"] = "ambiguous_parent_table" if parents else "no_containing_table"
+            continue
+        table = parents[0]
+        relation["table_layout_id"] = table["layout_id"]
+        cells = [c for c in table.get("source_cells", []) if reliable_normalized_bbox(c) and contains(c, item)
+                 and all(isinstance(c.get(k), int) and not isinstance(c[k], bool) and c[k] >= 0 for k in ("row", "col"))]
+        if len(cells) != 1:
+            relation["reason"] = "ambiguous_parent_cell" if cells else "missing_cell_geometry"
+            continue
+        cell = cells[0]
+        relation.update(status="resolved", cell_source=f"r{cell['row']}c{cell['col']}", evidence="unique_bbox_containment")
+
+
+
+def contained_table_formulas(table, sources):
+    """Bind delimited formulas inside each source cell, never across cells."""
+    formulas, evidence = [], {}
+    for ref, cell in sources.items():
+        raw = cell.get("raw_html", "")
+        for match in _MATH_BLOCK.finditer(raw):
+            _, number = _formula_label(match.group())
+            evidence[ref] = {"raw_html": raw}
+            formulas.append({"parent_table_layout_id": table["layout_id"], "cell_source": ref,
+                             "source_ref": f"{table['layout_id']}:{ref}:{match.start()}:{match.end()}",
+                             "source_field": "raw_html", "start": match.start(), "end": match.end(),
+                             "latex": match.group(), "formula_no": number, "formula_name": "",
+                             "description": "", "semantic_status": "missing",
+                             "missing_fields": ["formula_name", "description"]})
+    return formulas, evidence

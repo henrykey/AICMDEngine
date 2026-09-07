@@ -284,6 +284,7 @@ async def extract_page_layout_enhanced(
     ocr_config: Optional[Dict[str, Any]] = None,
     vlm_config: Optional[Dict[str, Any]] = None,
     routing_config: Optional[Dict[str, Any]] = None,
+    description_language: str = "unknown",
 ) -> str:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
@@ -298,6 +299,7 @@ async def extract_page_layout_enhanced(
             ocr_config=ocr_config,
             vlm_config=_normalize_vlm_config(vlm_config),
             routing_config=routing_config,
+            description_language=description_language,
         ),
     )
 
@@ -418,12 +420,8 @@ def _vlm_runtime_info(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _known_description_language(value: Any) -> str:
-    language = str(value or "").strip().lower()
-    if language in {"zh", "zh-cn", "zh_hans", "chinese"}:
-        return "zh"
-    if language in {"en", "en-us", "english"}:
-        return "en"
-    return "unknown"
+    from .semantic_language import normalize_language
+    return normalize_language(value)
 
 
 def _normalize_vlm_config(cfg: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from .semantic_language import validate_descriptions
+
+import base64
 import hashlib
 import html
 import json
@@ -15,6 +18,8 @@ import fitz
 from .ocr_clients import OpenAICompatibleOcrClient, OcrResult
 from .layout_ledger import (
     LAYOUT_VERSION,
+    attach_object_relationships,
+    reliable_normalized_bbox,
     is_formula_body_text,
     apply_recovered_payloads,
     blank_layout_outcome,
@@ -355,6 +360,9 @@ def process_page(
                            else list((structured.get("formula_metadata") or {}).values()))
         formula_number_ocr = _recover_formula_numbers(glm_ocr, str(image_path), number_formulas)
         glm_calls += formula_number_ocr["calls"]
+        if layout_driven:
+            attach_object_relationships(layout_outcome["payloads"], display_page_no)
+            _attach_figure_assets(image_path, layout_outcome["payloads"], display_page_no)
 
     doc.close()
 
@@ -421,9 +429,9 @@ def process_page(
 
     # Keep coverage and field completeness separate, with lossless object references.
     semantic_objects = []
-    for collection in ("tables", "formulas"):
+    for collection in ("tables", "formulas", "figures"):
         for index, item in enumerate(output_elements.get(collection) or []):
-            if item["missing_fields"]:
+            if item.get("missing_fields"):
                 issue = {"collection": collection, "index": index,
                          "missing_fields": list(item["missing_fields"]),
                          "semantic_status": item["semantic_status"]}
@@ -975,6 +983,7 @@ def _recover_layout_objects(
     padding_ratio: float,
     glm: Optional[OpenAICompatibleOcrClient] = None,
     source_dpi: float = 150,
+    max_model_calls: Optional[int] = None,
 ) -> tuple[int, int, Dict[str, Any]]:
     glm_calls = 0
     vlm_calls = 0
@@ -1028,6 +1037,9 @@ def _recover_layout_objects(
         providers = (["glm_ocr"] * 2 if use_glm else []) + (["vlm_ocr"] * 2 if vlm_enabled else [])
         skip_glm = False
         for attempt_no, provider in enumerate(providers, 1):
+            if max_model_calls is not None and glm_calls + vlm_calls >= max_model_calls:
+                item_diagnostics["reason"] = "model_budget_exhausted"
+                break
             if provider == "glm_ocr" and skip_glm:
                 continue
             compact = attempt_no > 1 and providers[attempt_no - 2] == provider
@@ -1139,6 +1151,8 @@ def _object_success_payload(block: Dict[str, Any], candidate: Dict[str, Any]) ->
         **{key: candidate[key] for key in keys if isinstance(candidate.get(key), str)},
         "layout_id": block["layout_id"], "source": "glm_ocr_layout+vlm_object_crop",
     }
+    if candidate.get("semantic_reason") == "description_language_mismatch":
+        payload["semantic_reason"] = "description_language_mismatch"
     if block["type"] == "formula":
         _copy_semantic_confidence(payload, candidate)
     return payload
@@ -1164,8 +1178,8 @@ def _crop_layout_block_image(
     if x1 <= x0 or y1 <= y0:
         raise ValueError("layout recovery bbox invalid")
 
-    pad_x = max(2.0, (x1 - x0) * source.width * max(0.0, float(padding_ratio)))
-    pad_y = max(2.0, (y1 - y0) * source.height * max(0.0, float(padding_ratio)))
+    pad_x = max(2.0 if padding_ratio > 0 else 0.0, (x1 - x0) * source.width * max(0.0, float(padding_ratio)))
+    pad_y = max(2.0 if padding_ratio > 0 else 0.0, (y1 - y0) * source.height * max(0.0, float(padding_ratio)))
     left = max(0, math.floor(x0 * source.width - pad_x))
     top = max(0, math.floor(y0 * source.height - pad_y))
     right = min(source.width, math.ceil(x1 * source.width + pad_x))
@@ -1755,6 +1769,7 @@ def _build_output_elements(
             "context": str(metadata.get("context") or "").strip() or _nearby_figure_context(desc, lines),
         }
         _copy_optional_element_metadata(item, metadata)
+        validate_descriptions(item, description_language)
         figures.append(item)
     return {"tables": tables, "formulas": formulas, "figures": figures}
 
@@ -1789,10 +1804,23 @@ def _build_layout_output_elements(
             item = built[0]
             if payload.get("source"):
                 item["source"] = payload["source"]
+            for key in ("parent_relation", "image_asset", "semantic_reason"):
+                if key in payload:
+                    item[key] = payload[key]
             if collection == "tables":
-                for key in ("original_content", "warnings", "degraded", "manualReviewRequired"):
+                for key in ("original_content", "warnings", "degraded", "manualReviewRequired", "image_unresolved"):
                     if key in payload:
                         item[key] = payload[key]
+            if collection == "tables" and item.get("layout_id") and "<table" in item.get("markdown", "").lower():
+                from .single_page_tools import _html_table_to_grid
+                from .table_query import _sources
+                from .layout_ledger import contained_table_formulas
+                try:
+                    cells, _, _ = _sources(item["markdown"], _html_table_to_grid)
+                    item["contained_formulas"], item["contained_formula_sources"] = contained_table_formulas(item, cells)
+                except ValueError:
+                    item["contained_formulas"] = []
+                    item["contained_formula_quality"] = {"status": "unresolved", "reason": "table_structure_unavailable"}
             output[collection].append(item)
     return output
 
@@ -1940,6 +1968,7 @@ def _set_object_semantics(item: Dict[str, Any], metadata: Dict[str, Any], name_k
     item["missing_fields"] = ([] if name else [name_key]) + ([] if description else ["description"])
     item["semantic_status"] = "complete" if description else "name_only" if name else "missing"
     _copy_semantic_confidence(item, metadata)
+    validate_descriptions(item, language)
 
 
 def _recover_formula_numbers(ocr: Any, image_path: str, formulas: list[Dict[str, Any]]) -> Dict[str, Any]:
@@ -3397,3 +3426,88 @@ def _build_chunks(text: str, chunk_size: int = 700) -> list[dict[str, Any]]:
             chunks.append({"chunk_id": f"c{len(chunks)}", "content": part, "token_estimate": max(1, len(part) // 4)})
         i = j
     return chunks
+
+
+
+def _attach_figure_assets(image_path, payloads, page_no):
+    """Export bounded page-owned crops; no public path input or filesystem URL."""
+    _attach_cell_image_figures(payloads, page_no)
+    total = 0
+    for index, item in enumerate(payloads.get("figures", [])):
+        asset = {"status": "unresolved", "page_no": page_no}
+        item["image_asset"] = asset
+        if item.get("source") == "source_cell_image_region" and item.get("parent_relation", {}).get("status") != "resolved":
+            asset["reason"] = item.get("parent_relation", {}).get("reason", "missing_cell_geometry")
+            continue
+        if not item.get("layout_id") or not reliable_normalized_bbox(item):
+            asset["reason"] = "unreliable_image_bbox"
+            continue
+        if index >= 32 or total >= 16 * 1024 * 1024:
+            asset["reason"] = "image_asset_budget_exceeded"
+            continue
+        try:
+            source = fitz.Pixmap(str(image_path))
+            if source.width * source.height > 16_000_000:
+                asset["reason"] = "image_asset_budget_exceeded"
+                continue
+            with tempfile.TemporaryDirectory(prefix="pdf2md_cell_asset_") as directory:
+                crop, info = _crop_layout_block_image(Path(image_path), item, Path(directory), padding_ratio=0)
+                raw = crop.read_bytes()
+            if len(raw) > 8 * 1024 * 1024 or total + len(raw) > 16 * 1024 * 1024:
+                asset["reason"] = "image_asset_budget_exceeded"
+                continue
+            total += len(raw)
+            asset.update(status="available", mime_type="image/png", width=info["width"], height=info["height"],
+                         pixel_bbox=info["pixel_bbox"], bbox_space="pixel_page", layout_id=item["layout_id"],
+                         sha256=hashlib.sha256(raw).hexdigest(), data="data:image/png;base64," + base64.b64encode(raw).decode("ascii"))
+        except Exception:
+            asset["reason"] = "image_asset_generation_failed"
+
+
+
+def _attach_cell_image_figures(payloads, page_no):
+    """Expose explicit cell image regions through the same figure/crop pipeline."""
+    figures = payloads.setdefault("figures", [])
+    existing = {item.get("layout_id"): item for item in figures}
+    seen = set()
+    added = 0
+    for table in payloads.get("tables", []):
+        problems = []
+        for cell in table.get("source_cells", []):
+            regions = cell.get("image_regions", [])
+            if not isinstance(regions, list):
+                problems.append({"reason": "invalid_cell_image_regions"})
+                continue
+            for region in regions:
+                if (not table.get("layout_id") or not isinstance(region, dict)
+                        or not isinstance(region.get("image_id"), str) or not region["image_id"]
+                        or any(type(cell.get(key)) is not int or cell[key] < 0 for key in ("row", "col"))):
+                    problems.append({"reason": "invalid_cell_image_identity"})
+                    continue
+                identity = f"{table['layout_id']}:r{cell['row']}c{cell['col']}:image:{region['image_id']}"
+                if identity in seen or (identity in existing and existing[identity].get("bbox") != region.get("bbox")):
+                    problems.append({"reason": "image_identity_conflict"})
+                    continue
+                seen.add(identity)
+                if identity in existing:
+                    continue
+                if added >= 32:
+                    problems.append({"reason": "image_asset_budget_exceeded"})
+                    continue
+                figure = {"layout_id": identity, "bbox": region.get("bbox"), "bbox_space": region.get("bbox_space"),
+                          "source": "source_cell_image_region", "cell_image_source": {"table_layout_id": table["layout_id"], "cell_source": f"r{cell['row']}c{cell['col']}"},
+                          "content_status": "geometry_only", "description": "",
+                          "semantic_status": "missing", "missing_fields": ["description"]}
+                figures.append(figure)
+                existing[identity] = figure
+                added += 1
+        if problems:
+            table["image_unresolved"] = problems
+    if added:
+        attach_object_relationships(payloads, page_no)
+
+    for figure in figures:
+        declared = figure.get("cell_image_source")
+        relation = figure.get("parent_relation", {})
+        if declared and relation.get("status") == "resolved" and any(relation.get(k) != v for k, v in declared.items()):
+            figure["parent_relation"] = {"status": "unresolved", "reason": "cell_image_geometry_conflict", "page_no": page_no}

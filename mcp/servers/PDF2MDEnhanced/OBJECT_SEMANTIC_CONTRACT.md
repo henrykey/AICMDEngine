@@ -24,3 +24,35 @@ transcription implementation. Offline tests do not establish real-model or origi
 Both services need their matching source packages deployed and tool discovery refreshed before E2E acceptance.
 
 Offline tests: `.venv/bin/python -m pytest -q --no-cov tests/test_pdf2md_object_semantics.py`
+
+## Language result validation (2026-09-07)
+
+The shared `semantic_language` module reuses the single-page language detector.
+It checks generated prose, including an English heading followed by substantive
+Chinese prose, and Chinese headings followed by English prose. For zh results,
+prose after a short colon-delimited heading is checked separately. Four Han characters establish Chinese evidence; at least three
+Latin words totalling twelve letters establish English evidence. Math blocks and
+HTML tags are excluded. Short symbols/names alone do not establish a mismatch.
+This conservative check is not a general multilingual classifier or proof of
+semantic accuracy. Unknown document language does not reject an inferred result.
+Copied source titles/names are retained, including in display summaries.
+
+For `enhance_object_semantics`, a mismatching `semantic_desc` is removed from the
+repair. If another requested field is valid, `complete` retains its existing
+meaning (accepted partial proposal), with `quality.unresolved_fields` and
+`quality.reasons=[description_language_mismatch]`. If no requested field remains
+valid, the result is `failed`, without `repairs`, and includes the reason, quality,
+request_id and actual logical model_calls. There is still only one logical call.
+Consumers must never interpret `complete` alone as requested-field completion.
+Provider, malformed-response and identity failures remain whole-proposal failures.
+
+Upload, single-page table/formula/figure, structured-page and object-crop results
+use the same checker. Rejected generated fields become empty, with
+`semantic_reason=description_language_mismatch`, `semantic_status=unresolved` and
+`missing_fields`. HTML, Markdown and LaTeX source artifacts remain unchanged;
+consumers must not treat retained raw Markdown as a validated description.
+`extract_page_layout_enhanced` now also accepts `description_language` (default
+`unknown`), forwards it to figure prompting and validates its figure fields.
+
+See `CONTENT_QUALITY_CONTRACT.md` for parent/cell relationships and actual crop
+bytes. Neither endpoint writes back a page, stores an asset, nor updates an index.
