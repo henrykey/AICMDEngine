@@ -109,3 +109,26 @@ def test_registered_tool_exposes_router_provider_config(monkeypatch):
         return await tool.run({"request": request()})
     result = asyncio.run(invoke())
     assert json.loads(result.content[0].text)["status"] == "complete"
+
+
+@pytest.mark.parametrize("dockerfile", ["Dockerfile", "Dockerfile.cn"])
+def test_packaged_semantic_module_imports_without_source_checkout(tmp_path, dockerfile):
+    """Reproduce the explicit Docker COPY payload in an isolated Python process."""
+    from pathlib import Path
+    import shlex
+    import shutil
+    import subprocess
+    import sys
+    root = Path(__file__).resolve().parents[1] / "mcp/servers/PDF2MDEnhanced"
+    package = tmp_path / "PDF2MDEnhanced"
+    package.mkdir()
+    for line in (root / dockerfile).read_text().splitlines():
+        if line.startswith("COPY ") and line.endswith(" /app/PDF2MDEnhanced/"):
+            for source in shlex.split(line)[1:-1]:
+                shutil.copy2(root / source, package / source)
+    result = subprocess.run([sys.executable, "-I", "-c",
+        "import sys; sys.path.insert(0, sys.argv[1]); "
+        "from PDF2MDEnhanced.object_semantics import enhance_object_semantics; "
+        "assert enhance_object_semantics({})['model_calls'] == 0", str(tmp_path)],
+        cwd=tmp_path, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
