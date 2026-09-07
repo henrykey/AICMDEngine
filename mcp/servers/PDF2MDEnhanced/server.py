@@ -197,6 +197,18 @@ async def extract_page_tables(
     )
 
 
+@mcp.tool("enhance_object_semantics")
+async def enhance_object_semantics(
+    request: Dict[str, Any],
+    vlm_config: Optional[Dict[str, Any]] = None,
+) -> str:
+    from .object_semantics import enhance_object_semantics as complete
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None, lambda: complete(request, _normalize_vlm_config(vlm_config)))
+    return json.dumps(result, ensure_ascii=False)
+
+
 @mcp.tool("analyze_page_layout")
 async def analyze_page_layout(
     file_path: Optional[str] = None,
