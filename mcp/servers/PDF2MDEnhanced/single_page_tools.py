@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from .calculation_sheet import (
+    METADATA_KEYS, apply_calculation_sheet, classification_prompt,
+    source_context, table_content_quality, complete_calculation_batch, calculation_budget,
+)
+
 from .semantic_language import detect_description_language, normalize_language, validate_descriptions
 
 import base64
@@ -633,16 +638,23 @@ def _extract_tables(
                 ctx.page_text, describe, _effective_description_language(ctx)))
             _cache_description_language(ctx, result)
             items = [
-                _table_item("glm_ocr", item.markdown or item.text, ctx.page_text, describe, item, table_rows_format=table_rows_format)
+                _table_item("glm_ocr", item.markdown or item.text, ctx.page_text, describe, item, table_rows_format=table_rows_format, defer_grid=bool(describe and vlm.enabled))
                 for item in result.tables
             ]
             if not items:
                 recovered, source_text = _recover_table_from_result(result)
                 if recovered:
-                    items = [_table_item("glm_ocr", recovered, ctx.page_text, describe, table_rows_format=table_rows_format, source_text=source_text)]
+                    items = [_table_item("glm_ocr", recovered, ctx.page_text, describe, table_rows_format=table_rows_format, source_text=source_text, defer_grid=bool(describe and vlm.enabled))]
             if items:
                 _enrich_table_metadata_with_vlm(ctx, vlm, items, describe, model_calls, warnings,
                                                 _effective_description_language(ctx))
+                for item in items:
+                    pending = item.pop("_pending_grid", None)
+                    if pending and item.get("table_kind", "data_table") == "data_table":
+                        normalized = _normalize_table_contract(pending["text"], table_rows_format)
+                        if pending["raw"]:
+                            normalized = _merge_model_normalized_table(normalized, pending["raw"])
+                        item.update(normalized)
                 return items
             warnings.append("glm_ocr_returned_no_tables")
         except Exception as exc:
@@ -667,6 +679,9 @@ def _extract_tables(
                 if recovered:
                     items = [_table_item("vlm_ocr", recovered, ctx.page_text, describe, table_rows_format=table_rows_format, source_text=source_text)]
             if items:
+                model_calls['vlm_ocr'] += complete_calculation_batch(vlm, ctx.image_path,
+                    [(item, str(item.get('raw_html') or item.get('markdown') or ''), f'tables:{index}')
+                     for index, item in enumerate(items)], model_calls['vlm_ocr'])
                 return items
             if _vlm_table_response_was_truncated(vlm, result):
                 warnings.append("vlm_ocr_detailed_response_truncated")
@@ -711,6 +726,9 @@ def _extract_tables(
                             )
                         ]
                 if compact_items:
+                    model_calls['vlm_ocr'] += complete_calculation_batch(vlm, ctx.image_path,
+                        [(item, str(item.get('raw_html') or item.get('markdown') or ''), f'tables:{index}')
+                         for index, item in enumerate(compact_items)], model_calls['vlm_ocr'])
                     warnings.append("vlm_ocr_compact_table_retry_used")
                     return compact_items
                 if _vlm_table_response_was_truncated(vlm, compact_result):
@@ -743,7 +761,7 @@ def _enrich_table_metadata_with_vlm(
     if not items or not describe:
         return
     _fill_local_table_descriptions(items, description_language)
-    if not vlm.enabled:
+    if not vlm.enabled or calculation_budget(vlm) == 0:
         warnings.append("vlm_ocr_unavailable_for_table_metadata")
         return
     try:
@@ -751,11 +769,17 @@ def _enrich_table_metadata_with_vlm(
         raw = vlm._call_image_prompt(
             ctx.image_path,
             _prompt_table_metadata(items, ctx.page_text, description_language),
-            max_tokens=min(vlm.max_tokens, 2048),
+            max_tokens=min(vlm.max_tokens, 16384),
         )
+        if getattr(vlm, "last_call_info", {}).get("finish_reason") in {"length", "content_filter", "tool_calls"}:
+            warnings.append("table_classification_response_incomplete")
+            return
         metadata = _parse_table_metadata_response(raw)
         if metadata:
-            _merge_table_metadata(items, metadata)
+            _merge_table_metadata(items, metadata, description_language)
+            model_calls['vlm_ocr'] += complete_calculation_batch(vlm, ctx.image_path,
+                [(item, str(item.get('raw_html') or item.get('markdown') or ''), f'tables:{index}')
+                 for index, item in enumerate(items)], model_calls['vlm_ocr'])
         else:
             warnings.append("vlm_ocr_returned_no_table_metadata")
     except Exception as exc:
@@ -1084,10 +1108,18 @@ def _table_item(
     raw_item: Optional[OcrElement] = None,
     table_rows_format: str = "structured_json",
     source_text: str = "",
+    defer_grid: bool = False,
 ) -> Dict[str, Any]:
     raw_text = source_text or str(markdown or "").strip()
-    normalized = _normalize_table_contract(raw_text, table_rows_format)
-    if raw_item and isinstance(raw_item.raw, dict):
+    raw_candidate = raw_item.raw if raw_item and isinstance(raw_item.raw, dict) else {}
+    typed = ({k: raw_candidate[k] for k in ("layout_id", "bbox", "bbox_space") if k in raw_candidate}
+             if "table_kind" in raw_candidate else {})
+    apply_calculation_sheet(typed, raw_candidate, raw_text)
+    skip_grid = defer_grid or typed.get("table_kind", "data_table") != "data_table"
+    normalized = _normalize_table_contract("" if skip_grid else raw_text, table_rows_format)
+    if skip_grid:
+        normalized.update(markdown=raw_text, raw_html=_extract_html_table(raw_text), tableRowsContent="")
+    if not skip_grid and raw_item and isinstance(raw_item.raw, dict):
         normalized = _merge_model_normalized_table(normalized, raw_item.raw)
     table_md = normalized["markdown"]
     metadata = _table_response_metadata(
@@ -1135,6 +1167,9 @@ def _table_item(
         item["sourceHtml"] = normalized["sourceHtml"]
     if normalized["rawText"]:
         item["rawText"] = normalized["rawText"]
+    item.update(typed)
+    if defer_grid:
+        item["_pending_grid"] = {"text": raw_text, "raw": raw_candidate}
     return item
 
 
@@ -1539,6 +1574,7 @@ def _base_result(
         }
     if tool == "extract_page_tables":
         result["tables"] = items
+        result["table_content_quality"] = table_content_quality(items)
         if items:
             _promote_first_table_fields(result, items[0])
     return result
@@ -1546,6 +1582,7 @@ def _base_result(
 
 def _promote_first_table_fields(result: Dict[str, Any], item: Dict[str, Any]) -> None:
     for key in [
+        *METADATA_KEYS,
         "columns",
         "normalized_rows",
         "source_cells",
@@ -1857,7 +1894,8 @@ def _prompt_tables(page_text: str, describe: bool, description_language: str = "
         "\"source_cells\":[{\"row\":0,\"col\":0,\"text\":\"\",\"rowspan\":1,\"colspan\":1,\"source_cell_index\":0,\"bbox\":[0,0,0,0],\"bbox_space\":\"normalized_page\",\"confidence\":1.0}],"
         "\"cell_status\":[{\"row\":0,\"col\":0,\"status\":\"recognized\"}],"
         "\"raw_html\":\"\",\"markdown\":\"\",\"degraded\":false,\"manualReviewRequired\":false,\"warnings\":[]}]}。\n"
-        f"是否需要语义描述：{bool(describe)}。\n"
+        + classification_prompt()
+        + f"是否需要语义描述：{bool(describe)}。\n"
         f"可用的文本层上下文：\n{_trim_context(page_text)}"
     )
 
@@ -1869,7 +1907,8 @@ def _prompt_tables_compact(page_text: str, description_language: str = "en") -> 
         "每张表只返回 title、markdown、notes、footnotes；markdown 必须是紧凑 pipe Markdown，完整保留所有可见行列、"
         "合并表头文本、数字和单元格内 LaTeX。不要返回 bbox、source_cells、cell_status、confidence、raw_html 或重复矩阵。\n"
         "按图片从上到下保持表格顺序；没有表格时返回空数组。\n"
-        "JSON schema：{\"tables\":[{\"title\":\"\",\"markdown\":\"| A | B |\\n| --- | --- |\\n| 1 | 2 |\","
+        + classification_prompt()
+        + "JSON schema：{\"tables\":[{\"title\":\"\",\"markdown\":\"| A | B |\\n| --- | --- |\\n| 1 | 2 |\","
         "\"notes\":[],\"footnotes\":[]}]}。\n"
         f"可用的文本层上下文：\n{_trim_context(page_text)}"
     )
@@ -1883,6 +1922,7 @@ def _prompt_table_metadata(items: List[Dict[str, Any]], page_text: str, descript
         summaries.append(
             {
                 "index": idx,
+                "calculation_source": source_context(str(item.get("raw_html") or item.get("markdown") or "")),
                 "existing_title": str(item.get("title") or "")[:120],
                 "columns": [str(col) for col in columns[:12]],
                 "sample_rows": rows[:3],
@@ -1897,7 +1937,8 @@ def _prompt_table_metadata(items: List[Dict[str, Any]], page_text: str, descript
         "表名必须来自图片中可见的表题/表注原文，例如“表 7-35 ...”；看不到可靠表名时返回空字符串。\n"
         "semanticDesc 必须遵守开头指定的描述语言，简要说明该表含义，不要编造数据。\n"
         "返回 schema：{\"tables\":[{\"index\":0,\"title\":\"\",\"semanticDesc\":\"\"}]}。\n"
-        f"已抽取表格摘要：\n{json.dumps(summaries, ensure_ascii=False)}\n"
+        + classification_prompt(include_items=False)
+        + f"已抽取表格摘要：\n{json.dumps(summaries, ensure_ascii=False)}\n"
         f"可用页面文本上下文（可能含 OCR 噪声，仅供定位，不要当正文）：\n{_trim_context(page_text)}"
     )
 
@@ -2276,12 +2317,14 @@ def _extract_json_payload(text: str) -> Any:
         return None
 
 
-def _merge_table_metadata(items: List[Dict[str, Any]], metadata: List[Dict[str, Any]]) -> None:
+def _merge_table_metadata(items: List[Dict[str, Any]], metadata: List[Dict[str, Any]], description_language: str = "unknown") -> None:
+    indices = [_metadata_index(entry) for entry in metadata]
     for entry in metadata:
         idx = _metadata_index(entry)
-        if idx is None or idx < 0 or idx >= len(items):
+        if idx is None or idx < 0 or idx >= len(items) or indices.count(idx) != 1:
             continue
         item = items[idx]
+        apply_calculation_sheet(item, entry, str(item.get("raw_html") or item.get("markdown") or ""), description_language)
         title = _cell_to_text(
             entry.get("title")
             or entry.get("table_title")

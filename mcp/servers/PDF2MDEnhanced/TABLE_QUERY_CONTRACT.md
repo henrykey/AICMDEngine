@@ -246,3 +246,10 @@ Reproducible source-only audit:
 The output contains table ordinals, counts and reasons, not source text. Coordinate
 self-consistency, equality with pandas, manual-header queries, and automatic
 semantic projection are distinct evidence levels.
+
+## Calculation-sheet type guard
+
+`table_kind=calculation_sheet` returns `calculation_sheet_not_data_table` before grid
+parsing or provider creation. Other explicit non-data types return
+`table_type_requires_review`. Preserve the type through persistence: its two-column
+calculation view is not `lookup_sections`. See CALCULATION_SHEET_CONTRACT.md.

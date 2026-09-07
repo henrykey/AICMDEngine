@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from .calculation_sheet import (
+    METADATA_KEYS, apply_calculation_sheet, source_context,
+    table_content_quality, complete_calculation_batch, calculation_budget,
+)
+
 from .semantic_language import validate_descriptions
 
 import base64
@@ -356,6 +361,20 @@ def process_page(
                 page_text=semantic_page_text, formula_semantic_calls=formula_semantic_calls,
             )
 
+        elif rc.get("vlm_ocr_enabled") and vlm.enabled:
+            # Direct VLM responses may contain classification without item extraction.
+            table_payloads = (layout_outcome.get("payloads", {}).get("tables", []) if layout_driven
+                              else [{**metadata, "markdown": content} for content, metadata in
+                                    structured.get("table_metadata", {}).items()])
+            extra_calls = complete_calculation_batch(vlm, str(image_path),
+                [(item, item.get("markdown", ""), f"tables:{index}")
+                 for index, item in enumerate(table_payloads)], 1)
+            vlm_calls += extra_calls
+            if not layout_driven:
+                for item in table_payloads:
+                    structured["table_metadata"][item["markdown"]].update(
+                        {key: item[key] for key in METADATA_KEYS if key in item})
+
         number_formulas = (layout_outcome.get("payloads", {}).get("formulas", []) if layout_driven
                            else list((structured.get("formula_metadata") or {}).values()))
         formula_number_ocr = _recover_formula_numbers(glm_ocr, str(image_path), number_formulas)
@@ -507,6 +526,7 @@ def process_page(
         "render": {"markdown": markdown},
         "rag": rag_obj,
         "elements": output_elements,
+        "table_content_quality": table_content_quality(output_elements.get("tables", [])),
         "next_context": next_context,
         "page_type": "blank" if route_selected == "blank" else "normal",
     }
@@ -1811,7 +1831,8 @@ def _build_layout_output_elements(
                 for key in ("original_content", "warnings", "degraded", "manualReviewRequired", "image_unresolved"):
                     if key in payload:
                         item[key] = payload[key]
-            if collection == "tables" and item.get("layout_id") and "<table" in item.get("markdown", "").lower():
+            if (collection == "tables" and item.get("table_kind", "data_table") == "data_table"
+                    and item.get("layout_id") and "<table" in item.get("markdown", "").lower()):
                 from .single_page_tools import _html_table_to_grid
                 from .table_query import _sources
                 from .layout_ledger import contained_table_formulas
@@ -1839,6 +1860,7 @@ def _copy_optional_element_metadata(item: Dict[str, Any], metadata: Dict[str, An
     if bbox_space:
         item["bbox_space"] = bbox_space
     for key in (
+        *METADATA_KEYS,
         "layout_id",
         "reading_order",
         "columns",
@@ -2056,6 +2078,10 @@ def _enrich_upload_semantics(
                 "layout_id", "bbox", "bbox_space", "title", "formula_name", "formula_no", "variables", "context"
             ) if metadata.get(key) is not None}
             target.update({"object_ref": ref, "type": collection[:-1], content_key: content})
+            if collection == "tables":
+                # Prior generated context is not source evidence for classification.
+                target.pop("context", None)
+                target["calculation_source"] = source_context(content)
             targets.append(target)
             destinations[ref] = (collection, content, metadata)
             # OCR descriptions are not evidence of a completed VLM semantic pass.
@@ -2093,6 +2119,8 @@ def _enrich_upload_semantics(
                         if key in {"title", "formula_name", "formula_no"} and metadata.get(key):
                             continue
                         metadata[key] = value.strip()
+                if collection == "tables":
+                    apply_calculation_sheet(metadata, candidate, content, getattr(vlm, "description_language", "unknown"))
                 # Confidence describes this response, not an earlier text attempt.
                 metadata.pop("semantic_confidence", None)
                 metadata.pop("semantic_confidence_source", None)
@@ -2103,12 +2131,19 @@ def _enrich_upload_semantics(
     calls = 0
     table_targets = [target for target in targets if target["type"] == "table"]
     formula_targets = [target for target in targets if target["type"] == "formula"]
-    if table_targets:
+    table_calls = 0
+    if table_targets and calculation_budget(vlm) > 0:
         calls += 1
+        table_calls += 1
         try:
-            merge(vlm.extract_region_structured(image_path, semantic_objects=table_targets), table_targets)
+            response = vlm.extract_region_structured(image_path, semantic_objects=table_targets)
+            if getattr(vlm, "last_call_info", {}).get("finish_reason") not in {"length", "content_filter", "tool_calls"}:
+                merge(response, table_targets)
         except Exception as exc:
             logger.warning("upload table semantics unavailable: error_type=%s", type(exc).__name__)
+    calls += complete_calculation_batch(vlm, image_path,
+        [(destinations[target['object_ref']][2], destinations[target['object_ref']][1], target['object_ref'])
+         for target in table_targets], table_calls)
     if formula_targets:
         calls += 1
         if formula_semantic_calls is not None:
@@ -2344,7 +2379,10 @@ def _normalize_structured(value: Any) -> Dict[str, Any]:
             context=("context", "surrounding_text"),
         )
         _copy_semantic_confidence(metadata, item if isinstance(item, dict) else {})
+        if isinstance(item, dict) and "table_classification" not in item:
+            apply_calculation_sheet(metadata, item, table_value)
         for key in (
+            *METADATA_KEYS,
             "columns",
             "normalized_rows",
             "source_cells",
@@ -2353,7 +2391,10 @@ def _normalize_structured(value: Any) -> Dict[str, Any]:
             "source_block_index",
         ):
             value = item.get(key) if isinstance(item, dict) else None
-            if value is not None:
+            if (metadata.get("table_kind", "data_table") != "data_table"
+                    and key in {"columns", "normalized_rows", "source_cells", "cell_status"}):
+                continue
+            if value is not None and not (key in METADATA_KEYS and key in metadata):
                 metadata[key] = value
         if metadata:
             for table in normalized_tables:

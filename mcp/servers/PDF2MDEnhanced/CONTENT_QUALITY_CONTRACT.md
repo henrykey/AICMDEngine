@@ -142,3 +142,10 @@ These nested descriptors are not copied to the standalone formulas array and
 must not be rendered a second time. Invalid source mappings produce empty
 contained_formulas plus `contained_formula_quality.status=unresolved`, not guessed
 links. Source HTML and existing independent formulas remain unchanged.
+
+## Calculation sheets
+
+Calculation sheets use a separate type, VLM item-extraction method and source-bound
+validator instead of a geometric grid. `table_content_quality` is independent of
+semantic descriptions and structural recovery. See CALCULATION_SHEET_CONTRACT.md
+for budgets, metadata, downstream guards and remaining image-review requirements.

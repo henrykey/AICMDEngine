@@ -13,6 +13,7 @@ import re
 IDENTITY = ("tenant_id", "doc_id", "version", "table_id", "table_pk")
 NUMBER = r"-?\d+(?:\.\d+)?"
 REASONS = {
+    "calculation_sheet_not_data_table", "table_type_requires_review",
     "unknown_table_identity", "request_id_required", "source_html_required", "content_hash_mismatch",
     "revision_or_page_mismatch", "single_table_required", "input_budget_exceeded",
     "table_structure_unavailable", "overlapping_source_cells", "invalid_annotation",
@@ -345,6 +346,10 @@ def enhance_table(request, parse_grid, vlm_factory, vlm_config=None, description
                     raise ValueError("revision_or_page_mismatch")
                 binding[key] = table[key]
         out["binding"] = binding
+        if table.get("table_kind") == "calculation_sheet":
+            raise ValueError("calculation_sheet_not_data_table")
+        if table.get("table_kind", "data_table") != "data_table":
+            raise ValueError("table_type_requires_review")
         sources, positions, meta = _sources(markup, parse_grid)
         for cell in table.get("source_cells", []):
             ref = f"r{cell.get('row')}c{cell.get('col')}"

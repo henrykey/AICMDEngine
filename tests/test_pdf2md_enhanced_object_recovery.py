@@ -571,7 +571,7 @@ def test_real_local_upload_crop_and_client_parser_with_mocked_wire(monkeypatch, 
         image = fitz.Pixmap(base64.b64decode(message[1]["image_url"]["url"].split(",", 1)[1]))
         wire_calls.append({"budget": kwargs["max_tokens"], "size": [image.width, image.height],
                            "prompt": message[0]["text"]})
-        if "Generate semantic metadata for ONLY" in message[0]["text"]:
+        if "Analyze ONLY the supplied OCR" in message[0]["text"]:
             assert '"type": "formula"' not in message[0]["text"]  # formulas have a separate text-first semantic step
             return json.dumps({"tables": [{"object_ref": "tables:0", "title": "Table 1 Measurements",
                                            "description": "Compares measured quantities."}]}), "stream", "stop"
