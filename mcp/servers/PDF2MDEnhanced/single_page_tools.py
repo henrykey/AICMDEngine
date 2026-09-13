@@ -25,8 +25,8 @@ import fitz
 from .ocr_clients import OpenAICompatibleOcrClient
 from .ocr_clients.ocr_models import OcrElement, OcrResult
 from .ocr_clients.ocr_normalizers import normalize_text_response
-from .page_processor import _render_page_image, _routing_defaults, _table_to_markdown
-from .vlm_client import DynamicVLMClient
+from .page_processor import _render_page_image, _routing_defaults, _table_to_markdown, _merge_table_image_metadata
+from .vlm_client import DynamicVLMClient, _table_image_instruction
 
 
 logger = logging.getLogger(__name__)
@@ -63,6 +63,7 @@ class SinglePageContext:
     native_tables: List[str] = None  # type: ignore[assignment]
     description_language: str = ""
     description_language_explicit: bool = False
+    render_dpi: int = 150
 
     def __post_init__(self) -> None:
         if self.native_tables is None:
@@ -415,11 +416,20 @@ def _extract_single_page(
                 for item in items:
                     if not item.get("title_source"):
                         item["title_source"] = "header_fallback" if (_should_replace_table_title(item) or re.fullmatch(r"Table\s+\d+", str(item.get("title") or ""))) else "extracted"
-            return _base_result(tool, ctx, model_calls, warnings, items=items)
+            cell_figures = []
+            if not (context and context.get("object_crop")):
+                _attach_single_page_figure_assets(ctx, cell_figures, items, vlm, model_calls,
+                                                 rc["layout_recovery_max_objects"])
+            result = _base_result(tool, ctx, model_calls, warnings, items=items)
+            if cell_figures:
+                result["figures"] = cell_figures
+            return result
         if target == "formulas":
             return _extract_formula_page_result(ctx, glm, vlm, describe, model_calls, warnings, description_language)
         if target == "figures":
             result = _extract_figure_page_result(ctx, glm, vlm, model_calls, warnings, description_language)
+            if not (context and context.get("object_crop")):
+                _attach_single_page_figure_assets(ctx, result.get("items", []))
             if context and context.get("object_crop"):
                 for item in result.get("items", []):
                     item.setdefault("title_source", "extracted" if item.get("caption") else "missing")
@@ -428,6 +438,8 @@ def _extract_single_page(
         tables = _extract_tables(ctx, glm, vlm, describe, model_calls, warnings, description_language, allow_native=True, table_rows_format=table_rows_format)
         formulas = _extract_formulas(ctx, glm, vlm, describe, model_calls, warnings, description_language)
         figures = _extract_figures(ctx, glm, vlm, model_calls, warnings, description_language)
+        _attach_single_page_figure_assets(ctx, figures, tables, vlm, model_calls,
+                                         rc["layout_recovery_max_objects"])
         for item in tables + formulas + figures:
             if validate_descriptions(item, ctx.description_language):
                 warnings.append("vlm_ocr_failed_description_language_mismatch")
@@ -552,6 +564,7 @@ def _extract_layout_enhanced(
         figures = _figures_from_layout_blocks(blocks)
         if figures:
             figures = _enhance_layout_figures_with_vlm(ctx, figures, blocks, vlm, model_calls, warnings)
+        _attach_single_page_figure_assets(ctx, figures)
 
         for item in figures:
             if validate_descriptions(item, ctx.description_language):
@@ -612,6 +625,7 @@ def _prepare_context(
             page_no=int(page_no),
             page_text=page.get_text("text") or "",
             native_tables=_native_table_markdowns(page),
+            render_dpi=int(rc.get("render_dpi", 220)),
         )
     finally:
         doc.close()
@@ -629,7 +643,14 @@ def _extract_tables(
     table_rows_format: str = "structured_json",
 ) -> List[Dict[str, Any]]:
     if allow_native and ctx.input_type == "pdf" and ctx.native_tables:
-        return [_table_item("pymupdf", table, ctx.page_text, describe, table_rows_format=table_rows_format) for table in ctx.native_tables]
+        items = [_table_item("pymupdf", table, ctx.page_text, describe, table_rows_format=table_rows_format) for table in ctx.native_tables]
+        _enrich_table_metadata_with_vlm(ctx, vlm, items, describe, model_calls, warnings, description_language)
+        for item in items:
+            if "contains_images" not in item:
+                item["contains_images"] = None
+                item["image_unresolved"] = [{"reason": "image_detection_incomplete"}]
+                item["manualReviewRequired"] = True
+        return items
 
     if glm.enabled:
         try:
@@ -654,7 +675,9 @@ def _extract_tables(
                         normalized = _normalize_table_contract(pending["text"], table_rows_format)
                         if pending["raw"]:
                             normalized = _merge_model_normalized_table(normalized, pending["raw"])
+                        visual_cells = item.get("source_cells", [])
                         item.update(normalized)
+                        _merge_table_image_metadata(item, {"source_cells": visual_cells})
                 return items
             warnings.append("glm_ocr_returned_no_tables")
         except Exception as exc:
@@ -1168,6 +1191,7 @@ def _table_item(
     if normalized["rawText"]:
         item["rawText"] = normalized["rawText"]
     item.update(typed)
+    _merge_table_image_metadata(item, raw_candidate)
     if defer_grid:
         item["_pending_grid"] = {"text": raw_text, "raw": raw_candidate}
     return item
@@ -1316,10 +1340,39 @@ def _figure_item(item: OcrElement, page_text: str, source: str = "vlm_ocr") -> D
         "context": item.context or _near_context(page_text, caption),
     }
     if isinstance(item.raw, dict):
-        for key in ("bbox", "bbox_space", "confidence", "status", "block_index"):
+        for key in ("bbox", "bbox_space", "confidence", "status", "block_index", "layout_id"):
             if item.raw.get(key) is not None:
                 result[key] = item.raw[key]
     return result
+
+
+def _attach_single_page_figure_assets(ctx: SinglePageContext, figures: List[Dict[str, Any]],
+                                      tables: Optional[List[Dict[str, Any]]] = None,
+                                      vlm=None, model_calls=None, recovery_limit=8) -> None:
+    from .layout_ledger import reliable_normalized_bbox
+    from .page_processor import _attach_figure_assets, _recover_missing_table_images
+    for index, table in enumerate(tables or []):
+        if reliable_normalized_bbox(table):
+            table.setdefault("layout_id", f"p{ctx.page_no}-table-{index}")
+    if not tables and not any(item.get("layout_id") and reliable_normalized_bbox(item) for item in figures):
+        return
+    payloads = {"figures": [dict(item) for item in figures], "tables": tables or []}
+    if tables and vlm is not None:
+        with tempfile.TemporaryDirectory(prefix="pdf2md_cell_recovery_") as directory:
+            gc, vc, diagnostics = _recover_missing_table_images(
+                Path(ctx.image_path), Path(directory), payloads, vlm, bool(vlm.enabled), recovery_limit,
+                source_dpi=ctx.render_dpi)
+        model_calls["glm_ocr"] += gc
+        model_calls["vlm_ocr"] += vc
+        for table in tables:
+            evidence = [obj for obj in diagnostics["objects"] if obj["layout_id"] == table.get("layout_id")]
+            if evidence:
+                table["image_recovery"] = evidence
+    _attach_figure_assets(ctx.image_path, payloads, ctx.page_no, source_dpi=ctx.render_dpi)
+    for original, exported in zip(figures, payloads["figures"]):
+        if original.get("layout_id") and reliable_normalized_bbox(original):
+            original["image_asset"] = exported["image_asset"]
+    figures.extend(payloads["figures"][len(figures):])
 
 
 def _figure_page_result(
@@ -1478,6 +1531,10 @@ def _figures_from_layout_blocks(blocks: List[Dict[str, Any]]) -> List[Dict[str, 
                 "bbox": block.get("bbox") or [],
             }
         )
+        raw = block.get("raw") or {}
+        for key in ("layout_id", "bbox_space"):
+            if raw.get(key) is not None:
+                figures[-1][key] = raw[key]
     return figures
 
 
@@ -1575,6 +1632,10 @@ def _base_result(
     if tool == "extract_page_tables":
         result["tables"] = items
         result["table_content_quality"] = table_content_quality(items)
+        if any(item.get("image_unresolved") for item in items):
+            result["semantic_status"]["complete"] = False
+            result["semantic_status"]["missing"].append("cell_images")
+            result["semantic_status"]["reason"] = "cell_images_incomplete"
         if items:
             _promote_first_table_fields(result, items[0])
     return result
@@ -1895,6 +1956,7 @@ def _prompt_tables(page_text: str, describe: bool, description_language: str = "
         "\"cell_status\":[{\"row\":0,\"col\":0,\"status\":\"recognized\"}],"
         "\"raw_html\":\"\",\"markdown\":\"\",\"degraded\":false,\"manualReviewRequired\":false,\"warnings\":[]}]}。\n"
         + classification_prompt()
+        + _table_image_instruction()
         + f"是否需要语义描述：{bool(describe)}。\n"
         f"可用的文本层上下文：\n{_trim_context(page_text)}"
     )
@@ -1907,6 +1969,8 @@ def _prompt_tables_compact(page_text: str, description_language: str = "en") -> 
         "每张表只返回 title、markdown、notes、footnotes；markdown 必须是紧凑 pipe Markdown，完整保留所有可见行列、"
         "合并表头文本、数字和单元格内 LaTeX。不要返回 bbox、source_cells、cell_status、confidence、raw_html 或重复矩阵。\n"
         "按图片从上到下保持表格顺序；没有表格时返回空数组。\n"
+        "同时返回 contains_images 布尔值；表内含图片时返回 image_unresolved:[{reason:missing_cell_image_geometry}]，"
+        "无法判断时返回 contains_images:null 和 image_unresolved:[{reason:image_detection_incomplete}]。\n"
         + classification_prompt()
         + "JSON schema：{\"tables\":[{\"title\":\"\",\"markdown\":\"| A | B |\\n| --- | --- |\\n| 1 | 2 |\","
         "\"notes\":[],\"footnotes\":[]}]}。\n"
@@ -1922,6 +1986,8 @@ def _prompt_table_metadata(items: List[Dict[str, Any]], page_text: str, descript
         summaries.append(
             {
                 "index": idx,
+                "bbox": item.get("bbox"),
+                "bbox_space": item.get("bbox_space"),
                 "calculation_source": source_context(str(item.get("raw_html") or item.get("markdown") or "")),
                 "existing_title": str(item.get("title") or "")[:120],
                 "columns": [str(col) for col in columns[:12]],
@@ -1938,6 +2004,7 @@ def _prompt_table_metadata(items: List[Dict[str, Any]], page_text: str, descript
         "semanticDesc 必须遵守开头指定的描述语言，简要说明该表含义，不要编造数据。\n"
         "返回 schema：{\"tables\":[{\"index\":0,\"title\":\"\",\"semanticDesc\":\"\"}]}。\n"
         + classification_prompt(include_items=False)
+        + _table_image_instruction()
         + f"已抽取表格摘要：\n{json.dumps(summaries, ensure_ascii=False)}\n"
         f"可用页面文本上下文（可能含 OCR 噪声，仅供定位，不要当正文）：\n{_trim_context(page_text)}"
     )
@@ -2324,6 +2391,7 @@ def _merge_table_metadata(items: List[Dict[str, Any]], metadata: List[Dict[str, 
         if idx is None or idx < 0 or idx >= len(items) or indices.count(idx) != 1:
             continue
         item = items[idx]
+        _merge_table_image_metadata(item, entry)
         apply_calculation_sheet(item, entry, str(item.get("raw_html") or item.get("markdown") or ""), description_language)
         title = _cell_to_text(
             entry.get("title")
@@ -3337,7 +3405,7 @@ def _dedupe(items: List[str]) -> List[str]:
 def _recover_structure_target(tool, kind, ctx, target, language, vlm_config, ocr_config, directory):
     """Recover one explicitly identified missing parent, never scan surrounding pages."""
     from .layout_ledger import reliable_normalized_bbox
-    from .page_processor import _recover_layout_objects, _build_layout_output_elements, _attach_figure_assets
+    from .page_processor import _recover_layout_objects, _build_layout_output_elements, _attach_figure_assets, _recover_missing_table_images
     calls = {"glm_ocr": 0, "vlm_ocr": 0}
     def failed(reason):
         out = _base_result(tool, ctx, calls, [reason], [])
@@ -3371,16 +3439,24 @@ def _recover_structure_target(tool, kind, ctx, target, language, vlm_config, ocr
              "error": {"stage": "layout_content"}, "review_required": True}
     outcome = {"layout": [entry], "payloads": {"tables": [], "formulas": [], "figures": []}}
     gc, vc, diagnostics = _recover_layout_objects(Path(ctx.image_path), directory, outcome, [entry], vlm,
-        bool(vlm.enabled), 1, 0, glm=glm, max_model_calls=budget)
+        bool(vlm.enabled), 1, 0, source_dpi=ctx.render_dpi, glm=glm, max_model_calls=budget)
     calls.update(glm_ocr=gc, vlm_ocr=vc)
     for table in outcome["payloads"]["tables"]:
         if isinstance(target.get("source_cells"), list):
             table["source_cells"] = target["source_cells"]
-    _attach_figure_assets(ctx.image_path, outcome["payloads"], ctx.page_no)
+        for key in ("contains_images", "image_unresolved"):
+            if key in target:
+                table[key] = target[key]
+    ig, iv, diagnostics = _recover_missing_table_images(
+        Path(ctx.image_path), directory, outcome["payloads"], vlm, bool(vlm.enabled), 1,
+        source_dpi=ctx.render_dpi, previous=diagnostics, max_model_calls=budget-gc-vc)
+    calls["glm_ocr"] += ig
+    calls["vlm_ocr"] += iv
+    _attach_figure_assets(ctx.image_path, outcome["payloads"], ctx.page_no, source_dpi=ctx.render_dpi)
     elements = _build_layout_output_elements("", outcome["payloads"], "full_glm_ocr", ctx.description_language)
     out = _base_result(tool, ctx, calls, [], elements["tables"])
     out["figures"] = elements["figures"]
-    out["structure_recovery"] = {"status": "complete" if elements["tables"] else "unresolved",
+    out["structure_recovery"] = {"status": "complete" if elements["tables"] and not any(t.get("image_unresolved") for t in elements["tables"]) else "unresolved",
                                  "layout_id": target["layout_id"], "diagnostics": diagnostics,
                                  "binding": {"request_id": target.get("request_id"), "source_sha1": target["source_sha1"],
                                              "page_no": ctx.page_no, "bbox": target["bbox"], "bbox_space": "normalized_page"},

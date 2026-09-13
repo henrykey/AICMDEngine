@@ -104,21 +104,22 @@ def test_ambiguous_parent_never_guessed():
     assert 'table_layout_id' not in data['formulas'][0]['parent_relation']
 
 
-def test_figure_bytes_and_exact_crop_no_temp_leak(tmp_path):
+@pytest.mark.parametrize('dpi', [150, 300])
+def test_figure_bytes_and_exact_crop_no_temp_leak(tmp_path, dpi):
     import fitz, base64
     path = tmp_path / 'source.png'
     pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0,0,100,100), False); pix.clear_with(255); pix.save(str(path))
     data = relation_payload(); data['figures'] = [{'layout_id': 'image', 'bbox': [.1,.1,.3,.4], 'bbox_space': 'normalized_page'}]
     ledger.attach_object_relationships(data, 7)
     before = list(tmp_path.iterdir())
-    pp._attach_figure_assets(path, data, 7)
+    pp._attach_figure_assets(path, data, 7, source_dpi=dpi)
     asset = data['figures'][0]['image_asset']
     decoded = fitz.Pixmap(base64.b64decode(asset['data'].split(',',1)[1]))
     assert (decoded.width, decoded.height) == (20,30)
     assert asset['page_no'] == 7 and asset['status'] == 'available'
     assert data['figures'][0]['parent_relation']['cell_source'] == 'r0c0'
     assert list(tmp_path.iterdir()) == before
-    pp._attach_figure_assets(path, data, 7)
+    pp._attach_figure_assets(path, data, 7, source_dpi=dpi)
     assert data['figures'][0]['image_asset'] == asset
 
 
@@ -226,3 +227,155 @@ def test_recovery_preserves_language_failure_reason():
     assert payload['semantic_reason']=='description_language_mismatch'
     out=pp._build_layout_output_elements('',{'formulas':[payload]},'full_glm_ocr','en')
     assert out['formulas'][0]['semantic_reason']=='description_language_mismatch'
+
+
+@pytest.mark.parametrize('dpi,available', [(300, True), (150, False), (151, False)])
+def test_large_figure_export_resamples_only_export_page(tmp_path, dpi, available):
+    import fitz, base64, hashlib
+    path = tmp_path / 'large.png'
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 4000, 4200), False)
+    pix.clear_with(255)
+    pix.set_rect(fitz.IRect(2000, 2100, 4000, 4200), (255, 0, 0))
+    pix.save(str(path))
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+    data = {'figures': [{'layout_id': 'f', 'bbox': [.5,.5,1,1], 'bbox_space':'normalized_page'}]}
+    data['figures'][0].update(source_page_width=4000, source_page_height=4200, source_page_index=0)
+    pp._attach_figure_assets(path, data, 13, source_dpi=dpi)
+    asset = data['figures'][0]['image_asset']
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+    assert data['figures'][0]['bbox'] == [.5,.5,1,1]
+    assert (data['figures'][0]['source_page_width'], data['figures'][0]['source_page_height']) == (4000, 4200)
+    if not available:
+        assert asset['reason'] == 'image_asset_budget_exceeded'
+        return
+    decoded = fitz.Pixmap(base64.b64decode(asset['data'].split(',',1)[1]))
+    assert asset['sha256'] == hashlib.sha256(base64.b64decode(asset['data'].split(',',1)[1])).hexdigest()
+    assert asset['page_no'] == 13 and asset['layout_id'] == 'f'
+    assert asset['pixel_bbox'] == [1000,1050,2000,2100]
+    assert (decoded.width,decoded.height) == (1000,1050)
+    assert asset['width'] == asset['pixel_bbox'][2]-asset['pixel_bbox'][0]
+    assert asset['height'] == asset['pixel_bbox'][3]-asset['pixel_bbox'][1]
+    assert decoded.pixel(500,500) == (255,0,0)
+
+
+def test_pdf_context_preserves_actual_render_dpi(tmp_path):
+    import fitz
+    path = tmp_path / 'source.pdf'
+    with fitz.open() as doc:
+        doc.new_page(width=72, height=72)
+        doc.save(str(path))
+    ctx = sp._prepare_context(tmp_path, str(path), None, None, 1, 'pdf', {'render_dpi': 300})
+    image = fitz.Pixmap(ctx.image_path)
+    assert ctx.render_dpi == 300
+    assert (image.width, image.height) == (300, 300)
+
+
+@pytest.mark.parametrize('entry', ['figures', 'structured', 'layout', 'object_crop'])
+@pytest.mark.parametrize('bound', [True, False])
+def test_single_page_figure_export_preserves_binding_and_call_count(tmp_path, monkeypatch, entry, bound):
+    import fitz
+    from tests.test_pdf2md_enhanced_single_page_tools import OcrElement, OcrResult
+    path = tmp_path / 'page.png'
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 100, 100), False)
+    pix.clear_with(255)
+    pix.save(str(path))
+    geometry = {'bbox': [.1, .2, .6, .8]}
+    if bound:
+        geometry.update(layout_id='p1-figure', bbox_space='normalized_page')
+    calls = []
+    class OCR:
+        enabled = True
+        def __init__(self, config, **kwargs): pass
+        def extract_page(self, *args, **kwargs):
+            calls.append('ocr')
+            return OcrResult(figures=[OcrElement(kind='figure', source='glm_ocr', description='Diagram.', raw=geometry)])
+        def parse_layout(self, *args, **kwargs):
+            calls.append('layout')
+            return {'layout_details': [[{**geometry, 'bbox_2d': geometry['bbox'], 'label': 'image', 'content': 'Diagram.'}]]}
+    class VLM:
+        enabled = False
+        def __init__(self, config): pass
+    monkeypatch.setattr(sp, 'OpenAICompatibleOcrClient', OCR)
+    monkeypatch.setattr(sp, 'DynamicVLMClient', VLM)
+    monkeypatch.setattr(sp, '_extract_tables', lambda *a, **k: [])
+    monkeypatch.setattr(sp, '_extract_formulas', lambda *a, **k: [])
+    if entry == 'layout':
+        result = sp._extract_layout_enhanced(str(path), None, None, 1, 'image', None, None, None, 'en')
+    else:
+        fn = sp.extract_page_structured_direct if entry == 'structured' else sp.extract_page_figures_direct
+        extra = {'context': {'object_crop': True}} if entry == 'object_crop' else {}
+        result = json.loads(fn(file_path=str(path), input_type='image', description_language='en', **extra))
+    figure = result['items' if entry in {'figures', 'object_crop'} else 'figures'][0]
+    assert len(calls) == 1
+    assert result['model_calls'] == {'glm_ocr': 1, 'vlm_ocr': 0}
+    assert figure['bbox'] == geometry['bbox']
+    if bound:
+        assert figure['layout_id'] == 'p1-figure'
+        if entry == 'object_crop':
+            assert 'image_asset' not in figure
+            return
+        assert figure['image_asset']['status'] == 'available'
+        assert figure['image_asset']['pixel_bbox'] == [10, 20, 60, 80]
+        assert (figure['image_asset']['width'], figure['image_asset']['height']) == (50, 60)
+    else:
+        assert 'image_asset' not in figure and 'layout_id' not in figure
+
+
+def test_structure_recovery_uses_pdf_render_dpi_without_extra_calls(tmp_path, monkeypatch):
+    import fitz, hashlib
+    path = tmp_path / 'page.pdf'
+    with fitz.open() as doc:
+        doc.new_page(width=72, height=72)
+        doc.save(str(path))
+    sizes = []
+    class VLM:
+        enabled = True
+        def __init__(self, config): self.last_object_call_info = {}
+        def extract_table_html(self, path, block, compact=False):
+            pix = fitz.Pixmap(path)
+            sizes.append((pix.width, pix.height))
+            return '<table><tr><td>A</td><td>B</td></tr></table>'
+    monkeypatch.setattr(sp, 'DynamicVLMClient', VLM)
+    target = {'layout_id': 'table', 'type': 'table', 'bbox': [.1,.1,.5,.5],
+              'bbox_space': 'normalized_page', 'page_no': 1,
+              'source_sha1': hashlib.sha1(path.read_bytes()).hexdigest()}
+    result = json.loads(sp.extract_page_tables_direct(file_path=str(path), input_type='pdf',
+        description_language='en', routing_config={'render_dpi': 300}, context={'structure_target': target}))
+    assert sizes == [(60, 60)]
+    assert result['model_calls'] == {'glm_ocr': 0, 'vlm_ocr': 1}
+
+
+@pytest.mark.parametrize('size,expected', [(8 * 1024 * 1024 + 1, ['unresolved']),
+                                         (8 * 1024 * 1024, ['available', 'available', 'unresolved'])])
+def test_figure_export_keeps_existing_byte_budgets(tmp_path, monkeypatch, size, expected):
+    import fitz
+    path = tmp_path / 'page.png'
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 10, 10), False)
+    pix.clear_with(255)
+    pix.save(str(path))
+    def crop(source, item, directory, **kwargs):
+        output = directory / 'encoded.png'
+        output.write_bytes(b'x' * size)  # Controlled encoded byte size; PNG geometry is tested separately.
+        return output, {'width': 10, 'height': 10, 'pixel_bbox': [0, 0, 10, 10]}
+    monkeypatch.setattr(pp, '_crop_layout_block_image', crop)
+    data = {'figures': [{'layout_id': str(i), 'bbox': [0,0,1,1], 'bbox_space': 'normalized_page'}
+                        for i in range(len(expected))]}
+    pp._attach_figure_assets(path, data, 1)
+    assert [item['image_asset']['status'] for item in data['figures']] == expected
+    assert data['figures'][-1]['image_asset']['reason'] == 'image_asset_budget_exceeded'
+    assert list(tmp_path.iterdir()) == [path]
+
+
+@pytest.mark.parametrize('bbox,expected', [([.1,.2,.6,.8], [10,15,61,64]), ([0,0,1,1], [0,0,101,79])])
+def test_export_rounding_on_landscape_page(tmp_path, bbox, expected):
+    import fitz, base64
+    path = tmp_path / 'landscape.png'
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 101, 79), False)
+    pix.clear_with(255)
+    pix.save(str(path))
+    data = {'figures': [{'layout_id': 'f', 'bbox': bbox, 'bbox_space': 'normalized_page'}]}
+    pp._attach_figure_assets(path, data, 1, source_dpi=300)
+    asset = data['figures'][0]['image_asset']
+    decoded = fitz.Pixmap(base64.b64decode(asset['data'].split(',', 1)[1]))
+    assert asset['pixel_bbox'] == expected
+    assert (decoded.width, decoded.height) == (expected[2] - expected[0], expected[3] - expected[1])

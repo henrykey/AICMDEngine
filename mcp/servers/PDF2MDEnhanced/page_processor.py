@@ -8,6 +8,7 @@ from .calculation_sheet import (
 from .semantic_language import validate_descriptions
 
 import base64
+import copy
 import hashlib
 import html
 import json
@@ -379,9 +380,33 @@ def process_page(
                            else list((structured.get("formula_metadata") or {}).values()))
         formula_number_ocr = _recover_formula_numbers(glm_ocr, str(image_path), number_formulas)
         glm_calls += formula_number_ocr["calls"]
+        cell_figures = []
+        if not layout_driven:
+            for content, metadata in structured.get("table_metadata", {}).items():
+                metadata["markdown"] = content
+        image_payloads = (layout_outcome["payloads"] if layout_driven else
+                          {"tables": list(structured.get("table_metadata", {}).values()), "figures": []})
+        for index, table in enumerate(image_payloads.get("tables", [])):
+            if reliable_normalized_bbox(table):
+                table.setdefault("layout_id", f"p{display_page_no}-table-{index}")
+        ig, iv, image_recovery = _recover_missing_table_images(
+            image_path, Path(work_dir), image_payloads, vlm, bool(rc.get("vlm_ocr_enabled") and vlm.enabled),
+            rc["layout_recovery_max_objects"], rc["render_dpi"],
+            previous=layout_outcome.get("recovery") if layout_driven else None)
+        glm_calls += ig
+        vlm_calls += iv
+        if layout_driven:
+            layout_outcome["recovery"] = image_recovery
         if layout_driven:
             attach_object_relationships(layout_outcome["payloads"], display_page_no)
-            _attach_figure_assets(image_path, layout_outcome["payloads"], display_page_no)
+            _attach_figure_assets(image_path, layout_outcome["payloads"], display_page_no, source_dpi=rc["render_dpi"])
+        else:
+            tables = list(structured.get("table_metadata", {}).values())
+            for index, table in enumerate(tables):
+                if reliable_normalized_bbox(table):
+                    table.setdefault("layout_id", f"p{display_page_no}-table-{index}")
+            _attach_figure_assets(image_path, {"tables": tables, "figures": cell_figures},
+                                  display_page_no, source_dpi=rc["render_dpi"])
 
     doc.close()
 
@@ -425,6 +450,14 @@ def process_page(
             route_selected,
             description_language,
         )
+
+    if not layout_driven:
+        output_elements["figures"].extend(cell_figures)
+        for table in output_elements["tables"]:
+            if table.get("image_unresolved"):
+                table["manualReviewRequired"] = True
+                table["missing_fields"] = list(dict.fromkeys([*table.get("missing_fields", []), "cell_images"]))
+                table["semantic_status"] = "missing"
 
     reconciliation = None
     if layout_enabled and layout_outcome is not None:
@@ -1027,12 +1060,15 @@ def _recover_layout_objects(
             "outcome": "failed",
         }
         diagnostics["objects"].append(item_diagnostics)
-        use_glm = (object_type == "table" and bool(getattr(glm, "enabled", False))
+        image_geometry = block.get("recovery_target") == "cell_images"
+        use_glm = (not image_geometry and object_type == "table" and bool(getattr(glm, "enabled", False))
                    and callable(getattr(glm, "extract_table_html", None)))
-        if index >= limit or not (vlm_enabled or use_glm):
+        slot = sum(not prior.get("_reuse_recovery_slot") for prior in pending_blocks[:index])
+        no_slot = not block.get("_reuse_recovery_slot") and slot >= limit
+        if no_slot or not (vlm_enabled or use_glm):
             item_diagnostics.update({
                 "outcome": "not_attempted", "review_required": True,
-                "reason": "recovery_limit_exceeded" if index >= limit else "provider_unavailable",
+                "reason": "recovery_limit_exceeded" if no_slot else "provider_unavailable",
             })
             continue
         diagnostics["attempted"] += 1
@@ -1055,6 +1091,10 @@ def _recover_layout_objects(
         # At most two OCR attempts, then two VLM attempts. The second attempt
         # for each provider uses fewer pixels, never the same oversized image.
         providers = (["glm_ocr"] * 2 if use_glm else []) + (["vlm_ocr"] * 2 if vlm_enabled else [])
+        if image_geometry:
+            providers = providers[:block.get("_remaining_attempts", 2)]
+            if not providers:
+                item_diagnostics["reason"] = "model_budget_exhausted"
         skip_glm = False
         for attempt_no, provider in enumerate(providers, 1):
             if max_model_calls is not None and glm_calls + vlm_calls >= max_model_calls:
@@ -1081,7 +1121,7 @@ def _recover_layout_objects(
                     glm_calls += 1
                 else:
                     vlm_calls += 1
-                if object_type == "table":
+                if object_type == "table" and not image_geometry:
                     html = (glm.extract_table_html(str(crop_path)) if provider == "glm_ocr" else
                             vlm.extract_table_html(str(crop_path), block, compact=compact))
                     candidate = {
@@ -1096,15 +1136,25 @@ def _recover_layout_objects(
                 attempt.update(_safe_object_call_info(client))
                 if isinstance(candidate, dict) and object_type == "figure":
                     candidate = _normalize_recovered_figure(candidate)
-                reason, shape = validate_recovered_object(block, candidate)
+                if image_geometry:
+                    reason, recovered_table = _validate_cell_image_recovery(block, candidate, crop_info, image_path)
+                    shape = {}
+                else:
+                    reason, shape = validate_recovered_object(block, candidate)
                 attempt.update(shape)
                 if attempt.get("truncated") or attempt.get("finish_reason") == "length":
                     reason = "provider_output_truncated"
                 elif attempt.get("finish_reason") in {"content_filter", "tool_calls"}:
                     reason = "provider_content_blocked"
-                elif object_type != "table" and attempt.get("json_status") in {"empty", "invalid", "non_object"}:
+                elif (object_type != "table" or image_geometry) and attempt.get("json_status") in {"empty", "invalid", "non_object"}:
                     reason = {"empty": "response_empty", "invalid": "response_json_invalid",
                               "non_object": "response_invalid"}[attempt["json_status"]]
+                if not reason and image_geometry:
+                    table = next(t for t in layout_outcome["payloads"]["tables"] if t["layout_id"] == layout_id)
+                    table.update(recovered_table)
+                    attempt.update(outcome="recovered", reason="validated_cell_images")
+                    item_diagnostics.update(outcome="recovered", provider=provider)
+                    break
                 if not reason:
                     payload = _object_success_payload(block, candidate)
                     if provider == "glm_ocr":
@@ -1135,12 +1185,159 @@ def _recover_layout_objects(
     return glm_calls, vlm_calls, diagnostics
 
 
+_CELL_IMAGE_GEOMETRY_REASONS = {
+    "missing_cell_image_geometry", "image_detection_incomplete", "invalid_cell_image_geometry",
+    "invalid_cell_image_regions", "invalid_cell_image_identity", "cell_image_geometry_conflict",
+    "image_identity_conflict",
+}
+
+
+def _table_image_problem(table):
+    """Validate supplied cell geometry using the existing relationship contract."""
+    if any(issue.get("reason") in _CELL_IMAGE_GEOMETRY_REASONS or issue.get("stage") == "cell_image_recovery"
+           for issue in table.get("image_unresolved", [])):
+        return True
+    cells = table.get("source_cells") or []
+    if not isinstance(cells, list) or any(not isinstance(cell, dict) for cell in cells):
+        return True
+    probe = {"tables": [{**copy.deepcopy(table), "image_unresolved": []}], "figures": []}
+    _attach_cell_image_figures(probe, 1)
+    if any(issue.get("reason") in _CELL_IMAGE_GEOMETRY_REASONS for issue in probe["tables"][0].get("image_unresolved", [])):
+        return True
+    return any(f.get("parent_relation", {}).get("status") != "resolved" for f in probe["figures"])
+
+
+def _recover_missing_table_images(image_path, output_dir, payloads, vlm, enabled, max_objects,
+                                  source_dpi=150, previous=None, max_model_calls=None):
+    """Schedule late image gaps through the existing bounded object recovery."""
+    previous = previous or {}
+    pending = []
+    prior_objects = {obj["layout_id"]: obj for obj in previous.get("objects", [])}
+    for table in payloads.get("tables", []):
+        if not _table_image_problem(table):
+            continue
+        if not table.get("layout_id") or not reliable_normalized_bbox(table):
+            table.setdefault("image_unresolved", []).append({"reason": "missing_cell_image_geometry"})
+            table["manualReviewRequired"] = True
+            continue
+        prior = prior_objects.get(table["layout_id"])
+        pending.append({**table, "type": "table", "recovery_target": "cell_images",
+                        "_reuse_recovery_slot": prior is not None,
+                        "_remaining_attempts": max(0, 4 - len(prior.get("attempts", []))) if prior else 2})
+    # Reuse the existing maximum of four provider attempts per recovery object.
+    used_calls = sum(len(obj.get("attempts", [])) for obj in previous.get("objects", []))
+    remaining = max(0, max_objects * 4 - used_calls)
+    if max_model_calls is not None:
+        remaining = min(remaining, max(0, max_model_calls))
+    gc, vc, result = _recover_layout_objects(
+        image_path, output_dir, {"payloads": payloads}, pending, vlm, enabled,
+        max(0, max_objects - len(prior_objects)), 0,
+        source_dpi=source_dpi, max_model_calls=remaining)
+    for obj in result["objects"]:
+        if obj["outcome"] != "recovered":
+            table = next(t for t in payloads["tables"] if t.get("layout_id") == obj["layout_id"])
+            reason = obj.get("reason") or next((a.get("reason") for a in reversed(obj["attempts"]) if a.get("reason")), "missing_cell_image_geometry")
+            table.setdefault("image_unresolved", []).append({"reason": reason, "stage": "cell_image_recovery"})
+            table["manualReviewRequired"] = True
+    return gc, vc, {"contract": "object-crop-content-v1", "limit": max_objects,
+                    "pending": previous.get("pending", 0) + result["pending"],
+                    "attempted": previous.get("attempted", 0) + result["attempted"],
+                    "objects": [*previous.get("objects", []), *result["objects"]]}
+
+
+def _validate_cell_image_recovery(block, candidate, crop_info, image_path):
+    if not isinstance(candidate, dict):
+        return "response_invalid", None
+    if candidate.get("layout_id") != block["layout_id"]:
+        return "layout_id_mismatch", None
+    if candidate.get("type") != "table":
+        return "object_type_mismatch", None
+    if candidate.get("complete") is not True or candidate.get("status") != "EXTRACTED":
+        return "provider_reported_incomplete", None
+    cells = candidate.get("source_cells")
+    if candidate.get("contains_images") is not True or not isinstance(cells, list) or not cells or candidate.get("image_unresolved"):
+        return "missing_cell_image_geometry", None
+    from .single_page_tools import _normalize_table_contract
+    structure = _normalize_table_contract(block.get("markdown") or "", "structured_json")
+    origins = {(cell["row"], cell["col"]): cell for cell in structure.get("source_cells", [])}
+    if not origins:
+        return "table_structure_unavailable", None
+    source = fitz.Pixmap(str(image_path))
+    left, top, right, bottom = crop_info["pixel_bbox"]
+    def project(item):
+        if item.get("bbox_space") != "normalized_crop" or not reliable_normalized_bbox({**item, "bbox_space": "normalized_page"}):
+            raise ValueError("invalid_cell_image_geometry")
+        x0, y0, x1, y1 = item["bbox"]
+        return {**item, "bbox_space": "normalized_page", "bbox": [
+            (left + x0 * (right-left)) / source.width, (top + y0 * (bottom-top)) / source.height,
+            (left + x1 * (right-left)) / source.width, (top + y1 * (bottom-top)) / source.height]}
+    mapped = []
+    identities = set()
+    try:
+        for cell in cells:
+            if not isinstance(cell, dict) or any(type(cell.get(k)) is not int or cell[k] < 0 for k in ("row", "col")):
+                raise ValueError()
+            if any(type(cell.get(k, 1)) is not int or cell.get(k, 1) < 1 for k in ("rowspan", "colspan")):
+                raise ValueError()
+            identity = (cell["row"], cell["col"])
+            if identity in identities:
+                return "image_identity_conflict", None
+            identities.add(identity)
+            origin = origins.get(identity)
+            if origin is None or any(cell.get(key, 1) != origin.get(key, 1) for key in ("rowspan", "colspan")):
+                return "cell_source_mismatch", None
+            converted = project(cell)
+            converted["text"] = origin.get("text", "")
+            regions = cell.get("image_regions")
+            if not isinstance(regions, list) or not regions:
+                raise ValueError()
+            converted["image_regions"] = [project(region) for region in regions]
+            mapped.append(converted)
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return "invalid_cell_image_geometry", None
+    result = copy.deepcopy(block)
+    result.pop("recovery_target", None)
+    result.pop("_reuse_recovery_slot", None)
+    result.pop("_remaining_attempts", None)
+    # Remove only errors belonging to the geometry being recovered.
+    result["image_unresolved"] = [issue for issue in result.get("image_unresolved", [])
+                                  if issue.get("reason") not in _CELL_IMAGE_GEOMETRY_REASONS
+                                  and issue.get("stage") != "cell_image_recovery"]
+    if not isinstance(result.get("source_cells", []), list):
+        result["source_cells"] = []
+    result["source_cells"] = [cell for cell in result.get("source_cells", []) if isinstance(cell, dict)]
+    for cell in mapped:
+        matches = [c for c in result.get("source_cells", []) if c.get("row") == cell["row"] and c.get("col") == cell["col"]]
+        if len(matches) > 1:
+            return "image_identity_conflict", None
+        if matches:
+            original = matches[0]
+            valid_regions = []
+            for region in original.get("image_regions", []):
+                probe = {**result, "image_unresolved": [], "source_cells": [{**original, "image_regions": [region]}]}
+                if not _table_image_problem(probe):
+                    valid_regions.append(region)
+            # Keep valid original evidence; append new images without overwriting an existing id.
+            known = {region["image_id"] for region in valid_regions}
+            cell["image_regions"] = valid_regions + [region for region in cell["image_regions"] if region.get("image_id") not in known]
+            if reliable_normalized_bbox(original):
+                cell["bbox"], cell["bbox_space"] = original["bbox"], original["bbox_space"]
+    _merge_table_image_metadata(result, {"contains_images": True, "source_cells": mapped})
+    result.setdefault("source_cell_row_offset", 1)
+    if _table_image_problem({**result, "image_unresolved": []}):
+        return "invalid_cell_image_geometry", None
+    result["manualReviewRequired"] = bool(result.get("image_unresolved") or result.get("degraded") or result.get("warnings")
+        or result.get("table_kind", "data_table") != "data_table"
+        or (block.get("manualReviewRequired") and not block.get("image_unresolved")))
+    return "", result
+
+
 def _object_content_retryable(reason: str) -> bool:
     return reason in {
         "response_empty", "response_invalid", "response_json_invalid", "provider_reported_incomplete",
         "provider_output_truncated", "table_content_empty", "table_html_unclosed", "table_html_invalid",
         "table_cells_missing", "table_count_invalid", "table_markdown_invalid", "formula_content_empty",
-        "formula_unbalanced", "figure_content_empty",
+        "formula_unbalanced", "figure_content_empty", "missing_cell_image_geometry", "invalid_cell_image_geometry",
     }
 
 
@@ -1842,6 +2039,10 @@ def _build_layout_output_elements(
                 except ValueError:
                     item["contained_formulas"] = []
                     item["contained_formula_quality"] = {"status": "unresolved", "reason": "table_structure_unavailable"}
+            if collection == "tables" and item.get("image_unresolved"):
+                item["manualReviewRequired"] = True
+                item["missing_fields"] = list(dict.fromkeys([*item.get("missing_fields", []), "cell_images"]))
+                item["semantic_status"] = "missing"
             output[collection].append(item)
     return output
 
@@ -1866,6 +2067,8 @@ def _copy_optional_element_metadata(item: Dict[str, Any], metadata: Dict[str, An
         "columns",
         "normalized_rows",
         "source_cells",
+        "contains_images",
+        "image_unresolved",
         "cell_status",
         "source_cell_row_offset",
         "source_block_index",
@@ -2052,6 +2255,40 @@ def _recover_formula_numbers(ocr: Any, image_path: str, formulas: list[Dict[str,
     return stats
 
 
+def _merge_table_image_metadata(table: Dict[str, Any], candidate: Dict[str, Any]) -> None:
+    """Add visual evidence without replacing OCR table content or existing cell text."""
+    if "contains_images" in candidate:
+        table["contains_images"] = candidate["contains_images"]
+    if isinstance(candidate.get("image_unresolved"), list):
+        table["image_unresolved"] = [dict(issue) for issue in candidate["image_unresolved"] if isinstance(issue, dict)]
+    if not reliable_normalized_bbox(table) and reliable_normalized_bbox(candidate):
+        table["bbox"] = candidate["bbox"]
+        table["bbox_space"] = candidate["bbox_space"]
+    cells = candidate.get("source_cells")
+    if not isinstance(cells, list):
+        return
+    existing = table.setdefault("source_cells", [])
+    for cell in cells:
+        if not isinstance(cell, dict) or any(type(cell.get(k)) is not int or cell[k] < 0 for k in ("row", "col")):
+            continue
+        if sum(isinstance(c, dict) and c.get("row") == cell["row"] and c.get("col") == cell["col"] for c in cells) != 1:
+            table.setdefault("image_unresolved", []).append({"reason": "image_identity_conflict"})
+            continue
+        matches = [c for c in existing if c.get("row") == cell["row"] and c.get("col") == cell["col"]]
+        if not matches:
+            existing.append(dict(cell))
+        elif len(matches) != 1:
+            table.setdefault("image_unresolved", []).append({"reason": "image_identity_conflict"})
+        else:
+            target = matches[0]
+            if reliable_normalized_bbox(target) and cell.get("bbox") != target["bbox"]:
+                table.setdefault("image_unresolved", []).append({"reason": "cell_image_geometry_conflict"})
+                continue
+            for key in ("bbox", "bbox_space", "image_regions", "contains_images"):
+                if key in cell:
+                    target[key] = cell[key]
+
+
 def _enrich_upload_semantics(
     vlm: DynamicVLMClient, image_path: str, structured: Dict[str, Any],
     payloads: Optional[Dict[str, Any]], enabled: bool,
@@ -2120,6 +2357,7 @@ def _enrich_upload_semantics(
                             continue
                         metadata[key] = value.strip()
                 if collection == "tables":
+                    _merge_table_image_metadata(metadata, candidate)
                     apply_calculation_sheet(metadata, candidate, content, getattr(vlm, "description_language", "unknown"))
                 # Confidence describes this response, not an earlier text attempt.
                 metadata.pop("semantic_confidence", None)
@@ -2386,6 +2624,8 @@ def _normalize_structured(value: Any) -> Dict[str, Any]:
             "columns",
             "normalized_rows",
             "source_cells",
+            "contains_images",
+            "image_unresolved",
             "cell_status",
             "source_cell_row_offset",
             "source_block_index",
@@ -2604,6 +2844,8 @@ def _ocr_element_payload(item: Any, kind: str) -> Dict[str, Any]:
                 "columns",
                 "normalized_rows",
                 "source_cells",
+                "contains_images",
+                "image_unresolved",
                 "cell_status",
                 "source_cell_row_offset",
                 "source_block_index",
@@ -3470,7 +3712,7 @@ def _build_chunks(text: str, chunk_size: int = 700) -> list[dict[str, Any]]:
 
 
 
-def _attach_figure_assets(image_path, payloads, page_no):
+def _attach_figure_assets(image_path, payloads, page_no, source_dpi=150):
     """Export bounded page-owned crops; no public path input or filesystem URL."""
     _attach_cell_image_figures(payloads, page_no)
     total = 0
@@ -3488,11 +3730,23 @@ def _attach_figure_assets(image_path, payloads, page_no):
             continue
         try:
             source = fitz.Pixmap(str(image_path))
-            if source.width * source.height > 16_000_000:
-                asset["reason"] = "image_asset_budget_exceeded"
-                continue
             with tempfile.TemporaryDirectory(prefix="pdf2md_cell_asset_") as directory:
-                crop, info = _crop_layout_block_image(Path(image_path), item, Path(directory), padding_ratio=0)
+                export_path = Path(image_path)
+                if source.width * source.height > 16_000_000:
+                    # Resample the export canvas, not OCR/layout or individual crop coordinates.
+                    scale = min(1.0, 150.0 / max(float(source_dpi), 1.0))
+                    width = max(1, math.floor(source.width * scale))
+                    height = max(1, math.floor(source.height * scale))
+                    if width * height > 16_000_000:
+                        asset["reason"] = "image_asset_budget_exceeded"
+                        continue
+                    source = fitz.Pixmap(source, width, height)
+                    source.set_dpi(150, 150)
+                    export_path = Path(directory) / "export-page.png"
+                    source.save(str(export_path))
+                # No second crop resize: pixel_bbox and PNG must share the export canvas.
+                crop, info = _crop_layout_block_image(export_path, item, Path(directory),
+                                                       padding_ratio=0, source_dpi=150)
                 raw = crop.read_bytes()
             if len(raw) > 8 * 1024 * 1024 or total + len(raw) > 16 * 1024 * 1024:
                 asset["reason"] = "image_asset_budget_exceeded"
@@ -3504,6 +3758,14 @@ def _attach_figure_assets(image_path, payloads, page_no):
         except Exception:
             asset["reason"] = "image_asset_generation_failed"
 
+    for table in payloads.get("tables", []):
+        failures = [figure["image_asset"].get("reason", "image_asset_generation_failed")
+                    for figure in payloads.get("figures", [])
+                    if figure.get("cell_image_source", {}).get("table_layout_id") == table.get("layout_id")
+                    and figure.get("image_asset", {}).get("status") == "unresolved"]
+        if failures:
+            table.setdefault("image_unresolved", []).extend({"reason": reason} for reason in dict.fromkeys(failures))
+            table["manualReviewRequired"] = True
 
 
 def _attach_cell_image_figures(payloads, page_no):
@@ -3513,8 +3775,15 @@ def _attach_cell_image_figures(payloads, page_no):
     seen = set()
     added = 0
     for table in payloads.get("tables", []):
-        problems = []
-        for cell in table.get("source_cells", []):
+        problems = list(table.get("image_unresolved") or [])
+        cells = table.get("source_cells") or []
+        if table.get("contains_images") is True and not any(c.get("image_regions") for c in cells):
+            problems.append({"reason": "missing_cell_image_geometry"})
+        if "contains_images" in table and table["contains_images"] is None:
+            problems.append({"reason": "image_detection_incomplete"})
+        for cell in cells:
+            if cell.get("contains_images") is True and not cell.get("image_regions"):
+                problems.append({"reason": "missing_cell_image_geometry", "row": cell.get("row"), "col": cell.get("col")})
             regions = cell.get("image_regions", [])
             if not isinstance(regions, list):
                 problems.append({"reason": "invalid_cell_image_regions"})
@@ -3543,7 +3812,8 @@ def _attach_cell_image_figures(payloads, page_no):
                 existing[identity] = figure
                 added += 1
         if problems:
-            table["image_unresolved"] = problems
+            table["image_unresolved"] = [dict(item) for item in {json.dumps(p, sort_keys=True): p for p in problems}.values()]
+            table["manualReviewRequired"] = True
     if added:
         attach_object_relationships(payloads, page_no)
 
