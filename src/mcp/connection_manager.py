@@ -5,6 +5,7 @@ Manages WebSocket connections, client info, and message routing.
 """
 
 from typing import Dict, Optional
+import asyncio
 from fastapi import WebSocket
 import logging
 
@@ -20,6 +21,8 @@ class ConnectionManager:
         self.active_connections: Dict[str, WebSocket] = {}
         # client_id -> client_info
         self.client_info: Dict[str, dict] = {}
+        # client_id -> send lock
+        self._send_locks: Dict[str, asyncio.Lock] = {}
 
     async def connect(
         self,
@@ -44,19 +47,29 @@ class ConnectionManager:
             f"({client_info.get('name', 'Unknown')})"
         )
 
-    def disconnect(self, client_id: str):
+    def disconnect(self, client_id: str, websocket: Optional[WebSocket] = None):
         """
         断开连接
 
         Args:
             client_id: Client identifier to disconnect
+            websocket: Optional websocket instance to verify ownership
         """
-        if client_id in self.active_connections:
-            del self.active_connections[client_id]
+        current = self.active_connections.get(client_id)
+        if websocket is not None and current is not websocket:
+            return
+
+        if current:
+            try:
+                logger.info(f"Client disconnected: {client_id}")
+            finally:
+                del self.active_connections[client_id]
         if client_id in self.client_info:
             del self.client_info[client_id]
-
-        logger.info(f"Client disconnected: {client_id}")
+        if client_id in self._send_locks:
+            del self._send_locks[client_id]
+        else:
+            logger.info(f"Client disconnected: {client_id}")
 
     async def send_message(
         self,
@@ -78,12 +91,18 @@ class ConnectionManager:
             logger.warning(f"Client not found: {client_id}")
             return False
 
+        lock = self._send_locks.get(client_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._send_locks[client_id] = lock
+
         try:
-            await websocket.send_json(message)
+            async with lock:
+                await websocket.send_json(message)
             return True
         except Exception as e:
             logger.error(f"Failed to send message to {client_id}: {e}")
-            self.disconnect(client_id)
+            self.disconnect(client_id, websocket)
             return False
 
     async def broadcast(self, message: dict):
@@ -96,7 +115,7 @@ class ConnectionManager:
         disconnected = []
         for client_id, websocket in self.active_connections.items():
             try:
-                await websocket.send_json(message)
+                await self.send_message(client_id, message)
             except Exception as e:
                 logger.error(f"Failed to broadcast to {client_id}: {e}")
                 disconnected.append(client_id)

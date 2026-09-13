@@ -5,7 +5,8 @@ WebSocket endpoint for MCP client connections.
 """
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
-from typing import Optional
+from typing import Optional, Set
+import asyncio
 import logging
 import json
 from datetime import datetime
@@ -116,23 +117,44 @@ async def mcp_websocket_endpoint(
         "mongodb": getattr(websocket.app, "mongodb", None),
     }
 
-    try:
-        # 消息循环
-        while True:
-            # 接收消息
-            data = await websocket.receive_text()
+    message_semaphore = asyncio.Semaphore(8)
+    send_lock = asyncio.Lock()
+    active_tasks: Set[asyncio.Task] = set()
 
+    async def _safe_send_error(
+        message_id: Optional[int],
+        code: int,
+        error_message: str,
+    ):
+        await connection_manager.send_message(
+            client_id,
+            {
+                "jsonrpc": "2.0",
+                "id": message_id,
+                "error": {
+                    "code": code,
+                    "message": error_message
+                }
+            }
+        )
+
+    async def process_message(raw_data: str):
+        async with message_semaphore:
+            message = None
+            message_id = None
             try:
-                message = json.loads(data)
+                message = json.loads(raw_data)
+                message_id = message.get("id") if isinstance(message, dict) else None
                 logger.debug(f"Received message from {client_id}: {message}")
 
-                # 处理消息
                 response = await protocol_handler.handle_message(message, context)
 
                 if response:
-                    await websocket.send_json(response)
+                    async with send_lock:
+                        sent = await connection_manager.send_message(client_id, response)
+                        if not sent:
+                            return
 
-                    # 记录工具调用审计（如果是tools/call）
                     if message.get("method") == "tools/call":
                         await _log_tool_execution(
                             message, response, client_info, audit_logger
@@ -140,25 +162,31 @@ async def mcp_websocket_endpoint(
 
             except json.JSONDecodeError as e:
                 logger.error(f"Invalid JSON from {client_id}: {e}")
-                await websocket.send_json({
-                    "jsonrpc": "2.0",
-                    "id": None,
-                    "error": {
-                        "code": -32700,
-                        "message": "Parse error"
-                    }
-                })
+                await _safe_send_error(None, -32700, "Parse error")
 
             except Exception as e:
                 logger.error(f"Error handling message from {client_id}: {e}")
-                await websocket.send_json({
-                    "jsonrpc": "2.0",
-                    "id": message.get("id") if isinstance(message, dict) else None,
-                    "error": {
-                        "code": -32603,
-                        "message": "Internal error"
-                    }
-                })
+                await _safe_send_error(
+                    message_id,
+                    -32603,
+                    "Internal error"
+                )
+
+    def task_done(task: asyncio.Task):
+        active_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            logger.error(f"Unhandled error in MCP message processing: {exc}", exc_info=exc)
+
+    try:
+        # 消息循环
+        while True:
+            data = await websocket.receive_text()
+            task = asyncio.create_task(process_message(data))
+            active_tasks.add(task)
+            task.add_done_callback(task_done)
 
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected: {client_id}")
@@ -167,8 +195,13 @@ async def mcp_websocket_endpoint(
         logger.error(f"WebSocket error: {e}")
 
     finally:
+        for task in list(active_tasks):
+            task.cancel()
+        if active_tasks:
+            await asyncio.gather(*active_tasks, return_exceptions=True)
+
         # 清理
-        connection_manager.disconnect(client_id)
+        connection_manager.disconnect(client_id, websocket)
 
         logger.info(
             f"Active connections: {connection_manager.get_connection_count()}"
