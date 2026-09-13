@@ -663,7 +663,7 @@ class FakeVLMClient:
         self.enabled = bool(cfg is not None)
         self.max_tokens = 4096
 
-    def _call_image_prompt(self, image_path, prompt, max_tokens):
+    def _call_image_prompt(self, image_path, prompt, max_tokens, safe_errors=False):
         _ = image_path
         _ = max_tokens
         self.__class__.prompts.append(prompt)
@@ -871,7 +871,7 @@ def test_extract_page_tables_retries_truncated_detailed_json_with_compact_contra
             self.max_tokens = 16384
             self.last_call_info = {}
 
-        def _call_image_prompt(self, image_path, prompt, max_tokens):
+        def _call_image_prompt(self, image_path, prompt, max_tokens, safe_errors=False):
             _ = image_path
             self.__class__.calls.append((prompt, max_tokens))
             if len(self.__class__.calls) == 1:
@@ -1945,6 +1945,7 @@ def test_task_ocr_table_elements_preserve_source_cell_geometry_additively():
         "figures": [],
         "table_metadata": {
             "| 牌号 | 状态 | 规格 |\n| --- | --- | --- |\n| 20 | 正火 | ≤M22 |\n| 20 | 正火 | M24~M48 |": {
+                "table_classification": {"status": "not_run", "reason": "classification_not_run"},
                 "bbox": [0.05, 0.10, 0.95, 0.80],
                 "bbox_space": "normalized_page",
                 "columns": ["牌号", "状态", "规格"],

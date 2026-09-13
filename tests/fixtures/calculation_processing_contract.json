@@ -1,0 +1,335 @@
+{
+  "contract_version": "2",
+  "request": {
+    "table_kind_hint": "calculation_sheet",
+    "processing_mode": "organize_existing",
+    "context": {
+      "calculation_request": {
+        "identity": {
+          "tenant_id": "test-tenant",
+          "doc_id": "synthetic-document",
+          "version": 1,
+          "page_no": 2,
+          "table_pk": "synthetic-p2-table",
+          "layout_id": "p2-o001-table",
+          "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "existing_content": "Pressure p = MPa",
+        "adjacent_objects": []
+      }
+    }
+  },
+  "provider_response": {
+    "object_ref": "p2-o001-table",
+    "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "table_kind": "data_table",
+    "source_text": "Pressure p = MPa",
+    "classification_evidence": [
+      "Pressure p = MPa"
+    ],
+    "sections": [
+      {
+        "title": "Pressure",
+        "items": [
+          {
+            "kind": "input",
+            "name": "Pressure",
+            "symbol": "p",
+            "unit": "MPa",
+            "sources": [
+              "Pressure p = MPa"
+            ]
+          }
+        ]
+      }
+    ],
+    "unresolved": [],
+    "image_discrepancies": [],
+    "continuation": {
+      "status": "none",
+      "reason": "not_assessed_text_only"
+    }
+  },
+  "expected": {
+    "table_kind": "calculation_sheet",
+    "table_kind_source": "manual",
+    "content_format": "calculation_sheet_json",
+    "status": "needs_review",
+    "image_verified": false,
+    "logical_model_calls": 1
+  },
+  "mcp_response": {
+    "tool": "extract_page_tables",
+    "status": "needs_review",
+    "items": [
+      {
+        "table_kind": "calculation_sheet",
+        "table_kind_source": "manual",
+        "processing_mode": "organize_existing",
+        "manualReviewRequired": true,
+        "degraded": true,
+        "lookup_status": "unavailable",
+        "lookup_sections": [],
+        "continuation": {
+          "status": "none",
+          "reason": "not_assessed_text_only"
+        },
+        "calculation_identity": {
+          "tenant_id": "test-tenant",
+          "doc_id": "synthetic-document",
+          "version": 1,
+          "page_no": 2,
+          "table_pk": "synthetic-p2-table",
+          "layout_id": "p2-o001-table",
+          "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "layout_id": "p2-o001-table",
+        "existing_content": "Pressure p = MPa",
+        "content_format": "calculation_sheet_json",
+        "table_classification": {
+          "kind": "calculation_sheet",
+          "status": "manual_confirmed",
+          "reason": "manual_type_constraint",
+          "evidence": []
+        },
+        "calculation_sheet": {
+          "contract_version": "1",
+          "source_sha256": "c552e9650ee292f535d3077dcdbcb745d983f2b0b21d7c0014e20e75c13dda49",
+          "source_text": "Pressure p = MPa",
+          "sections": [
+            {
+              "title": "Pressure",
+              "items": [
+                {
+                  "id": "item-1",
+                  "kind": "input",
+                  "content": "Pressure p = MPa",
+                  "name": "Pressure",
+                  "symbol": "p",
+                  "latex": "",
+                  "unit": "MPa",
+                  "conditions": [],
+                  "checks": [],
+                  "references": [],
+                  "source": {
+                    "sha256": "c552e9650ee292f535d3077dcdbcb745d983f2b0b21d7c0014e20e75c13dda49",
+                    "text_ranges": [
+                      [
+                        0,
+                        16
+                      ]
+                    ],
+                    "layout_id": "p2-o001-table",
+                    "location_scope": "source_text"
+                  }
+                }
+              ]
+            }
+          ],
+          "unresolved": [],
+          "validation_status": "source_validated",
+          "quality_status": "needs_review",
+          "image_verified": false,
+          "diagnostics": [
+            "source_bound_not_image_verified",
+            "item_location_unresolved"
+          ],
+          "unmapped_character_count": 0,
+          "render_markdown": "| Item / step | Content |\n| --- | --- |\n| **Pressure** | |\n| Pressure | Pressure p = MPa |"
+        },
+        "calculation_source": {
+          "status": "available",
+          "sha256": "c552e9650ee292f535d3077dcdbcb745d983f2b0b21d7c0014e20e75c13dda49",
+          "text": "Pressure p = MPa",
+          "description_language": "unknown",
+          "origin": "existing_content"
+        }
+      }
+    ],
+    "tables": [
+      {
+        "table_kind": "calculation_sheet",
+        "table_kind_source": "manual",
+        "processing_mode": "organize_existing",
+        "manualReviewRequired": true,
+        "degraded": true,
+        "lookup_status": "unavailable",
+        "lookup_sections": [],
+        "continuation": {
+          "status": "none",
+          "reason": "not_assessed_text_only"
+        },
+        "calculation_identity": {
+          "tenant_id": "test-tenant",
+          "doc_id": "synthetic-document",
+          "version": 1,
+          "page_no": 2,
+          "table_pk": "synthetic-p2-table",
+          "layout_id": "p2-o001-table",
+          "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "layout_id": "p2-o001-table",
+        "existing_content": "Pressure p = MPa",
+        "content_format": "calculation_sheet_json",
+        "table_classification": {
+          "kind": "calculation_sheet",
+          "status": "manual_confirmed",
+          "reason": "manual_type_constraint",
+          "evidence": []
+        },
+        "calculation_sheet": {
+          "contract_version": "1",
+          "source_sha256": "c552e9650ee292f535d3077dcdbcb745d983f2b0b21d7c0014e20e75c13dda49",
+          "source_text": "Pressure p = MPa",
+          "sections": [
+            {
+              "title": "Pressure",
+              "items": [
+                {
+                  "id": "item-1",
+                  "kind": "input",
+                  "content": "Pressure p = MPa",
+                  "name": "Pressure",
+                  "symbol": "p",
+                  "latex": "",
+                  "unit": "MPa",
+                  "conditions": [],
+                  "checks": [],
+                  "references": [],
+                  "source": {
+                    "sha256": "c552e9650ee292f535d3077dcdbcb745d983f2b0b21d7c0014e20e75c13dda49",
+                    "text_ranges": [
+                      [
+                        0,
+                        16
+                      ]
+                    ],
+                    "layout_id": "p2-o001-table",
+                    "location_scope": "source_text"
+                  }
+                }
+              ]
+            }
+          ],
+          "unresolved": [],
+          "validation_status": "source_validated",
+          "quality_status": "needs_review",
+          "image_verified": false,
+          "diagnostics": [
+            "source_bound_not_image_verified",
+            "item_location_unresolved"
+          ],
+          "unmapped_character_count": 0,
+          "render_markdown": "| Item / step | Content |\n| --- | --- |\n| **Pressure** | |\n| Pressure | Pressure p = MPa |"
+        },
+        "calculation_source": {
+          "status": "available",
+          "sha256": "c552e9650ee292f535d3077dcdbcb745d983f2b0b21d7c0014e20e75c13dda49",
+          "text": "Pressure p = MPa",
+          "description_language": "unknown",
+          "origin": "existing_content"
+        }
+      }
+    ],
+    "model_calls": {
+      "glm_ocr": 0,
+      "vlm_ocr": 1
+    },
+    "budget": {
+      "logical_calls": 1,
+      "transport_retries_included": false
+    },
+    "warnings": [],
+    "table_content_quality": {
+      "complete": false,
+      "objects": [
+        {
+          "layout_id": "p2-o001-table",
+          "status": "needs_review",
+          "reason": "calculation_proposal_requires_review"
+        }
+      ]
+    },
+    "table_kind": "calculation_sheet",
+    "table_kind_source": "manual",
+    "processing_mode": "organize_existing",
+    "manualReviewRequired": true,
+    "degraded": true,
+    "lookup_status": "unavailable",
+    "lookup_sections": [],
+    "continuation": {
+      "status": "none",
+      "reason": "not_assessed_text_only"
+    },
+    "calculation_identity": {
+      "tenant_id": "test-tenant",
+      "doc_id": "synthetic-document",
+      "version": 1,
+      "page_no": 2,
+      "table_pk": "synthetic-p2-table",
+      "layout_id": "p2-o001-table",
+      "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "layout_id": "p2-o001-table",
+    "existing_content": "Pressure p = MPa",
+    "content_format": "calculation_sheet_json",
+    "table_classification": {
+      "kind": "calculation_sheet",
+      "status": "manual_confirmed",
+      "reason": "manual_type_constraint",
+      "evidence": []
+    },
+    "calculation_sheet": {
+      "contract_version": "1",
+      "source_sha256": "c552e9650ee292f535d3077dcdbcb745d983f2b0b21d7c0014e20e75c13dda49",
+      "source_text": "Pressure p = MPa",
+      "sections": [
+        {
+          "title": "Pressure",
+          "items": [
+            {
+              "id": "item-1",
+              "kind": "input",
+              "content": "Pressure p = MPa",
+              "name": "Pressure",
+              "symbol": "p",
+              "latex": "",
+              "unit": "MPa",
+              "conditions": [],
+              "checks": [],
+              "references": [],
+              "source": {
+                "sha256": "c552e9650ee292f535d3077dcdbcb745d983f2b0b21d7c0014e20e75c13dda49",
+                "text_ranges": [
+                  [
+                    0,
+                    16
+                  ]
+                ],
+                "layout_id": "p2-o001-table",
+                "location_scope": "source_text"
+              }
+            }
+          ]
+        }
+      ],
+      "unresolved": [],
+      "validation_status": "source_validated",
+      "quality_status": "needs_review",
+      "image_verified": false,
+      "diagnostics": [
+        "source_bound_not_image_verified",
+        "item_location_unresolved"
+      ],
+      "unmapped_character_count": 0,
+      "render_markdown": "| Item / step | Content |\n| --- | --- |\n| **Pressure** | |\n| Pressure | Pressure p = MPa |"
+    },
+    "calculation_source": {
+      "status": "available",
+      "sha256": "c552e9650ee292f535d3077dcdbcb745d983f2b0b21d7c0014e20e75c13dda49",
+      "text": "Pressure p = MPa",
+      "description_language": "unknown",
+      "origin": "existing_content"
+    }
+  }
+}

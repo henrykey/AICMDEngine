@@ -13,7 +13,13 @@ from .semantic_language import detect_description_language, description_mismatch
 KINDS = {'data_table', 'calculation_sheet', 'mixed', 'uncertain'}
 ITEM_KINDS = {'input', 'formula', 'branch', 'check', 'reference', 'note'}
 METADATA_KEYS = ('table_kind', 'table_classification', 'calculation_sheet', 'lookup_status',
-                 'lookup_sections', 'manualReviewRequired', 'degraded')
+                 'lookup_sections', 'manualReviewRequired', 'degraded', 'content_format',
+                 'table_kind_source', 'continuation')
+
+
+class PhysicalRequestBudgetExceeded(RuntimeError):
+    def __init__(self):
+        super().__init__('table_analysis_physical_budget_exhausted')
 
 
 class _SourceText(HTMLParser):
@@ -47,6 +53,12 @@ def source_context(content):
 
 
 def classification_prompt(include_items=True):
+    guidance = (
+        ' Blank input/result slots are intentional in calculation templates; do not fill them or mark them omitted. '
+        'A continuation containing only symbols or acceptance criteria can belong to a calculation sheet. '
+        'Return continuation_required=true when the image has a continuation marker or type needs adjacent context. '
+        'Fixed-axis formula lookup tables remain data_table even if the title says calculation. '
+    )
     classification = (
         " Classify each table from the IMAGE as table_kind=data_table|calculation_sheet|mixed|uncertain. "
         "Return classification_evidence as exact unique quotes from calculation_source.text only. "
@@ -55,8 +67,8 @@ def classification_prompt(include_items=True):
         "In this classification call do not extract calculation items; a dedicated call handles them. "
     )
     if not include_items:
-        return classification
-    return (
+        return classification + guidance
+    return guidance + (
         ' For each table also return table_kind=data_table|calculation_sheet|mixed|uncertain, '
         'classification_evidence=[exact quotes from calculation_source.text]. Classify using the IMAGE: '
         'a calculation_sheet organizes inputs, formulas, branches, checks and references; rules and '
@@ -106,25 +118,39 @@ def _render(sections, language="en"):
 def apply_calculation_sheet(item, candidate, content, description_language="unknown"):
     """Validate a single identity-matched VLM proposal; no model calls or source writes."""
     if 'table_kind' not in candidate:
+        item.setdefault('table_classification', {'status': 'not_run', 'reason': 'classification_not_run'})
         return
     ctx = source_context(content)
     ctx['description_language'] = description_language
     text = ctx['text']
     kind = candidate.get('table_kind')
     evidence = candidate.get('classification_evidence')
+    reason = None
     try:
-        if kind not in KINDS or not isinstance(evidence, list) or not 1 <= len(evidence) <= 20:
-            raise ValueError('classification_unresolved')
-        for quote in evidence:
-            _quote_range(text, quote)
         if ctx['status'] != 'available':
             raise ValueError(ctx['status'])
-    except (ValueError, TypeError):
+        if not isinstance(kind, str) or kind not in KINDS:
+            raise ValueError('classification_kind_invalid')
+        if not isinstance(evidence, list) or not 1 <= len(evidence) <= 20:
+            raise ValueError('classification_evidence_missing')
+        for quote in evidence:
+            if not isinstance(quote, str) or not quote.strip() or quote not in text:
+                raise ValueError('classification_evidence_mismatch')
+            if text.count(quote) != 1:
+                raise ValueError('classification_evidence_ambiguous')
+    except ValueError as exc:
+        reason = str(exc)
         kind = 'uncertain'
     item['table_kind'] = kind
+    item['table_kind_source'] = 'automatic'
     item['table_classification'] = {'kind': kind, 'status': 'unresolved' if kind == 'uncertain' else 'model_proposed',
                                     'evidence': deepcopy(evidence) if kind != 'uncertain' else [],
+                                    'proposed_kind': candidate.get('table_kind') if isinstance(candidate.get('table_kind'), str) and len(candidate['table_kind']) <= 32 else None,
                                     'source_sha256': ctx.get('sha256')}
+    if reason or kind == 'uncertain':
+        item['table_classification']['reason'] = reason or 'classification_model_uncertain'
+    if candidate.get('continuation_required') is True or kind == 'uncertain':
+        item['continuation'] = {'status': 'pending', 'reason': 'adjacent_context_required'}
     if kind == 'data_table':
         return
     item.update(lookup_status='unavailable', lookup_sections=[], manualReviewRequired=True, degraded=True)
@@ -136,9 +162,11 @@ def apply_calculation_sheet(item, candidate, content, description_language="unkn
     if 'tableRowsContent' in item:
         item['tableRowsContent'] = ''
     if kind != 'calculation_sheet':
-        item['table_classification']['reason'] = 'mixed_requires_partition' if kind == 'mixed' else 'classification_unresolved'
+        if kind == 'mixed':
+            item['table_classification']['reason'] = 'mixed_requires_partition'
         return
 
+    item['content_format'] = 'calculation_sheet_json'
     item['calculation_sheet'] = parse_calculation_sheet(candidate.get('calculation_sheet'), ctx, item)
 
 
@@ -184,7 +212,7 @@ def parse_calculation_sheet(raw, ctx, item):
                 ranges = [_quote_range(text, quote) for quote in quotes]
                 body = '\n'.join(quotes)
                 result = {'id': f'item-{item_count}', 'kind': entry['kind'], 'content': body}
-                for key in ('name', 'symbol', 'latex', 'unit'):
+                for key in ('name', 'symbol', 'latex', 'unit') + (('value',) if 'value' in entry else ()):
                     value = entry.get(key, '')
                     if not isinstance(value, str) or (value and not any(value in q for q in quotes)):
                         raise ValueError('formula_source_mismatch' if key == 'latex' else 'field_source_mismatch')
@@ -243,6 +271,17 @@ def parse_calculation_sheet(raw, ctx, item):
         sheet['validation_status'] = 'source_validated'
     sheet['render_markdown'] = _render(sheet['sections'], language)
     return sheet
+
+
+def classification_failed(item, reason, content=None):
+    """Failed automatic classification cannot silently become a queryable legacy table."""
+    if item.get('table_kind_source') == 'manual':
+        return
+    apply_calculation_sheet(item, {'table_kind': 'uncertain', 'classification_evidence': []},
+                            content if content is not None else str(item.get('raw_html') or item.get('markdown') or ''))
+    item['table_classification']['reason'] = reason
+    item.pop('calculation_sheet', None)
+    item.pop('content_format', None)
 
 
 def table_content_quality(items):

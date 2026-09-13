@@ -129,7 +129,7 @@ def test_vlm_prompt_has_object_structure_names_and_own_context(monkeypatch):
     from tests.test_pdf2md_enhanced_object_recovery import VLMClient
     client = VLMClient({'enabled': True, 'model': 'mock', 'description_language': 'zh'})
     requests = []
-    def call(image_path, prompt, max_tokens):
+    def call(image_path, prompt, max_tokens, safe_errors=False):
         requests.append(prompt)
         return '{"formulas":[]}'
     monkeypatch.setattr(client, '_call_image_prompt', call)

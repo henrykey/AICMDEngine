@@ -34,6 +34,7 @@
 
 - PDF2MD query enhancement offline contracts: `.venv/bin/python -m pytest -q --no-cov tests/test_pdf2md_enhanced_table_query.py` (synthetic fixtures, provider stubs).
 - PDF2MD calculation-sheet offline contracts: `.venv/bin/python -m pytest -q --no-cov tests/test_pdf2md_calculation_sheet.py` (source-bound fixtures and provider stubs).
+- PDF2MD calculation processing/continuation offline contracts: `.venv/bin/python -m pytest -q --no-cov tests/test_pdf2md_calculation_processing.py` (shared synthetic fixture, identity/mode/budget and image transport stubs).
 
 ## Commit & Pull Request Guidelines
 - Commit history is lightweight and sentence-case (e.g., "Release v1.0.0..."). Keep summaries short and clear.

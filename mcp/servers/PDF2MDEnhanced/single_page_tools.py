@@ -3,11 +3,13 @@ from __future__ import annotations
 from .calculation_sheet import (
     METADATA_KEYS, apply_calculation_sheet, classification_prompt,
     source_context, table_content_quality, complete_calculation_batch, calculation_budget,
+    classification_failed,
 )
 
 from .semantic_language import detect_description_language, normalize_language, validate_descriptions
 
 import base64
+from copy import deepcopy
 import hashlib
 import html
 import json
@@ -85,7 +87,16 @@ def extract_page_tables_direct(
     routing_config: Optional[Dict[str, Any]] = None,
     context: Optional[Dict[str, Any]] = None,
     query_enhancement: Optional[Dict[str, Any]] = None,
+    table_kind_hint: str = "auto",
+    processing_mode: str = "auto",
 ) -> str:
+    if table_kind_hint != "auto" or processing_mode != "auto" or isinstance(context, dict) and "calculation_request" in context:
+        if query_enhancement is not None or output_format != "json":
+            raise ValueError("calculation processing requires JSON output and no query enhancement")
+        return json.dumps(_process_calculation_request(
+            context or {}, table_kind_hint, processing_mode, describe, vlm_config or _vlm_ocr_config(ocr_config),
+            description_language, file_path, file_data, file_url, page_no, input_type, routing_config,
+        ), ensure_ascii=False)
     if query_enhancement is not None:
         from .table_query import enhance_table
 
@@ -110,6 +121,92 @@ def extract_page_tables_direct(
         context=context,
     )
     return _serialize_result(result, output_format)
+
+
+def _process_calculation_request(context, hint, mode, describe, vlm_config, language,
+                                 file_path, file_data, file_url, page_no, input_type, routing_config):
+    from .calculation_processing import initial_item, process_request, result_for, validate_request
+    request = context.get("calculation_request")
+    item = initial_item(request, hint, mode)
+    try:
+        validate_request(request, hint, mode)
+    except ValueError as exc:
+        return result_for(item, reason=str(exc))
+    if not describe:
+        return result_for(item, reason="classification_not_run")
+    try:
+        vlm = DynamicVLMClient({**(vlm_config or {}), "description_language": language,
+                                "_calculation_processing": mode})
+    except Exception as exc:
+        return result_for(item, reason='invalid_physical_model_budget' if isinstance(exc, ValueError)
+                          and str(exc) == 'invalid_physical_model_budget' else "calculation_provider_unavailable")
+    if calculation_budget(vlm) == 0:
+        return result_for(item, reason="table_analysis_budget_exhausted")
+    if getattr(vlm, 'physical_request_limit', None) == 0:
+        return process_request(request, hint, mode, vlm)
+    if mode == "organize_existing":
+        result = process_request(request, hint, mode, vlm)
+    else:
+        bbox = request.get("bbox")
+        cropped = context.get("object_crop") is True
+        if not cropped:
+            from .layout_ledger import reliable_normalized_bbox
+            if not reliable_normalized_bbox({"bbox": bbox, "bbox_space": "normalized_page"}):
+                return result_for(item, reason="calculation_object_region_required")
+        with tempfile.TemporaryDirectory(prefix="pdf2md_calculation_") as directory:
+            try:
+                ctx = _prepare_context(Path(directory), file_path, file_data, file_url, page_no, input_type, routing_config)
+                if not cropped:
+                    if (ctx.page_no != request['identity']['page_no'] or ctx.input_type != 'pdf'
+                            or hashlib.sha256(Path(ctx.source_path).read_bytes()).hexdigest() != request['identity']['source_sha256']):
+                        return result_for(item, reason="calculation_identity_mismatch")
+                    with fitz.open(ctx.image_path) as image_doc:
+                        page = image_doc[0]; rect = page.rect
+                        clip = fitz.Rect(bbox[0]*rect.width, bbox[1]*rect.height, bbox[2]*rect.width, bbox[3]*rect.height)
+                        selected = Path(directory) / 'selected.png'
+                        page.get_pixmap(clip=clip).save(selected)
+                        ctx.image_path = str(selected)
+                images = []
+                for index, obj in enumerate(request.get('adjacent_objects', [])):
+                    data = obj.get('image_data')
+                    if data is None:
+                        images.append(None)
+                        continue
+                    if not isinstance(data, str) or len(data) > 4*((8*1024*1024+2)//3):
+                        return result_for(item, reason="adjacent_image_invalid")
+                    try:
+                        decoded = base64.b64decode(data, validate=True)
+                    except ValueError:
+                        return result_for(item, reason="adjacent_image_invalid")
+                    if len(decoded) > 8*1024*1024:
+                        return result_for(item, reason="adjacent_image_invalid")
+                    if not (decoded.startswith(b'\x89PNG\r\n\x1a\n') or decoded.startswith(b'\xff\xd8\xff')
+                            or decoded.startswith(b'RIFF') and decoded[8:12] == b'WEBP'):
+                        return result_for(item, reason="adjacent_image_invalid")
+                    path = Path(directory) / f'adjacent-{index}.image'
+                    path.write_bytes(decoded)
+                    images.append(str(path))
+                result = process_request(request, hint, mode, vlm, ctx.image_path,
+                                         images if all(images) else None)
+                result['items'][0].setdefault('calculation_source', {}).update(
+                    image_sha256=hashlib.sha256(Path(ctx.image_path).read_bytes()).hexdigest(),
+                    image_scope='object_crop', original_bbox=bbox if not cropped else None)
+            except Exception:
+                return result_for(item, reason="source_image_unavailable")
+    table = result['items'][0]
+    if table.get('table_kind') == 'data_table' and table.get('markdown') and result['status'] != 'failed':
+        table.update(_normalize_table_contract(table['markdown'], 'structured_json'))
+        table.pop('lookup_status', None)
+        table.pop('lookup_sections', None)
+        result.pop('lookup_status', None)
+        result.pop('lookup_sections', None)
+    # Item geometry is relative to the isolated object image, never silently page coordinates.
+    for section in table.get('calculation_sheet', {}).get('sections', []):
+        for entry in section['items']:
+            if mode != 'organize_existing':
+                entry['source']['bbox_space'] = 'normalized_object'
+    result.update({k: deepcopy(v) for k, v in table.items() if k not in ('reason',)})
+    return result
 
 
 def extract_page_formulas_direct(
@@ -793,9 +890,12 @@ def _enrich_table_metadata_with_vlm(
             ctx.image_path,
             _prompt_table_metadata(items, ctx.page_text, description_language),
             max_tokens=min(vlm.max_tokens, 16384),
+            safe_errors=True,
         )
         if getattr(vlm, "last_call_info", {}).get("finish_reason") in {"length", "content_filter", "tool_calls"}:
             warnings.append("table_classification_response_incomplete")
+            for item in items:
+                classification_failed(item, 'table_classification_response_incomplete')
             return
         metadata = _parse_table_metadata_response(raw)
         if metadata:
@@ -805,8 +905,13 @@ def _enrich_table_metadata_with_vlm(
                  for index, item in enumerate(items)], model_calls['vlm_ocr'])
         else:
             warnings.append("vlm_ocr_returned_no_table_metadata")
+            for item in items:
+                classification_failed(item, 'classification_response_invalid')
     except Exception as exc:
-        warnings.append(f"vlm_ocr_table_metadata_failed: {exc}")
+        reason = 'source_image_unavailable' if isinstance(exc, FileNotFoundError) else 'calculation_provider_failed'
+        warnings.append("vlm_ocr_table_metadata_failed")
+        for item in items:
+            classification_failed(item, reason)
 
 
 def _fill_local_table_descriptions(items: List[Dict[str, Any]], description_language: str) -> None:

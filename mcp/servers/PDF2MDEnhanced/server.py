@@ -174,6 +174,8 @@ async def extract_page_tables(
     routing_config: Optional[Dict[str, Any]] = None,
     context: Optional[Dict[str, Any]] = None,
     query_enhancement: Optional[Dict[str, Any]] = None,
+    table_kind_hint: str = "auto",
+    processing_mode: str = "auto",
 ) -> str:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
@@ -193,6 +195,8 @@ async def extract_page_tables(
             routing_config=routing_config,
             context=context,
             query_enhancement=query_enhancement,
+            table_kind_hint=table_kind_hint,
+            processing_mode=processing_mode,
         ),
     )
 

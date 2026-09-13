@@ -11,6 +11,57 @@ cs = importlib.import_module(sp.__package__ + '.calculation_sheet')
 HTML = '<table><tr><td rowspan="14">Inputs</td><td>Pressure p MPa</td></tr><tr><td>Calculation</td><td>Force $F=pA$ N</td></tr><tr><td>Check</td><td>When p&gt;0, F&lt;10</td></tr></table>'
 
 
+@pytest.mark.parametrize('patch,reason', [
+    ({'table_kind': 'invalid'}, 'classification_kind_invalid'),
+    ({'classification_evidence': []}, 'classification_evidence_missing'),
+    ({'classification_evidence': ['foreign']}, 'classification_evidence_mismatch'),
+    ({'table_kind': 'uncertain'}, 'classification_model_uncertain'),
+])
+def test_classification_diagnostics_distinguish_model_and_validation(patch, reason):
+    candidate = proposal(); candidate.update(patch); item = {}
+    cs.apply_calculation_sheet(item, candidate, HTML)
+    assert item['table_classification']['reason'] == reason
+    assert item['table_classification']['proposed_kind'] == candidate['table_kind']
+
+
+def test_ambiguous_classification_quote_has_own_diagnostic():
+    item = {}
+    cs.apply_calculation_sheet(item, {'table_kind': 'calculation_sheet',
+                                    'classification_evidence': ['p']}, 'p p')
+    assert item['table_classification']['reason'] == 'classification_evidence_ambiguous'
+
+
+def test_legacy_classification_is_not_reported_as_success():
+    item = {}
+    cs.apply_calculation_sheet(item, {}, 'Pressure')
+    assert 'table_kind' not in item
+    assert item['table_classification']['reason'] == 'classification_not_run'
+
+
+def test_organize_existing_rpc_honors_manual_type_without_reading_images(monkeypatch):
+    from pathlib import Path
+    fixture = json.loads((Path(__file__).parent / 'fixtures/calculation_processing_contract.json').read_text())
+    class VLM:
+        enabled = True
+        table_analysis_max_model_calls = 2
+        last_call_info = {}
+        def extract_calculation_sheet(self, image_path, target):
+            assert image_path is None
+            assert target['processing_mode'] == 'organize_existing'
+            return copy.deepcopy(fixture['provider_response'])
+    monkeypatch.setattr(sp, 'DynamicVLMClient', lambda *_: VLM())
+    monkeypatch.setattr(sp, '_prepare_context', lambda *a, **k: pytest.fail('organize must not read an image'))
+    result = json.loads(sp.extract_page_tables_direct(**fixture['request']))
+    assert result['status'] == 'needs_review'
+    assert result['table_kind'] == 'calculation_sheet'
+    assert result['table_kind_source'] == 'manual'
+    assert result['calculation_identity'] == fixture['request']['context']['calculation_request']['identity']
+    assert result['calculation_sheet']['image_verified'] is False
+    assert result['calculation_sheet']['sections'][0]['items'][0]['content'] == 'Pressure p = MPa'
+    assert result['model_calls']['vlm_ocr'] == 1
+    assert result == fixture['mcp_response']
+
+
 def proposal(content=HTML):
     return {'table_kind': 'calculation_sheet', 'classification_evidence': ['Force $F=pA$ N'],
             'calculation_sheet': {'sections': [

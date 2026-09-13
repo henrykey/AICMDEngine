@@ -99,7 +99,62 @@ view through a legacy consumer that treats any nonempty table rows as queryable.
 Bounds: at most 100000 source characters, 200000 serialized proposal characters,
 100 sections, 500 items, 50 source quotes per item, and 20 classification quotes.
 Uncertain/mixed objects preserve source and require review; automatic mixed-region
-partitioning and cross-page calculation chaining are outside this first version.
+partitioning remains out of scope. The explicit processing extension below supplies
+bounded cross-page proposals without database writes.
+
+## Explicit processing extension (2026-09-13)
+
+The existing `extract_page_tables` tool accepts `table_kind_hint` and
+`processing_mode`, with a validated `context.calculation_request`. See the
+[frozen wire contract](../../../docs/plans/2026-09-13-calculation-sheet-mcp-contract-draft.md)
+and the shared `tests/fixtures/calculation_processing_contract.json` fixture.
+
+`organize_existing` uses only supplied text and one explicit text-model call.
+`reextract` reads one isolated object image, with a manual type constraint.
+`auto` performs image classification and item extraction; uncertain/continuation
+results may receive one joint review with at most one object from each adjacent
+page, using base64 `image_data`. Both calls share the existing logical budget.
+Without context or remaining budget the relation stays pending. Legacy upload and
+single-page semantic responses can request this follow-up through `continuation`;
+Membership must provide identities/context and perform the automatic scheduling.
+
+The current image is either a caller-authorized object crop (`object_crop=true`)
+or a region (`calculation_request.bbox`) cropped from a full PDF whose SHA-256 and
+page number are checked. For incoming crops, Membership must verify the original
+PDF identity before dispatch; the MCP cannot reconstruct a whole PDF hash from an
+object image. The returned `image_sha256` identifies the actual processed crop.
+Item geometry from this extension is `normalized_object`, not page coordinates.
+Text-only organization removes model-proposed image geometry altogether.
+
+Classification type and content validation remain separate. Manual type is never
+overwritten by model output; incomplete items retain calculation-sheet type and
+review quality. Optional item `value` is a source-bound string, retaining original
+precision or an intentional empty value. All model transcriptions remain
+`image_verified=false`. Ordinary tables use existing normalization; calculation
+JSON never requires a grid. Type evidence diagnostics now distinguish invalid kind,
+missing/mismatched/ambiguous evidence and model uncertainty. Missing legacy type
+is explicitly `classification_not_run`, preserving the old type default.
+
+Every validated identity is echoed on the selected item and response root. Results
+are `needs_review` or `failed`, retain the selected object and supplied content,
+and never publish. Foreign/duplicate identities, invalid scope and changed table
+numbers cannot become authoritative relations. Joint review also returns separate
+adjacent classifications and proposed next-page relations without copying items.
+Generic model outputs cannot assert manual provenance or trusted document identity.
+
+The configured logical budget does not count provider retries/fallbacks as
+separate logical calls. For the new processing entry only, a separate HTTPX
+pre-send hook enforces the physical cap (normally 2 for text organization and 4
+for automatic/image processing). It counts redirects and all fallback attempts;
+SDK and outer retries are disabled. `table_analysis_max_physical_requests` may
+lower, but not raise, that cap. Response budget fields report actual attempted
+sends and the cap. A follow-up RPC receives a new budget and must consume its
+reserved allowance in Membership's run manifest. Legacy client behavior is
+unchanged. Provider timeouts/errors are safe diagnostic
+codes, not transcripts. Cancellation propagates where received; cancellation of
+an executor-backed RPC cannot forcibly abort an already in-flight synchronous
+provider request. No MCP path writes to Membership or publishes a late result;
+Membership must keep its existing task/version cancellation protection.
 
 ## Validation
 
@@ -107,6 +162,7 @@ Offline regression command:
 
 ```sh
 .venv/bin/python -m pytest -q --no-cov tests/test_pdf2md_calculation_sheet.py
+.venv/bin/python -m pytest -q --no-cov tests/test_pdf2md_calculation_processing.py
 ```
 
 Offline tests do not prove VLM recognition, formula fidelity, deployment or Membership

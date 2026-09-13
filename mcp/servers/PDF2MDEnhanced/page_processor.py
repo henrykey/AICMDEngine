@@ -3,6 +3,7 @@ from __future__ import annotations
 from .calculation_sheet import (
     METADATA_KEYS, apply_calculation_sheet, source_context,
     table_content_quality, complete_calculation_batch, calculation_budget,
+    classification_failed,
 )
 
 from .semantic_language import validate_descriptions
@@ -2377,8 +2378,16 @@ def _enrich_upload_semantics(
             response = vlm.extract_region_structured(image_path, semantic_objects=table_targets)
             if getattr(vlm, "last_call_info", {}).get("finish_reason") not in {"length", "content_filter", "tool_calls"}:
                 merge(response, table_targets)
+            else:
+                for target in table_targets:
+                    _, content, metadata = destinations[target['object_ref']]
+                    classification_failed(metadata, 'table_classification_response_incomplete', content)
         except Exception as exc:
             logger.warning("upload table semantics unavailable: error_type=%s", type(exc).__name__)
+            for target in table_targets:
+                _, content, metadata = destinations[target['object_ref']]
+                classification_failed(metadata, 'source_image_unavailable' if isinstance(exc, FileNotFoundError)
+                                      else 'calculation_provider_failed', content)
     calls += complete_calculation_batch(vlm, image_path,
         [(destinations[target['object_ref']][2], destinations[target['object_ref']][1], target['object_ref'])
          for target in table_targets], table_calls)
@@ -2636,6 +2645,11 @@ def _normalize_structured(value: Any) -> Dict[str, Any]:
                 continue
             if value is not None and not (key in METADATA_KEYS and key in metadata):
                 metadata[key] = value
+        if 'table_kind_source' in metadata:
+            metadata['table_kind_source'] = 'automatic'
+        if 'continuation' in metadata:
+            # Generic model output has no validated Membership identity/context.
+            metadata['continuation'] = {'status': 'pending', 'reason': 'adjacent_context_required'}
         if metadata:
             for table in normalized_tables:
                 table_metadata[table] = metadata
