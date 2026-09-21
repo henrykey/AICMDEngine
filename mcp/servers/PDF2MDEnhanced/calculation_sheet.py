@@ -44,7 +44,10 @@ def source_context(content):
     if not isinstance(content, str) or len(content) > 100000:
         return {'status': 'input_budget_exceeded', 'text': ''}
     if re.search(r'<(?:table|td|th)\b', content, re.I):
-        parser = _SourceText(); parser.feed(content)
+        # Mathematical comparisons are text, not HTML tags (for example $S<S_a$).
+        math_pattern = r'\$\$[\s\S]*?\$\$|(?<!\\)\$(?:\\.|[^$\\])+\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]'
+        protected = re.sub(math_pattern, lambda match: match.group().replace('<', '&lt;').replace('>', '&gt;'), content)
+        parser = _SourceText(); parser.feed(protected)
         text = ''.join(parser.parts)
     else:
         text = content
@@ -190,7 +193,7 @@ def parse_calculation_sheet(raw, ctx, item):
     if not isinstance(sections, list) or not 1 <= len(sections) <= 100:
         issue('invalid_calculation_sheet'); return sheet
     item_count = 0
-    for section in sections:
+    for section_index, section in enumerate(sections):
         if (not isinstance(section, dict) or not isinstance(section.get('title'), str)
                 or not isinstance(section.get('items'), list) or not section['items']):
             issue('invalid_calculation_section'); continue
@@ -199,13 +202,15 @@ def parse_calculation_sheet(raw, ctx, item):
             continue
         output = {'title': section['title'], 'items': []}
         sheet['sections'].append(output)
-        for entry in section['items']:
+        for item_index, entry in enumerate(section['items']):
             item_count += 1
             if item_count > 500:
                 issue('input_budget_exceeded'); break
+            field = 'kind'
             try:
                 if not isinstance(entry, dict) or entry.get('kind') not in ITEM_KINDS:
                     raise ValueError('invalid_calculation_item')
+                field = 'sources'
                 quotes = entry.get('sources')
                 if not isinstance(quotes, list) or not 1 <= len(quotes) <= 50:
                     raise ValueError('invalid_source_reference')
@@ -213,12 +218,15 @@ def parse_calculation_sheet(raw, ctx, item):
                 body = '\n'.join(quotes)
                 result = {'id': f'item-{item_count}', 'kind': entry['kind'], 'content': body}
                 for key in ('name', 'symbol', 'latex', 'unit') + (('value',) if 'value' in entry else ()):
+                    field = key
                     value = entry.get(key, '')
                     if not isinstance(value, str) or (value and not any(value in q for q in quotes)):
                         raise ValueError('formula_source_mismatch' if key == 'latex' else 'field_source_mismatch')
                     result[key] = value
+                field = 'name'
                 if not result['name'].strip():
                     raise ValueError('item_name_missing')
+                field = 'latex'
                 if result['latex']:
                     reason, _ = validate_recovered_object({'type': 'formula', 'layout_id': 'item'},
                         {'type': 'formula', 'layout_id': 'item', 'status': 'EXTRACTED',
@@ -226,19 +234,24 @@ def parse_calculation_sheet(raw, ctx, item):
                     if reason:
                         raise ValueError(reason)
                 for key in ('conditions', 'checks', 'references'):
+                    field = key
                     values = entry.get(key, [])
                     if not isinstance(values, list) or not all(isinstance(v, str) and v and any(v in q for q in quotes) for v in values):
                         raise ValueError('field_source_mismatch')
                     result[key] = deepcopy(values)
+                field = 'latex'
                 if entry['kind'] in {'formula', 'branch'} and not result['latex']:
                     raise ValueError('formula_missing')
+                field = 'conditions'
                 if entry['kind'] == 'branch' and not result['conditions']:
                     raise ValueError('conditions_missing')
+                field = 'checks'
                 if entry['kind'] == 'check' and not result['checks']:
                     raise ValueError('checks_missing')
                 result['source'] = {'sha256': ctx['sha256'], 'text_ranges': [list(r) for r in ranges],
                                     **{k: deepcopy(item[k]) for k in ('layout_id', 'bbox', 'bbox_space') if k in item},
                                     'location_scope': 'table'}
+                field = 'bbox'
                 bbox = entry.get('bbox')
                 if bbox:
                     parent = item.get('bbox', [0, 0, 1, 1])
@@ -257,11 +270,28 @@ def parse_calculation_sheet(raw, ctx, item):
                     covered[start:end] = b'\1' * (end - start)
                 output['items'].append(result)
             except (ValueError, TypeError) as exc:
-                issue(str(exc) if isinstance(exc, ValueError) else 'invalid_calculation_item')
+                reason = str(exc) if isinstance(exc, ValueError) else 'invalid_calculation_item'
+                issue(reason)
+                sheet.setdefault('rejected_items', []).append({
+                    'section_index': section_index, 'section_title': section['title'],
+                    'item_index': item_index, 'field': field,
+                    'reason': reason, 'candidate': deepcopy(entry),
+                })
     missing = [i for i, char in enumerate(text) if not covered[i] and not char.isspace()]
     sheet['unmapped_character_count'] = len(missing)
     if missing:
         issue('unmapped_source_text')
+        ranges = []
+        start = None
+        for index in range(len(text) + 1):
+            if index < len(text) and not covered[index]:
+                if start is None:
+                    start = index
+            elif start is not None:
+                if text[start:index].strip():
+                    ranges.append([start, index])
+                start = None
+        sheet['unmapped_ranges'] = ranges
     if raw.get('unresolved') != []:
         issue('model_reported_unresolved')
     if raw.get('image_discrepancies') != []:

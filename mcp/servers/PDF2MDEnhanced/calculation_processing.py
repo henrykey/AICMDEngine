@@ -87,7 +87,8 @@ def _read_response(item, response, identity, hint, mode, language):
     content = item.get('existing_content', '') if mode == 'organize_existing' else response.get('source_text')
     if not isinstance(content, str) or not content.strip() or len(content) > 100000:
         raise ValueError('calculation_source_missing')
-    if mode == 'organize_existing' and response.get('source_text', content) != content:
+    ctx = source_context(content); ctx['description_language'] = language
+    if mode == 'organize_existing' and response.get('source_text') != ctx['text']:
         raise ValueError('calculation_source_rewritten')
     if mode == 'organize_existing':
         response = deepcopy(response)
@@ -97,7 +98,6 @@ def _read_response(item, response, identity, hint, mode, language):
             for entry in section['items']:
                 if isinstance(entry, dict):
                     entry.pop('bbox', None)
-    ctx = source_context(content); ctx['description_language'] = language
     if hint == 'auto':
         apply_calculation_sheet(item, {**response, 'calculation_sheet': response}, content, language)
     else:
@@ -111,6 +111,7 @@ def _read_response(item, response, identity, hint, mode, language):
         item['calculation_source']['origin'] = 'image_transcription'
     else:
         item['calculation_source']['origin'] = 'existing_content'
+        item['calculation_source']['original_content'] = content
         for section in item.get('calculation_sheet', {}).get('sections', []):
             for entry in section['items']:
                 entry['source']['location_scope'] = 'source_text'
@@ -172,6 +173,10 @@ def process_request(request, hint, mode, vlm, image_path=None, adjacent_images=N
         target = {'object_ref': identity['layout_id'], 'source_sha256': identity['source_sha256'],
                   'processing_mode': mode, 'table_kind_hint': hint,
                   'existing_content': request.get('existing_content', '')}
+        if mode == 'organize_existing':
+            target['source_text'] = source_context(request['existing_content'])['text']
+            if not target['source_text'].strip():
+                return finish('calculation_source_missing')
         if mode != 'organize_existing' and not image_path:
             return finish('source_image_unavailable')
         calls += 1

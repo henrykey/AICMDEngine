@@ -128,3 +128,20 @@ wrong scope/hash, missing image/context, predecessor proposal versus conflict,
 out-of-order arrival, empty template fields, model failure, budget exhaustion and
 late-result rejection in Membership. Synthetic content avoids committing source
 documents or model transcripts.
+
+
+## 2026-09-21 organization-source clarification
+
+For `organize_existing`, `existing_content` is the original representation only (HTML,
+Markdown or source cells), never a serialized wrapper of title, metadata and content.
+The processing coordinator computes `target.source_text` with the existing deterministic
+`source_context` function before calling the provider. The model must echo that exact
+citation text and bind all fields/quotes to it. The validator uses the same citation text;
+it does not compare normalized citations to raw HTML. Actual text rewrites and foreign
+identities remain rejected. `calculation_source.original_content` preserves the raw input
+and its existing SHA256 alongside the citation text; no image-verification claim is added.
+This changes the internal provider prompt contract, not the external processing modes or
+identity fields. Deploy the corresponding coordinator and VLM prompt together.
+Membership retains source content on generated drafts, treats zero valid calculation items
+as a validation failure, preserves previous drafts and exposes the latest attempt separately.
+Text-only organization does not clear an existing continuation decision/proposal.

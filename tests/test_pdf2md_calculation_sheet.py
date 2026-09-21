@@ -357,3 +357,28 @@ def test_generated_group_title_obeys_requested_language():
 
 def test_chinese_two_column_labels():
     assert cs._render([], 'zh').startswith('| 项目／步骤 | 内容 |')
+
+
+@pytest.mark.parametrize('formula', [r'$x<y$', r'$$S<S_a$$', r'\(x<y\)', r'\[S<S_a\]'])
+def test_source_context_preserves_math_comparisons_inside_html(formula):
+    content = '<table><tr><td>Criteria</td><td>' + formula + '</td></tr></table>'
+    ctx = cs.source_context(content)
+    assert formula in ctx['text']
+    assert '<td>' not in ctx['text']
+
+
+def test_rejected_calculation_item_retains_candidate_and_failed_field():
+    p = proposal(); p['calculation_sheet']['sections'][1]['items'][0]['latex'] = 'F=p/A'
+    item = {}
+    cs.apply_calculation_sheet(item, p, HTML)
+    sheet = item['calculation_sheet']
+    rejected = sheet['rejected_items'][0]
+    assert rejected['section_index'] == 1
+    assert rejected['section_title'] == 'Calculation'
+    assert rejected['item_index'] == 0
+    assert rejected['field'] == 'latex'
+    assert rejected['reason'] == 'formula_source_mismatch'
+    assert rejected['candidate']['latex'] == 'F=p/A'
+    assert all(x.get('latex') != 'F=p/A' for section in sheet['sections'] for x in section['items'])
+    assert sheet['unmapped_ranges']
+    assert sheet['validation_status'] == 'unresolved'

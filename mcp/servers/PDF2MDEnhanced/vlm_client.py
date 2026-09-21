@@ -431,6 +431,8 @@ class DynamicVLMClient:
             'For calculation_sheet, sections=[{title:"",items:[{kind:"input|formula|branch|check|reference|note",'
             'name:"",symbol:"",value:"",latex:"",unit:"",sources:["exact unique source_text quote"],conditions:[],checks:[],references:[],bbox:[]}]}]. '
             'Every name/symbol/value/latex/unit/condition/check/reference must occur literally in its cited source quote; '
+            'Each item needs a nonempty name copied from its quote. For an unnamed equation use its exact symbol or equation as name, never invent a descriptive label. '
+            'For repeated formulas quote sufficient surrounding source text to identify a unique occurrence. '
             'cover all transcribed non-whitespace source characters or report omissions in unresolved. '
             'Formula and branch items require latex; branch requires conditions; check requires checks. '
             'Item bbox is normalized to the CURRENT object crop, or [] if unclear. Embedded diagrams stay '
@@ -449,8 +451,8 @@ class DynamicVLMClient:
             'NEVER copy adjacent text/items into current source_text or sections. '
         )
         if mode == 'organize_existing':
-            prompt += ('No image is supplied. source_text must equal existing_content exactly. Organize ONLY '
-                       'existing_content; do not claim to recover missing content or to verify an image. '
+            prompt += ('No image is supplied. Copy target.source_text exactly into source_text. All sources and fields must quote target.source_text, not raw HTML. Organize ONLY '
+                       'that citation text; existing_content is the preserved original representation. Do not rewrite formulas or claim to recover missing content or verify an image. '
                        'Return continuation={status:"none"}, reviewed_objects=[], image_discrepancies=[]. ')
         else:
             prompt += ('Transcribe only the current object image into source_text, then derive its items from '

@@ -401,3 +401,35 @@ def test_physical_budget_cannot_exceed_processing_cap(limit):
     out = json.loads(sp.extract_page_tables_direct(**fixture()['request'],
                     vlm_config={'table_analysis_max_physical_requests': limit}))
     assert out['reason'] == 'invalid_physical_model_budget'
+
+@pytest.mark.parametrize('content', [
+    '<table><tr><td>Pressure</td><td>p = \\frac{F}{A} &amp; q</td></tr></table>',
+    '| Pressure | p = \\frac{F}{A} |\n| --- | --- |',
+    '  Pressure p = \\frac{F}{A}\n\n  Blank =   ',
+])
+def test_organizer_uses_one_citation_text_and_preserves_raw_source(content):
+    req = request(); req['existing_content'] = content
+    text = cp.source_context(content)['text']
+    vlm = Provider(response(req['identity'], text))
+    out = cp.process_request(req, 'calculation_sheet', 'organize_existing', vlm)
+    assert out['status'] == 'needs_review'
+    assert vlm.calls[0][1]['source_text'] == text
+    assert out['calculation_source']['original_content'] == content
+    assert out['calculation_sheet']['source_text'] == text
+    assert len(out['calculation_sheet']['sections'][0]['items']) == 1
+
+
+def test_organizer_rejects_changes_to_citation_text_without_retry():
+    req = request(); req['existing_content'] = '<table><td>Pressure</td></table>'
+    vlm = Provider(response(req['identity'], 'Pressure changed'))
+    out = cp.process_request(req, 'calculation_sheet', 'organize_existing', vlm)
+    assert out['reason'] == 'calculation_source_rewritten'
+    assert len(vlm.calls) == 1
+
+
+def test_empty_html_organization_does_not_call_provider():
+    req = request(); req['existing_content'] = '<table><tr><td> </td></tr></table>'
+    vlm = Provider()
+    out = cp.process_request(req, 'calculation_sheet', 'organize_existing', vlm)
+    assert out['reason'] == 'calculation_source_missing'
+    assert not vlm.calls

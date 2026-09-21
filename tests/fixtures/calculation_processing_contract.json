@@ -142,7 +142,8 @@
           "sha256": "c552e9650ee292f535d3077dcdbcb745d983f2b0b21d7c0014e20e75c13dda49",
           "text": "Pressure p = MPa",
           "description_language": "unknown",
-          "origin": "existing_content"
+          "origin": "existing_content",
+          "original_content": "Pressure p = MPa"
         }
       }
     ],
@@ -227,7 +228,8 @@
           "sha256": "c552e9650ee292f535d3077dcdbcb745d983f2b0b21d7c0014e20e75c13dda49",
           "text": "Pressure p = MPa",
           "description_language": "unknown",
-          "origin": "existing_content"
+          "origin": "existing_content",
+          "original_content": "Pressure p = MPa"
         }
       }
     ],
@@ -329,7 +331,8 @@
       "sha256": "c552e9650ee292f535d3077dcdbcb745d983f2b0b21d7c0014e20e75c13dda49",
       "text": "Pressure p = MPa",
       "description_language": "unknown",
-      "origin": "existing_content"
+      "origin": "existing_content",
+      "original_content": "Pressure p = MPa"
     }
   }
 }
