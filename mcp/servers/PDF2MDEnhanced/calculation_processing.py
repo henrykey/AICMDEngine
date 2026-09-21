@@ -116,6 +116,8 @@ def _read_response(item, response, identity, hint, mode, language):
             for entry in section['items']:
                 entry['source']['location_scope'] = 'source_text'
     if item['table_kind'] == 'calculation_sheet':
+        if item['calculation_sheet'].get('semantic_desc'):
+            item['semantic_desc'] = item['calculation_sheet']['semantic_desc']
         item['content_format'] = 'calculation_sheet_json'
     else:
         item.pop('calculation_sheet', None)

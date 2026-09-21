@@ -121,7 +121,9 @@
                     ],
                     "layout_id": "p2-o001-table",
                     "location_scope": "source_text"
-                  }
+                  },
+                  "semantic_desc": "",
+                  "semantic_status": "missing"
                 }
               ]
             }
@@ -132,10 +134,13 @@
           "image_verified": false,
           "diagnostics": [
             "source_bound_not_image_verified",
-            "item_location_unresolved"
+            "item_location_unresolved",
+            "calculation_semantics_missing"
           ],
           "unmapped_character_count": 0,
-          "render_markdown": "| Item / step | Content |\n| --- | --- |\n| **Pressure** | |\n| Pressure | Pressure p = MPa |"
+          "render_markdown": "| Item / step | Content |\n| --- | --- |\n| **Pressure** | |\n| Pressure | Pressure p = MPa |",
+          "semantic_desc": "",
+          "semantic_status": "missing"
         },
         "calculation_source": {
           "status": "available",
@@ -207,7 +212,9 @@
                     ],
                     "layout_id": "p2-o001-table",
                     "location_scope": "source_text"
-                  }
+                  },
+                  "semantic_desc": "",
+                  "semantic_status": "missing"
                 }
               ]
             }
@@ -218,10 +225,13 @@
           "image_verified": false,
           "diagnostics": [
             "source_bound_not_image_verified",
-            "item_location_unresolved"
+            "item_location_unresolved",
+            "calculation_semantics_missing"
           ],
           "unmapped_character_count": 0,
-          "render_markdown": "| Item / step | Content |\n| --- | --- |\n| **Pressure** | |\n| Pressure | Pressure p = MPa |"
+          "render_markdown": "| Item / step | Content |\n| --- | --- |\n| **Pressure** | |\n| Pressure | Pressure p = MPa |",
+          "semantic_desc": "",
+          "semantic_status": "missing"
         },
         "calculation_source": {
           "status": "available",
@@ -310,7 +320,9 @@
                 ],
                 "layout_id": "p2-o001-table",
                 "location_scope": "source_text"
-              }
+              },
+              "semantic_desc": "",
+              "semantic_status": "missing"
             }
           ]
         }
@@ -321,10 +333,13 @@
       "image_verified": false,
       "diagnostics": [
         "source_bound_not_image_verified",
-        "item_location_unresolved"
+        "item_location_unresolved",
+        "calculation_semantics_missing"
       ],
       "unmapped_character_count": 0,
-      "render_markdown": "| Item / step | Content |\n| --- | --- |\n| **Pressure** | |\n| Pressure | Pressure p = MPa |"
+      "render_markdown": "| Item / step | Content |\n| --- | --- |\n| **Pressure** | |\n| Pressure | Pressure p = MPa |",
+      "semantic_desc": "",
+      "semantic_status": "missing"
     },
     "calculation_source": {
       "status": "available",

@@ -6,7 +6,7 @@ from .calculation_sheet import (
     classification_failed,
 )
 
-from .semantic_language import validate_descriptions
+from .semantic_language import validate_descriptions, number_only as _number_only, valid_description as _valid_description
 
 import base64
 import copy
@@ -2129,28 +2129,6 @@ def _title_for_table(table_text: str, lines: list[str]) -> str:
             titles.append(t[:80])
     return titles[0] if len(set(titles)) == 1 else ""
 
-
-def _number_only(value: str) -> bool:
-    return bool(re.fullmatch(
-        r"(?i)(?:(?:equation|eq\.?|formula|公式|式)\s*)?[（(]?\s*"
-        r"(?:[A-Z]?[.\-]?\d+(?:[.\-]\d+)*[A-Z]?|[IVXLCDM]+)\s*[)）]?[.:：]?",
-        value.strip(),
-    ))
-
-
-def _valid_description(value: Any, name: str = "") -> str:
-    description = str(value or "").strip()
-    if not description or _number_only(description):
-        return ""
-    compact = lambda text: re.sub(r"[\s:：。.!！]+", "", text).casefold()
-    if name:
-        remainder = re.sub(re.escape(name), "", description, count=1, flags=re.I).strip(" :：。.")
-        if compact(description) == compact(name) or _number_only(remainder):
-            return ""
-    # Strip known non-semantic filler, retaining substantive sentences if supplied.
-    parts = re.split(r"(?<=[。.!！;；])\s*|\n+", description)
-    invalid = r"包含\s*\d+\s*行|contains?\s+\d+\s+rows|语义(?:说明)?缺失|变量说明见原文|请?结合上下文解释|see the source document|refer to (?:the )?(?:source|context)|semantic (?:description )?(?:missing|unavailable)"
-    return " ".join(part for part in parts if part.strip() and not re.search(invalid, part, re.I)).strip()
 
 
 def _named_semantics(name: str, description: str, language: str) -> str:

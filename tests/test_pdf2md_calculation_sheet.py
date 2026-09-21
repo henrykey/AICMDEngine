@@ -382,3 +382,81 @@ def test_rejected_calculation_item_retains_candidate_and_failed_field():
     assert all(x.get('latex') != 'F=p/A' for section in sheet['sections'] for x in section['items'])
     assert sheet['unmapped_ranges']
     assert sheet['validation_status'] == 'unresolved'
+
+
+def test_descriptive_name_does_not_discard_source_verified_formula():
+    candidate = proposal()
+    entry = candidate['calculation_sheet']['sections'][1]['items'][0]
+    entry.update(name='Calculated force', semantic_desc='Calculates force from pressure and loaded area.',
+                 inputs=['p', 'A'], output='F')
+    item = {}; cs.apply_calculation_sheet(item, candidate, HTML)
+    sheet = item['calculation_sheet']
+    formula = next(x for s in sheet['sections'] for x in s['items'] if x.get('latex') == 'F=pA')
+    assert formula['name'] == 'F=pA'
+    assert formula['semantic_desc'] == entry['semantic_desc']
+    assert formula['inputs'] == ['p', 'A'] and formula['output'] == 'F'
+    assert formula['rejected_fields'][0]['field'] == 'name'
+    assert 'field_source_mismatch' in [x['reason'] for x in sheet['unresolved']]
+
+
+def test_calculation_meaning_and_dependency_survive_without_inventing_values():
+    text = 'Area A mm2\nForce F N\nStress $s=F/A$ MPa\nCheck $s<S$'
+    raw = {'semantic_desc': 'Calculates stress and checks its allowable limit.', 'sections': [
+        {'title': 'Stress verification', 'items': [
+            {'kind': 'input', 'name': 'Area', 'symbol': 'A', 'unit': 'mm2', 'sources': ['Area A mm2']},
+            {'kind': 'input', 'name': 'Force', 'symbol': 'F', 'unit': 'N', 'sources': ['Force F N']},
+            {'kind': 'formula', 'name': 'Stress', 'latex': 's=F/A', 'sources': ['Stress $s=F/A$ MPa'],
+             'semantic_desc': 'Calculates stress from force divided by area.', 'inputs': ['F', 'A'], 'output': 's'},
+            {'kind': 'check', 'name': 'Check', 'checks': ['s<S'], 'sources': ['Check $s<S$'],
+             'semantic_desc': 'Checks stress against the allowable stress.', 'inputs': ['s', 'S']}
+        ]}], 'unresolved': [], 'image_discrepancies': []}
+    sheet = cs.parse_calculation_sheet(raw, cs.source_context(text), {})
+    assert sheet['semantic_desc'] == raw['semantic_desc']
+    items = sheet['sections'][0]['items']
+    assert items[2]['depends_on'] == [items[1]['id'], items[0]['id']]
+    assert items[3]['depends_on'] == [items[2]['id']]
+    assert items[3]['unresolved_inputs'] == ['S']
+    assert 'value' not in items[0]
+    assert sheet['image_verified'] is False
+
+
+def test_missing_semantics_does_not_delete_an_equation():
+    sheet = cs.parse_calculation_sheet(proposal()['calculation_sheet'], cs.source_context(HTML), {})
+    formula = sheet['sections'][1]['items'][0]
+    assert formula['latex'] == 'F=pA'
+    assert formula['semantic_status'] == 'missing'
+
+
+def test_foreign_dependency_symbol_is_rejected_without_losing_formula():
+    raw = proposal()['calculation_sheet']; raw['sections'][1]['items'][0].update(inputs=['foreign'], output='F')
+    sheet = cs.parse_calculation_sheet(raw, cs.source_context(HTML), {})
+    formula = sheet['sections'][1]['items'][0]
+    assert formula['latex'] == 'F=pA' and formula['inputs'] == []
+    assert any(x['field'] == 'inputs' for x in formula['rejected_fields'])
+
+
+def test_source_supported_steps_and_ambiguous_inputs_are_not_guessed():
+    raw = proposal()['calculation_sheet']
+    raw['steps'] = [{'title': 'Calculate force', 'semantic_desc': 'Use pressure and area to calculate force.',
+                     'item_ids': ['item-2'], 'sources': ['Force $F=pA$ N']}]
+    sheet = cs.parse_calculation_sheet(raw, cs.source_context(HTML), {})
+    assert sheet['steps'][0]['item_ids'] == ['item-2']
+    assert sheet['steps'][0]['source']['text_ranges']
+    raw['steps'][0]['item_ids'] = ['other-page-item']
+    rejected = cs.parse_calculation_sheet(raw, cs.source_context(HTML), {})
+    assert rejected['steps'] == []
+    assert rejected['rejected_steps'][0]['reason'] == 'calculation_step_reference_invalid'
+    assert rejected['sections'][1]['items'][0]['latex'] == 'F=pA'
+
+
+def test_explicit_source_ranges_disambiguate_repeated_formula_without_changing_it():
+    text = 'First F=pA\nSecond F=pA'
+    raw = {'sections': [{'title': 'Repeated equations', 'items': [
+        {'kind': 'formula', 'name': 'F', 'latex': 'F=pA', 'sources': ['F=pA'], 'source_ranges': [[6, 10]]},
+        {'kind': 'formula', 'name': 'F', 'latex': 'F=pA', 'sources': ['F=pA'], 'source_ranges': [[18, 22]]}
+    ]}], 'unresolved': [], 'image_discrepancies': []}
+    sheet = cs.parse_calculation_sheet(raw, cs.source_context(text), {})
+    assert len(sheet['sections'][0]['items']) == 2
+    assert sheet['sections'][0]['items'][1]['source']['text_ranges'] == [[18, 22]]
+    raw['sections'][0]['items'][1]['source_ranges'] = [[17, 21]]
+    assert len(cs.parse_calculation_sheet(raw, cs.source_context(text), {})['sections'][0]['items']) == 1

@@ -8,7 +8,7 @@ import math
 import re
 
 from .layout_ledger import validate_recovered_object
-from .semantic_language import detect_description_language, description_mismatch
+from .semantic_language import detect_description_language, description_mismatch, valid_description
 
 KINDS = {'data_table', 'calculation_sheet', 'mixed', 'uncertain'}
 ITEM_KINDS = {'input', 'formula', 'branch', 'check', 'reference', 'note'}
@@ -88,7 +88,7 @@ def classification_prompt(include_items=True):
         'and list entries must be literal substrings of the cited quotes. Section titles may be generated '
         'in the requested description language. Cover every source character with an item or explicitly '
         'list the unreadable/omitted parts in unresolved. Preserve whole piecewise expressions with '
-        'their conditions. Never calculate, infer dependencies, fill values or resolve external figures. '
+        'their conditions. Never calculate, invent values or resolve external figures. Express only source-supported input/output relationships. '
         'If the IMAGE disagrees with OCR, record image_discrepancies; do not silently replace OCR. '
         'No grid/normalized_rows/lookup_sections are required for calculation sheets. '
         'These are derived items alongside the original OCR, never replacement table content. '
@@ -106,6 +106,19 @@ def _quote_range(text, quote):
     start = text.index(quote)
     return start, start + len(quote)
 
+
+
+def _source_ranges(text, quotes, supplied=None):
+    if supplied is None:
+        return [_quote_range(text, quote) for quote in quotes]
+    if not isinstance(supplied, list) or len(supplied) != len(quotes):
+        raise ValueError('invalid_source_reference')
+    for quote, span in zip(quotes, supplied):
+        if (not isinstance(quote, str) or not quote.strip() or not isinstance(span, list) or len(span) != 2
+                or not all(type(n) is int for n in span) or not 0 <= span[0] < span[1] <= len(text)
+                or text[span[0]:span[1]] != quote):
+            raise ValueError('invalid_source_reference')
+    return supplied
 
 def _render(sections, language="en"):
     def escape(value):
@@ -171,6 +184,9 @@ def apply_calculation_sheet(item, candidate, content, description_language="unkn
 
     item['content_format'] = 'calculation_sheet_json'
     item['calculation_sheet'] = parse_calculation_sheet(candidate.get('calculation_sheet'), ctx, item)
+    if item['calculation_sheet'].get('semantic_desc'):
+        item['semantic_desc'] = item['calculation_sheet']['semantic_desc']
+        item['description'] = item['semantic_desc']
 
 
 def parse_calculation_sheet(raw, ctx, item):
@@ -214,18 +230,24 @@ def parse_calculation_sheet(raw, ctx, item):
                 quotes = entry.get('sources')
                 if not isinstance(quotes, list) or not 1 <= len(quotes) <= 50:
                     raise ValueError('invalid_source_reference')
-                ranges = [_quote_range(text, quote) for quote in quotes]
+                ranges = _source_ranges(text, quotes, entry.get('source_ranges'))
                 body = '\n'.join(quotes)
                 result = {'id': f'item-{item_count}', 'kind': entry['kind'], 'content': body}
                 for key in ('name', 'symbol', 'latex', 'unit') + (('value',) if 'value' in entry else ()):
                     field = key
                     value = entry.get(key, '')
                     if not isinstance(value, str) or (value and not any(value in q for q in quotes)):
-                        raise ValueError('formula_source_mismatch' if key == 'latex' else 'field_source_mismatch')
+                        if key == 'latex':
+                            raise ValueError('formula_source_mismatch')
+                        issue('field_source_mismatch')
+                        result.setdefault('rejected_fields', []).append({'field': key, 'candidate': deepcopy(value),
+                                                                       'reason': 'field_source_mismatch'})
+                        value = ''
                     result[key] = value
                 field = 'name'
                 if not result['name'].strip():
-                    raise ValueError('item_name_missing')
+                    # A missing label must not erase a correctly transcribed equation.
+                    result['name'] = result['symbol'] or result['latex'] or quotes[0]
                 field = 'latex'
                 if result['latex']:
                     reason, _ = validate_recovered_object({'type': 'formula', 'layout_id': 'item'},
@@ -268,6 +290,7 @@ def parse_calculation_sheet(raw, ctx, item):
                     sheet['diagnostics'].append('item_location_unresolved')
                 for start, end in ranges:
                     covered[start:end] = b'\1' * (end - start)
+                _knowledge_fields(entry, result, quotes, language, issue)
                 output['items'].append(result)
             except (ValueError, TypeError) as exc:
                 reason = str(exc) if isinstance(exc, ValueError) else 'invalid_calculation_item'
@@ -299,9 +322,99 @@ def parse_calculation_sheet(raw, ctx, item):
         sheet['image_discrepancies'] = deepcopy(raw.get('image_discrepancies'))
     if not sheet['unresolved']:
         sheet['validation_status'] = 'source_validated'
+    _knowledge_fields(raw, sheet, [text], language, issue)
+    _link_calculation_inputs(sheet)
+    _calculation_steps(raw, sheet, text, language, issue)
+    if sheet['unresolved']:
+        sheet['validation_status'] = 'unresolved'
+    if sheet['semantic_status'] == 'missing':
+        sheet['diagnostics'].append('calculation_semantics_missing')
     sheet['render_markdown'] = _render(sheet['sections'], language)
     return sheet
 
+
+
+def _knowledge_fields(raw, result, quotes, language, issue):
+    """Separate generated meaning from verbatim engineering facts."""
+    description = raw.get('semantic_desc', '')
+    valid = valid_description(description, result.get('name', '')) if isinstance(description, str) else ''
+    if valid == result.get('latex') or description_mismatch(valid, language):
+        valid = ''
+    result['semantic_desc'] = valid
+    result['semantic_status'] = 'model_proposed' if valid else 'missing'
+    if not valid and description:
+        result.setdefault('rejected_fields', []).append({'field': 'semantic_desc', 'candidate': deepcopy(description),
+                                                        'reason': 'semantic_description_invalid'})
+    # Relations reference exact symbols present in this item's evidence; no guessed variables.
+    for key in ('inputs', 'output'):
+        if key not in raw:
+            continue
+        values = raw[key] if key == 'inputs' else [raw[key]]
+        valid_values = []
+        if not isinstance(values, list) or not all(isinstance(v, str) and v.strip() and any(v in q for q in quotes) for v in values):
+            issue('field_source_mismatch')
+            result.setdefault('rejected_fields', []).append({'field': key, 'candidate': deepcopy(raw[key]),
+                                                            'reason': 'field_source_mismatch'})
+        else:
+            valid_values = list(dict.fromkeys(values))
+        result[key] = valid_values if key == 'inputs' else (valid_values[0] if valid_values else '')
+
+
+def _link_calculation_inputs(sheet):
+    """Resolve local symbol dependencies without merging pages or guessing definitions."""
+    items = [entry for section in sheet['sections'] for entry in section['items']]
+    definitions = {}
+    for entry in items:
+        symbol = entry.get('output') or (entry.get('symbol') if entry['kind'] == 'input' else '')
+        if symbol:
+            definitions.setdefault(symbol, []).append(entry['id'])
+    for entry in items:
+        if 'inputs' not in entry:
+            continue
+        entry['depends_on'] = []
+        entry['unresolved_inputs'] = []
+        for symbol in entry['inputs']:
+            matches = [identifier for identifier in definitions.get(symbol, []) if identifier != entry['id']]
+            if len(matches) == 1:
+                if matches[0] not in entry['depends_on']:
+                    entry['depends_on'].append(matches[0])
+            else:
+                entry['unresolved_inputs'].append(symbol)
+    sheet['semantic_status'] = ('model_proposed' if sheet.get('semantic_desc') and all(
+        entry.get('semantic_desc') for entry in items if entry['kind'] in {'formula', 'branch', 'check'}) else 'missing')
+
+
+def _calculation_steps(raw, sheet, text, language, issue):
+    if 'steps' not in raw:
+        return
+    sheet['steps'] = []
+    steps = raw['steps']
+    if not isinstance(steps, list) or len(steps) > 100:
+        issue('calculation_steps_invalid')
+        return
+    known = {entry['id']: entry for section in sheet['sections'] for entry in section['items']}
+    for step in steps:
+        try:
+            if not isinstance(step, dict) or not isinstance(step.get('title'), str) or not step['title'].strip():
+                raise ValueError('calculation_steps_invalid')
+            refs = step.get('item_ids')
+            if not isinstance(refs, list) or not refs or any(not isinstance(ref, str) or ref not in known for ref in refs):
+                raise ValueError('calculation_step_reference_invalid')
+            quotes = step.get('sources')
+            if not isinstance(quotes, list) or not quotes:
+                raise ValueError('invalid_source_reference')
+            ranges = _source_ranges(text, quotes, step.get('source_ranges'))
+            # Evidence for a step must actually overlap the referenced calculation items.
+            if any(not any(a < end and start < b for start, end in known[ref]['source']['text_ranges']
+                           for a, b in ranges) for ref in refs):
+                raise ValueError('calculation_step_reference_invalid')
+            result = {'title': step['title'], 'item_ids': list(dict.fromkeys(refs)),
+                      'source': {'sha256': sheet['source_sha256'], 'text_ranges': ranges}}
+            _knowledge_fields(step, result, quotes, language, issue)
+            sheet['steps'].append(result)
+        except ValueError as exc:
+            issue(str(exc))
+            sheet.setdefault('rejected_steps', []).append({'reason': str(exc), 'candidate': deepcopy(step)})
 
 def classification_failed(item, reason, content=None):
     """Failed automatic classification cannot silently become a queryable legacy table."""
@@ -340,6 +453,9 @@ def extract_calculation_items(vlm, image_path, item, content, object_ref):
             reason = 'calculation_response_incomplete'
         else:
             item['calculation_sheet'] = parse_calculation_sheet(response, ctx, item)
+            if item['calculation_sheet'].get('semantic_desc'):
+                item['semantic_desc'] = item['calculation_sheet']['semantic_desc']
+                item['description'] = item['semantic_desc']
     except Exception:
         reason = 'calculation_provider_failed'
     if reason:
