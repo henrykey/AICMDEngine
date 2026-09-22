@@ -38,7 +38,8 @@
             "unit": "MPa",
             "sources": [
               "Pressure p = MPa"
-            ]
+            ],
+            "source_item_id": "s1-i1"
           }
         ]
       }
@@ -98,7 +99,7 @@
           "source_text": "Pressure p = MPa",
           "sections": [
             {
-              "title": "Pressure",
+              "title": "",
               "items": [
                 {
                   "id": "item-1",
@@ -123,7 +124,9 @@
                     "location_scope": "source_text"
                   },
                   "semantic_desc": "",
-                  "semantic_status": "missing"
+                  "semantic_status": "missing",
+                  "source_item_id": "s1-i1",
+                  "review_status": "needs_completion"
                 }
               ]
             }
@@ -138,7 +141,7 @@
             "calculation_semantics_missing"
           ],
           "unmapped_character_count": 0,
-          "render_markdown": "| Item / step | Content |\n| --- | --- |\n| **Pressure** | |\n| Pressure | Pressure p = MPa |",
+          "render_markdown": "| Item / step | Content |\n| --- | --- |\n| Pressure | Pressure p = MPa |",
           "semantic_desc": "",
           "semantic_status": "missing"
         },
@@ -189,7 +192,7 @@
           "source_text": "Pressure p = MPa",
           "sections": [
             {
-              "title": "Pressure",
+              "title": "",
               "items": [
                 {
                   "id": "item-1",
@@ -214,7 +217,9 @@
                     "location_scope": "source_text"
                   },
                   "semantic_desc": "",
-                  "semantic_status": "missing"
+                  "semantic_status": "missing",
+                  "source_item_id": "s1-i1",
+                  "review_status": "needs_completion"
                 }
               ]
             }
@@ -229,7 +234,7 @@
             "calculation_semantics_missing"
           ],
           "unmapped_character_count": 0,
-          "render_markdown": "| Item / step | Content |\n| --- | --- |\n| **Pressure** | |\n| Pressure | Pressure p = MPa |",
+          "render_markdown": "| Item / step | Content |\n| --- | --- |\n| Pressure | Pressure p = MPa |",
           "semantic_desc": "",
           "semantic_status": "missing"
         },
@@ -297,7 +302,7 @@
       "source_text": "Pressure p = MPa",
       "sections": [
         {
-          "title": "Pressure",
+          "title": "",
           "items": [
             {
               "id": "item-1",
@@ -322,7 +327,9 @@
                 "location_scope": "source_text"
               },
               "semantic_desc": "",
-              "semantic_status": "missing"
+              "semantic_status": "missing",
+              "source_item_id": "s1-i1",
+              "review_status": "needs_completion"
             }
           ]
         }
@@ -337,7 +344,7 @@
         "calculation_semantics_missing"
       ],
       "unmapped_character_count": 0,
-      "render_markdown": "| Item / step | Content |\n| --- | --- |\n| **Pressure** | |\n| Pressure | Pressure p = MPa |",
+      "render_markdown": "| Item / step | Content |\n| --- | --- |\n| Pressure | Pressure p = MPa |",
       "semantic_desc": "",
       "semantic_status": "missing"
     },

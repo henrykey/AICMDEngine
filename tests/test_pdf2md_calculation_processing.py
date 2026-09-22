@@ -416,7 +416,7 @@ def test_organizer_uses_one_citation_text_and_preserves_raw_source(content):
     assert vlm.calls[0][1]['source_text'] == text
     assert out['calculation_source']['original_content'] == content
     assert out['calculation_sheet']['source_text'] == text
-    assert len(out['calculation_sheet']['sections'][0]['items']) == 1
+    assert [x['content'] for group in out['calculation_sheet']['sections'] for x in group['items']] == text.splitlines()
 
 
 def test_organizer_rejects_changes_to_citation_text_without_retry():
@@ -433,3 +433,127 @@ def test_empty_html_organization_does_not_call_provider():
     out = cp.process_request(req, 'calculation_sheet', 'organize_existing', vlm)
     assert out['reason'] == 'calculation_source_missing'
     assert not vlm.calls
+
+
+def test_preprocess_sections_math_newlines_notes_and_ranges():
+    text = 'Membrane Stresses\n$x=1$ $y=2$\nEquation Constants\n$I=\\frac{b\nt^3}{12}$\n$J=1$ (see 4.12.5 for exception)\nAcceptance Criteria\n$x<y$\n$x<y$'
+    groups = cp.calculation_source_sections(text)
+    assert [g['title'] for g in groups] == ['Membrane Stresses', 'Equation Constants', 'Acceptance Criteria']
+    assert [len(g['items']) for g in groups] == [2, 2, 2]
+    entries = [x for g in groups for x in g['items']]
+    assert len({x['id'] for x in entries}) == 6
+    for x in entries:
+        a, b = x['source_range']
+        assert text[a:b] == x['text']
+    assert entries[2]['text'] == '$I=\\frac{b\nt^3}{12}$'
+    assert entries[3]['text'].endswith('(see 4.12.5 for exception)')
+
+
+def test_organize_preprocessing_retains_missing_rejected_and_duplicate_items():
+    req = request(); req['existing_content'] = 'Constants\n$x=1$\n$y=2$\n$z=3$'
+    raw = response(req['identity'], req['existing_content'])
+    raw['sections'] = [{'title': 'Constants', 'items': [
+        {'source_item_id': 's1-i1', 'kind': 'formula', 'latex': 'x=1'},
+        {'source_item_id': 's1-i2', 'kind': 'check', 'checks': ['invented']},
+    ]}]
+    vlm = Provider(raw)
+    out = cp.process_request(req, 'calculation_sheet', 'organize_existing', vlm)
+    assert len(vlm.calls) == 1 and vlm.calls[0][0] is None
+    assert len(vlm.calls[0][1]['source_sections'][0]['items']) == 3
+    items = out['calculation_sheet']['sections'][0]['items']
+    assert [x['content'] for x in items] == ['$x=1$', '$y=2$', '$z=3$']
+    assert items[0]['kind'] == 'formula'
+    assert [x.get('review_status') for x in items[1:]] == ['needs_completion'] * 2
+    assert out['calculation_sheet']['rejected_items']
+    assert req['existing_content'] == out['calculation_sheet']['source_text']
+
+
+def test_unknown_or_duplicate_source_ids_cannot_replace_original_items():
+    req = request(); req['existing_content'] = 'Constants\n$x=1$\n$x=1$'
+    raw = response(req['identity'], req['existing_content'])
+    raw['sections'] = [{'title': 'Constants', 'items': [
+        {'source_item_id': 's1-i1', 'kind': 'formula', 'latex': 'x=1'},
+        {'source_item_id': 's1-i1', 'kind': 'formula', 'latex': 'x=1'},
+        {'source_item_id': 'foreign', 'kind': 'note', 'name': 'foreign'},
+    ]}]
+    out = cp.process_request(req, 'calculation_sheet', 'organize_existing', Provider(raw))
+    items = out['calculation_sheet']['sections'][0]['items']
+    assert len(items) == 2
+    assert all(x['review_status'] == 'needs_completion' for x in items)
+    assert items[0]['source']['text_ranges'] != items[1]['source']['text_ranges']
+
+
+def test_preprocess_ambiguous_text_is_preserved_and_data_table_unchanged():
+    text = 'Some explanatory text.\nMore text without math.'
+    groups = cp.calculation_source_sections(text)
+    assert [x['text'] for g in groups for x in g['items']] == text.splitlines()
+    req = request(); req['existing_content'] = text
+    vlm = Provider(response(req['identity'], text, 'data_table'))
+    cp.process_request(req, 'data_table', 'organize_existing', vlm)
+    assert 'source_sections' not in vlm.calls[0][1]
+
+
+
+def test_all_five_source_groups_are_retained_when_model_omits_every_item():
+    titles = ['Membrane Stresses', 'Bending Stresses — Locations of Maximum Bending Moment',
+              'Bending Stresses — Defined Locations', 'Equation Constants',
+              'Acceptance Criteria — Locations of Maximum Bending Moment']
+    counts = [2, 4, 2, 7, 10]
+    # Synthetic arithmetic varies the values, without encoding ASME-specific splitting rules.
+    text = '\n'.join(title + '\n' + ' '.join(f'$x_{{{i}}}={n}$' for i in range(n)) for title, n in zip(titles, counts))
+    req = request(); req['existing_content'] = text
+    raw = response(req['identity'], text); raw['sections'] = []
+    out = cp.process_request(req, 'calculation_sheet', 'organize_existing', Provider(raw))
+    groups = out['calculation_sheet']['sections']
+    assert [s['title'] for s in groups] == titles
+    assert [len(s['items']) for s in groups] == counts
+    assert all(i['review_status'] == 'needs_completion' for s in groups for i in s['items'])
+    assert 'source_sections' not in out['calculation_source']
+
+
+def test_explicit_ids_disambiguate_identical_source_without_duplicate_output():
+    req = request(); req['existing_content'] = 'Acceptance Criteria\n$x<y$\n$x<y$'
+    raw = response(req['identity'], req['existing_content'])
+    raw['sections'] = [{'title': 'Acceptance Criteria', 'items': [
+        {'source_item_id': f's1-i{i}', 'kind': 'check', 'checks': ['x<y']} for i in (2, 1)]}]
+    out = cp.process_request(req, 'calculation_sheet', 'organize_existing', Provider(raw))
+    sheet = out['calculation_sheet']; items = sheet['sections'][0]['items']
+    assert [i['source_item_id'] for i in items] == ['s1-i1', 's1-i2']
+    assert all(i['kind'] == 'check' for i in items)
+    assert items[0]['source']['text_ranges'] != items[1]['source']['text_ranges']
+    assert sheet['unmapped_character_count'] == 0
+
+
+def test_preprocess_oversized_unit_count_fails_before_provider_call():
+    req = request(); req['existing_content'] = '\n'.join('$x=1$' for _ in range(501))
+    vlm = Provider()
+    out = cp.process_request(req, 'calculation_sheet', 'organize_existing', vlm)
+    assert out['reason'] == 'input_budget_exceeded'
+    assert not vlm.calls
+
+
+
+def test_inline_math_connected_by_prose_or_operators_is_not_split():
+    for text in ('$x$ + $y$', '$x$ must be less than $y$', 'Use $x$ when $y>0$'):
+        groups = cp.calculation_source_sections(text)
+        assert [u['text'] for g in groups for u in g['items']] == [text]
+
+
+def test_html_boundaries_protect_comparisons_and_keep_annotations():
+    original = '<table><tr><th>Constants</th></tr><tr><td>$x<y$ $z=1$</td></tr><tr><td>$J=1$ (see exception)</td></tr></table>'
+    text = cp.source_context(original)['text']
+    groups = cp.calculation_source_sections(text)
+    assert len(groups) == 1 and groups[0]['title'] == 'Constants'
+    assert [u['text'] for u in groups[0]['items']] == ['$x<y$', '$z=1$', '$J=1$ (see exception)']
+
+
+def test_both_model_prompts_receive_framed_input_without_extra_requests(monkeypatch):
+    client = DynamicVLMClient(None); captured = []
+    monkeypatch.setattr(client, '_call_image_prompt', lambda *args, **kwargs: captured.append(args[-1]) or '{}')
+    monkeypatch.setattr(client, '_call_text_prompt', lambda *args, **kwargs: captured.append(args[-1]) or '{}')
+    target = {'object_ref':'test', 'source_sha256':'a'*64,
+              'source_sections':cp.calculation_source_sections('Constants\n$x=1$')}
+    client.extract_calculation_sheet('unused.png', target)
+    client.extract_calculation_sheet(None, {**target, 'processing_mode':'organize_existing', 'table_kind_hint':'calculation_sheet'})
+    assert len(captured) == 2
+    assert all('source_item_id' in prompt and 's1-i1' in prompt and 'already segmented' in prompt for prompt in captured)

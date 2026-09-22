@@ -299,7 +299,10 @@ def test_two_stage_upload_has_shared_budget(budget, expected_calls):
             return {'tables':[{'object_ref':'tables:0',**p}]}
         def extract_calculation_sheet(self,path,target):
             events.append('extract')
-            return {'object_ref':target['object_ref'],'source_sha256':target['source_sha256'],**proposal()['calculation_sheet']}
+            assert target['source_sections']
+            return {'object_ref':target['object_ref'], 'source_sha256':target['source_sha256'],
+                    'sections': [{'title':g['title'], 'items':[{'source_item_id':u['id'], 'kind':'note'} for u in g['items']]}
+                                 for g in target['source_sections']], 'unresolved':[], 'image_discrepancies':[]}
     payload={'tables':[{'markdown':HTML}]}
     assert pp._enrich_upload_semantics(VLM(),'unused',{},payload,True)==expected_calls
     assert len(events)==expected_calls

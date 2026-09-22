@@ -7,6 +7,7 @@ import json
 import math
 import re
 
+from .calculation_input import calculation_source_sections, parse_framed_calculation
 from .layout_ledger import validate_recovered_object
 from .semantic_language import detect_description_language, description_mismatch, valid_description
 
@@ -125,7 +126,8 @@ def _render(sections, language="en"):
         return html.escape(value, quote=False).replace('|', '&#124;').replace('\n', '<br>')
     rows = ['| 项目／步骤 | 内容 |' if language == 'zh' else '| Item / step | Content |', '| --- | --- |']
     for section in sections:
-        rows.append('| **' + escape(section['title']) + '** | |')
+        if section['title']:
+            rows.append('| **' + escape(section['title']) + '** | |')
         for item in section['items']:
             rows.append('| ' + escape(item['name']) + ' | ' + escape(item['content']) + ' |')
     return '\n'.join(rows)
@@ -190,6 +192,14 @@ def apply_calculation_sheet(item, candidate, content, description_language="unkn
 
 
 def parse_calculation_sheet(raw, ctx, item):
+    if 'source_sections' in ctx:
+        sheet = parse_framed_calculation(raw, ctx, item, _parse_calculation_sheet)
+        sheet['render_markdown'] = _render(sheet['sections'], ctx.get('description_language', 'en'))
+        return sheet
+    return _parse_calculation_sheet(raw, ctx, item)
+
+
+def _parse_calculation_sheet(raw, ctx, item):
     """Validate and render calculation steps without interpreting table geometry."""
     text = ctx['text']
     language = ctx.get('description_language')
@@ -300,6 +310,10 @@ def parse_calculation_sheet(raw, ctx, item):
                     'item_index': item_index, 'field': field,
                     'reason': reason, 'candidate': deepcopy(entry),
                 })
+    for section in ctx.get('source_sections', []):
+        if 'source_range' in section:
+            start, end = section['source_range']
+            covered[start:end] = b'\1' * (end - start)
     missing = [i for i, char in enumerate(text) if not covered[i] and not char.isspace()]
     sheet['unmapped_character_count'] = len(missing)
     if missing:
@@ -441,10 +455,12 @@ def extract_calculation_items(vlm, image_path, item, content, object_ref):
     ctx = source_context(content)
     ctx['description_language'] = getattr(vlm, 'description_language', 'unknown')
     target = {'object_ref': object_ref, 'source_sha256': ctx.get('sha256'),
-              'calculation_source': ctx,
+              'calculation_source': dict(ctx),
               **{key: item[key] for key in ('layout_id', 'bbox', 'bbox_space') if key in item}}
     reason = None
     try:
+        ctx['source_sections'] = calculation_source_sections(ctx['text'])
+        target['source_sections'] = ctx['source_sections']
         response = vlm.extract_calculation_sheet(image_path, target)
         if (not isinstance(response, dict) or response.get('object_ref') != object_ref
                 or response.get('source_sha256') != ctx.get('sha256')):

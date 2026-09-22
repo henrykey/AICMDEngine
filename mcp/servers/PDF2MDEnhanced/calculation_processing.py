@@ -4,7 +4,7 @@ import re
 
 from .calculation_sheet import (
     apply_calculation_sheet, calculation_budget, parse_calculation_sheet, source_context,
-    PhysicalRequestBudgetExceeded,
+    PhysicalRequestBudgetExceeded, calculation_source_sections,
 )
 
 
@@ -91,6 +91,8 @@ def _read_response(item, response, identity, hint, mode, language):
     if mode == 'organize_existing' and response.get('source_text') != ctx['text']:
         raise ValueError('calculation_source_rewritten')
     if mode == 'organize_existing':
+        if hint == 'calculation_sheet':
+            ctx['source_sections'] = calculation_source_sections(ctx['text'])
         response = deepcopy(response)
         for section in response.get('sections', []) if isinstance(response.get('sections'), list) else []:
             if not isinstance(section, dict) or not isinstance(section.get('items'), list):
@@ -106,7 +108,7 @@ def _read_response(item, response, identity, hint, mode, language):
         if hint == 'calculation_sheet':
             item['calculation_sheet'] = parse_calculation_sheet(response, ctx, item)
     # Keep image transcription separate from the full-document identity hash.
-    item['calculation_source'] = ctx
+    item['calculation_source'] = {key: value for key, value in ctx.items() if key != 'source_sections'}
     if mode != 'organize_existing':
         item['calculation_source']['origin'] = 'image_transcription'
     else:
@@ -177,6 +179,8 @@ def process_request(request, hint, mode, vlm, image_path=None, adjacent_images=N
                   'existing_content': request.get('existing_content', '')}
         if mode == 'organize_existing':
             target['source_text'] = source_context(request['existing_content'])['text']
+            if hint == 'calculation_sheet':
+                target['source_sections'] = calculation_source_sections(target['source_text'])
             if not target['source_text'].strip():
                 return finish('calculation_source_missing')
         if mode != 'organize_existing' and not image_path:
