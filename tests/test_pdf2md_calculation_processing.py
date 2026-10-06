@@ -1132,3 +1132,47 @@ def test_framed_branch_preserves_literal_list_fields_or_retains_uncompleted_sour
     else:
         assert sheet['coverage']['needs_review'] == 1
         assert items[0]['content'] == unit['text']
+
+
+@pytest.mark.parametrize('hint,mode', [('auto', 'auto'), ('calculation_sheet', 'reextract')])
+def test_confirmed_calculation_continuation_keeps_second_call_for_current_page(hint, mode):
+    req = request(); adjacent(req)
+    first = response(req['identity'], 'Constants\n$x=1$')
+    first['table_title'] = "Table 1.2 Constants (Cont'd)"
+    first['continuation'] = {'status': 'pending'}
+    vlm = Provider(first, ValueError('calculation_response_truncated'))
+    out = cp.process_request(req, hint, mode, vlm, 'current', ['previous'])
+    assert vlm.calls[1][0] is None
+    assert vlm.calls[1][1]['calculation_stage'] == 'semantic'
+    assert out['status'] == 'needs_review'
+    assert out['calculation_source']['text'] == 'Constants\n$x=1$'
+    assert out['calculation_source']['pipeline']['semantic']['reason'] == 'calculation_response_truncated'
+    assert out['continuation']['status'] == 'pending'
+    assert out['budget']['logical_calls'] == 2
+
+
+@pytest.mark.parametrize('text', [r'A$_{c}$=t$_{1}$p', '$x=1'])
+def test_broken_math_source_is_preserved_without_semantic_guessing(text):
+    req = request(); req['existing_content'] = text
+    vlm = Provider()
+    out = cp.process_request(req, 'calculation_sheet', 'organize_existing', vlm)
+    assert not vlm.calls
+    assert out['calculation_source']['text'] == text
+    assert out['calculation_sheet']['coverage']['structured'] == 0
+    assert out['calculation_source']['pipeline']['framing']['status'] == 'needs_review'
+    assert 'calculation_source_math_invalid' in json.dumps(out)
+
+
+def test_fragment_guard_keeps_valid_math_definitions_and_valid_sibling():
+    req = request(); req['existing_content'] = 'A$_{c}$=t$_{1}$p\n$x$ denotes pressure'
+    class Semantic(Provider):
+        def extract_calculation_sheet(self, image, target):
+            self.calls.append((image, target))
+            units = [u for s in target['source_sections'] for u in s['items']]
+            assert [u['text'] for u in units] == ['$x$ denotes pressure']
+            return {**response(req['identity'], target['source_text']), 'source_revision':target['source_revision'],
+                'semantic_desc':'Parameter definitions.', 'sections':[{'title':'', 'items':[
+                    {'source_item_id':units[0]['id'], 'kind':'note', 'semantic_desc':'The symbol denotes pressure.'}]}]}
+    out = cp.process_request(req, 'calculation_sheet', 'organize_existing', Semantic())
+    assert out['calculation_sheet']['coverage']['represented'] == 2
+    assert out['calculation_sheet']['coverage']['structured'] == 1

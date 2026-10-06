@@ -1,4 +1,5 @@
 """Bounded, identity-scoped processing behind the existing table extraction tool."""
+from .calculation_input import math_spans
 from copy import deepcopy
 import re
 
@@ -158,7 +159,6 @@ def structure_calculation_source(vlm, item, content, target, available_calls):
     # OCR-generated math wrappers are presentation syntax, not formula characters.
     # Keep the untouched image_transcription and repair only a provably redundant final dollar.
     if source.get('origin') == 'image_transcription' and content.endswith('$$'):
-        from .calculation_input import math_spans
         spans = math_spans(content)
         candidate = content[:-1]
         if (spans and not spans[-1][2] and content[spans[-1][0]:].startswith('$')
@@ -185,11 +185,20 @@ def structure_calculation_source(vlm, item, content, target, available_calls):
         return 0, 'input_budget_exceeded'
     total = sum(len(s['items']) for s in ctx['source_sections'])
     pipeline['framing'].update(status='complete', input_units=total, output_units=total)
-    batches = source_batches(ctx['source_sections'])
+    invalid_units = [u for section in ctx['source_sections'] for u in section['items']
+                     if any(not complete for _, _, complete in math_spans(u['text']))
+                     or any(re.match(r'^[_^]', value) for value in u['math'])]
+    invalid_ids = {u['id'] for u in invalid_units}
+    eligible = [{**section, 'items': [u for u in section['items'] if u['id'] not in invalid_ids]}
+                for section in ctx['source_sections']]
+    batches = source_batches([section for section in eligible if section['items'] or not invalid_units])
+    if invalid_units:
+        pipeline['framing'].update(status='needs_review', reason='calculation_source_math_invalid',
+                                   invalid_units=len(invalid_units))
     combined = {'sections': [], 'unresolved': [], 'image_discrepancies': [],
                 'source_revision': ctx['source_revision']}
     descriptions = []
-    errors = []
+    errors = ['calculation_source_math_invalid'] if invalid_units else []
     calls = 0
     for batch in batches:
         code = None
@@ -260,11 +269,14 @@ def structure_calculation_source(vlm, item, content, target, available_calls):
                           else 'calculation_provider_failed')
     combined['semantic_desc'] = '\n'.join(descriptions)
     sheet = parse_calculation_sheet(combined, ctx, item)
+    for unit in invalid_units:
+        sheet['unresolved'].append({'reason': 'calculation_source_math_invalid',
+                                    'source_item_id': unit['id'], 'source_range': unit['source_range']})
     for code in dict.fromkeys(errors):
         sheet['unresolved'].append({'reason': code})
     if errors:
         sheet['validation_status'] = 'unresolved'
-    if len(descriptions) != len(batches):
+    if not batches or len(descriptions) != len(batches):
         sheet['semantic_status'] = 'missing'
     item['calculation_sheet'] = sheet
     item['content_format'] = 'calculation_sheet_json'
@@ -477,7 +489,9 @@ def process_request(request, hint, mode, vlm, image_path=None, adjacent_images=N
             item['continuation'] = _continuation(raw_continuation, identity, content, [])
             return finish()
         item['continuation'] = {'status': 'pending', 'reason': 'adjacent_context_required'}
-        if not adjacent:
+        # Once the current object is a calculation sheet, reserve the remaining
+        # budget for its semantics. An unresolved relationship is independent.
+        if item['table_kind'] == 'calculation_sheet' or not adjacent:
             return finish()
         if calls >= calculation_budget(vlm):
             item['continuation']['reason'] = 'table_analysis_budget_exhausted'
