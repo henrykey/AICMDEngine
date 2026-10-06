@@ -4,11 +4,39 @@ LLM Provider Manager - manages multiple LLM providers with OpenAI-compatible int
 
 from typing import Dict, Optional, List, Any
 import logging
+import re
 from openai import AsyncOpenAI
 from urllib.parse import urlparse
 from src.llm.config_loader import LLMConfig, LLMConfigLoader
+from src.llm.thinking import thinking_parameters
 
 logger = logging.getLogger(__name__)
+
+
+class ProviderCallError(RuntimeError):
+    """Safe upstream failure without provider payloads or credentials."""
+
+
+def safe_provider_error(error: Exception) -> str:
+    parts = ["Provider request failed"]
+    status = getattr(error, "status_code", None)
+    if isinstance(status, int) and 100 <= status <= 599:
+        parts.append(f"HTTP {status}")
+    body = getattr(error, "body", None)
+    if isinstance(body, dict):
+        detail = body.get("error", body)
+        allowed_params = {"temperature", "top_p", "max_tokens", "model", "reasoning_effort", "thinking", "enable_thinking"}
+        param = detail.get("param") if isinstance(detail, dict) else None
+        if isinstance(param, str) and param in allowed_params:
+            parts.append(f"parameter={param}")
+        elif isinstance(detail, dict) and isinstance(detail.get("message"), str):
+            # Some services put the parameter only in message and return param=null.
+            # Extract a known parameter name; never return the upstream message/value.
+            match = re.search(r"Parameter ['\"]([a-z_]+)['\"]=[^\r\n]{1,64}? is not supported", detail["message"])
+            if match and match.group(1) in allowed_params:
+                parts.append(f"parameter={match.group(1)}")
+                parts.append("configured value is not supported by this model")
+    return "; ".join(parts)
 
 
 def _classify_base_url(base_url: Optional[str]) -> str:
@@ -117,7 +145,7 @@ class LLMProviderManager:
         for name, config in providers.items():
             api_key = self.config_loader.get_api_key(config.api_key_ref)
             if not api_key:
-                logger.warning(f"[{source}] API key not found for provider '{name}': {config.api_key_ref}")
+                logger.warning("[%s] API key not found for provider '%s'", source, name)
                 continue
 
             try:
@@ -129,7 +157,7 @@ class LLMProviderManager:
                 logger.info(f"[{source}] Initialized client for provider '{name}'")
                 successfully_initialized += 1
             except Exception as e:
-                logger.error(f"[{source}] Failed to initialize client for '{name}': {e}")
+                logger.error("[%s] Failed to initialize client for '%s'", source, name)
 
         return successfully_initialized
 
@@ -195,6 +223,7 @@ class LLMProviderManager:
         provider: Optional[str] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        raise_on_error: bool = False,
         **kwargs,
     ) -> Optional[str]:
         """
@@ -229,15 +258,25 @@ class LLMProviderManager:
         try:
             route = _classify_base_url(provider_config.base_url)
             logger.info(
-                "ProviderManager call start route=%s provider=%s model=%s base_url=%s messages=%s max_tokens=%s temperature=%s",
+                "ProviderManager call start route=%s provider=%s model=%s messages=%s max_tokens=%s temperature=%s",
                 route,
                 provider_name,
                 model or provider_config.model,
-                provider_config.base_url,
                 len(messages),
                 max_tokens or provider_config.max_tokens,
                 temperature or provider_config.temperature,
             )
+            try:
+                defaults = thinking_parameters(provider_config.base_url, model or provider_config.model,
+                                               getattr(provider_config, "thinking_mode", "default"))
+            except ValueError as error:
+                raise ProviderCallError(str(error)) from None
+            if defaults:
+                # Explicit call parameters override provider defaults as one thinking policy.
+                keys = {"reasoning_effort", "thinking", "enable_thinking"}
+                extra = kwargs.get("extra_body") or {}
+                if not keys.intersection(kwargs) and not keys.intersection(extra):
+                    kwargs["extra_body"] = {**extra, **defaults}
             response = await client.chat.completions.create(
                 model=model or provider_config.model,
                 messages=messages,
@@ -270,7 +309,10 @@ class LLMProviderManager:
             return result
 
         except Exception as e:
-            logger.error(f"Error calling {provider_name}: {e}")
+            safe_error = str(e) if isinstance(e, ProviderCallError) else safe_provider_error(e)
+            logger.error("Error calling %s: %s", provider_name, safe_error)
+            if raise_on_error:
+                raise ProviderCallError(safe_error) from None
             # Could implement fallback strategy here
             return None
 

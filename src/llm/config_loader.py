@@ -9,6 +9,7 @@ import yaml
 import logging
 from pathlib import Path
 from src.core.config import settings
+from src.llm.thinking import normalize_thinking_mode
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,7 @@ class LLMConfig:
         capabilities_last_updated: Optional[datetime] = None,
         capabilities_detection_error: Optional[str] = None,
         capabilities_mode: Optional[str] = None,
+        thinking_mode: str = "default",
     ):
         """Initialize LLM configuration."""
         self.name = name
@@ -51,6 +53,7 @@ class LLMConfig:
         self.model = model
         self.api_key_ref = api_key_ref
         self.timeout = timeout
+        self.thinking_mode = normalize_thinking_mode(thinking_mode)
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.top_p = top_p
@@ -81,6 +84,7 @@ class LLMConfig:
             "api_key_ref": self.api_key_ref,
             "timeout": self.timeout,
             "temperature": self.temperature,
+            "thinking_mode": self.thinking_mode,
             "max_tokens": self.max_tokens,
             "top_p": self.top_p,
             "cost_per_1k_tokens": self.cost_per_1k_tokens,
@@ -132,6 +136,7 @@ class LLMConfig:
             # Optional fields with defaults
             timeout=data.get("timeout", 30),
             temperature=data.get("temperature", 0.7),
+            thinking_mode=data.get("thinking_mode", "default"),
             max_tokens=data.get("max_tokens", 2048),
             top_p=data.get("top_p", 1.0),
             cost_per_1k_tokens=data.get("cost_per_1k_tokens", 0.001),
@@ -195,6 +200,7 @@ class LLMConfigLoader:
                         api_key_ref=provider_config.get("api_key_ref", ""),
                         timeout=provider_config.get("timeout", 30),
                         temperature=provider_config.get("temperature", 0.7),
+                        thinking_mode=provider_config.get("thinking_mode", "default"),
                         max_tokens=provider_config.get("max_tokens", 2048),
                         top_p=provider_config.get("top_p", 1.0),
                         cost_per_1k_tokens=provider_config.get("cost_per_1k_tokens", 0.001),

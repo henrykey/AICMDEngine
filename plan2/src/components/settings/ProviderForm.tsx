@@ -9,6 +9,7 @@ interface LLMProvider {
   api_key_ref: string;
   timeout: number;
   temperature: number;
+  thinking_mode?: string;
   max_tokens: number;
   top_p: number;
   cost_per_1k_tokens: number;
@@ -43,6 +44,7 @@ const DEFAULT_PROVIDER: LLMProvider = {
   api_key_ref: '',
   timeout: 30,
   temperature: 0.7,
+  thinking_mode: 'default',
   max_tokens: 2048,
   top_p: 1.0,
   cost_per_1k_tokens: 0.001,
@@ -59,11 +61,11 @@ const DEFAULT_PROVIDER: LLMProvider = {
 };
 
 const ProviderForm = ({ provider, onSave, onCancel }: ProviderFormProps) => {
-  const [formData, setFormData] = useState<LLMProvider>(provider || DEFAULT_PROVIDER);
+  const [formData, setFormData] = useState<LLMProvider>(provider ? { ...provider, thinking_mode: provider.thinking_mode ?? 'default' } : DEFAULT_PROVIDER);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   useEffect(() => {
-    setFormData(provider || DEFAULT_PROVIDER);
+    setFormData(provider ? { ...provider, thinking_mode: provider.thinking_mode ?? 'default' } : DEFAULT_PROVIDER);
   }, [provider]);
 
   const validateForm = (): boolean => {
@@ -75,6 +77,8 @@ const ProviderForm = ({ provider, onSave, onCancel }: ProviderFormProps) => {
     if (!formData.api_key_ref.trim()) newErrors.api_key_ref = 'API key reference is required';
     if (formData.temperature < 0 || formData.temperature > 2)
       newErrors.temperature = 'Temperature must be between 0 and 2';
+    if (!/^[a-z][a-z0-9_-]{0,31}$/.test((formData.thinking_mode || '').trim().toLowerCase() || 'default'))
+      newErrors.thinking_mode = 'Use up to 32 letters, digits, _ or -, starting with a letter';
     if (formData.max_tokens < 1) newErrors.max_tokens = 'Max tokens must be at least 1';
     if ((formData.context_window || 0) < 1) newErrors.context_window = 'Context window must be at least 1';
     if ((formData.dual_output_max_tokens || 0) < 512)
@@ -91,7 +95,7 @@ const ProviderForm = ({ provider, onSave, onCancel }: ProviderFormProps) => {
     e.preventDefault();
     if (validateForm()) {
       // Prepare data for submission
-      let submitData = { ...formData };
+      let submitData = { ...formData, thinking_mode: (formData.thinking_mode || '').trim().toLowerCase() || 'default' };
 
       // If auto-detect mode, exclude capabilities field to let backend detect automatically
       if (formData.capabilities_mode === 'auto') {
@@ -242,6 +246,21 @@ const ProviderForm = ({ provider, onSave, onCancel }: ProviderFormProps) => {
           </div>
 
           <div>
+            <label htmlFor="provider-thinking" className="block text-sm font-medium text-slate-700 mb-1">Thinking</label>
+            <input id="provider-thinking" name="thinking_mode" list="thinking-presets"
+              value={formData.thinking_mode || ''} onChange={handleChange}
+              placeholder="default / enabled / disabled / low..."
+              className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            <datalist id="thinking-presets">
+              <option value="default">Default</option>
+              <option value="enabled">On</option>
+              <option value="disabled">Off</option>
+            </datalist>
+            <p className="text-xs text-slate-500 mt-1">Select a preset or type an effort such as low. Empty/default omits parameters. OpenAI/Ollama On uses medium. Support depends on the model; unsupported values may error or use its default.</p>
+            {errors.thinking_mode && <p className="text-red-600 text-sm mt-1">{errors.thinking_mode}</p>}
+          </div>
+
+          <div>
             <label className="block text-sm font-medium text-slate-700 mb-1">
               Top P
             </label>
@@ -250,7 +269,7 @@ const ProviderForm = ({ provider, onSave, onCancel }: ProviderFormProps) => {
               name="top_p"
               value={formData.top_p}
               onChange={handleChange}
-              step="0.1"
+              step="0.01"
               min="0"
               max="1"
               className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"

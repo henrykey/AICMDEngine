@@ -41,7 +41,7 @@ const TestProvider = ({ providerName, onClose }: TestProviderProps) => {
 
       const result: TestResult = {
         success: response.ok,
-        message: data.message || data.error || 'Test completed',
+        message: data.message || data.error || data.detail || (response.ok ? 'Test completed' : 'Provider test failed'),
         latency,
         timestamp: new Date().toLocaleTimeString(),
       };

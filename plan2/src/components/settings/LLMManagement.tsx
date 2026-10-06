@@ -13,6 +13,7 @@ interface LLMProvider {
   api_key_ref: string;
   timeout: number;
   temperature: number;
+  thinking_mode?: string;
   max_tokens: number;
   top_p: number;
   cost_per_1k_tokens: number;

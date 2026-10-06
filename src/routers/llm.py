@@ -6,6 +6,8 @@ from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisco
 from typing import List, Dict, Any, Optional
 import logging
 
+from src.llm.provider_manager import ProviderCallError
+from src.llm.thinking import normalize_thinking_mode
 from src.llm.config_loader import LLMConfig
 from src.llm.async_capability_detector import AsyncCapabilityDetector
 from src.core.config import settings
@@ -59,8 +61,8 @@ async def list_providers(manager=Depends(get_provider_manager)):
         ]
         return {"providers": provider_list}
     except Exception as e:
-        logger.error(f"Error listing providers: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error listing providers: {type(e).__name__}")
+        raise HTTPException(status_code=500, detail="Provider operation failed")
 
 
 @router.get("/providers/{name}")
@@ -74,8 +76,8 @@ async def get_provider(name: str, manager=Depends(get_provider_manager)):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error getting provider {name}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error getting provider {name}: {type(e).__name__}")
+        raise HTTPException(status_code=500, detail="Provider operation failed")
 
 
 @router.post("/providers")
@@ -85,6 +87,11 @@ async def create_provider(
 ):
     """Create a new LLM provider or update if exists (upsert)."""
     try:
+        if "thinking_mode" in provider:
+            try:
+                provider["thinking_mode"] = normalize_thinking_mode(provider["thinking_mode"])
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from None
         name = provider.get("name")
         if not name:
             raise HTTPException(status_code=400, detail="Provider name is required")
@@ -127,7 +134,7 @@ async def create_provider(
                 if unset_fields:
                     update_operation["$unset"] = unset_fields
 
-                logger.info(f"[{name}] Final update operation: {update_operation}")
+                logger.info("Provider update prepared: set_count=%s unset_count=%s", len(update_data), len(unset_fields))
 
                 # Update existing provider
                 result = await collection.update_one(
@@ -191,7 +198,7 @@ async def create_provider(
                     task_id = await async_detector.start_detection(name, provider)
                     logger.info(f"Async detection task started: {task_id}")
                 except Exception as e:
-                    logger.error(f"Failed to start async detection for {name}: {e}")
+                    logger.error(f"Failed to start async detection for {name}: {type(e).__name__}")
 
             # Return the created provider info without MongoDB's _id field
             provider_copy = {k: v for k, v in provider.items() if k != "_id"}
@@ -213,8 +220,8 @@ async def create_provider(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error creating/updating provider: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error creating/updating provider: {type(e).__name__}")
+        raise HTTPException(status_code=500, detail="Provider operation failed")
 
 
 @router.put("/providers/{name}")
@@ -225,6 +232,11 @@ async def update_provider(
 ):
     """Update an existing LLM provider."""
     try:
+        if "thinking_mode" in provider_data:
+            try:
+                provider_data["thinking_mode"] = normalize_thinking_mode(provider_data["thinking_mode"])
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from None
         logger.info(f"[{name}] Received update request with data: {provider_data.keys()}")
 
         # Check if provider exists
@@ -279,7 +291,7 @@ async def update_provider(
             if unset_fields:
                 update_operation["$unset"] = unset_fields
 
-            logger.info(f"[{name}] Final update operation: {update_operation}")
+            logger.info("Provider update prepared: set_count=%s unset_count=%s", len(update_data), len(unset_fields))
             result = await collection.update_one(
                 {"name": name},
                 update_operation
@@ -298,8 +310,8 @@ async def update_provider(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error updating provider {name}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error updating provider {name}: {type(e).__name__}")
+        raise HTTPException(status_code=500, detail="Provider operation failed")
 
 
 @router.delete("/providers/{name}")
@@ -339,8 +351,8 @@ async def delete_provider(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error deleting provider {name}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error deleting provider {name}: {type(e).__name__}")
+        raise HTTPException(status_code=500, detail="Provider operation failed")
 
 
 @router.get("/providers/{name}/select")
@@ -359,8 +371,8 @@ async def select_provider(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error selecting provider {name}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error selecting provider {name}: {type(e).__name__}")
+        raise HTTPException(status_code=500, detail="Provider operation failed")
 
 
 @router.post("/providers/{name}/test")
@@ -376,6 +388,7 @@ async def test_provider(
         result = await manager.complete(
             messages=[{"role": "user", "content": message}],
             provider=name,
+            raise_on_error=True,
         )
 
         if result is None:
@@ -389,11 +402,13 @@ async def test_provider(
             "provider": name,
             "message": result,
         }
+    except ProviderCallError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from None
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error testing provider {name}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error testing provider {name}: {type(e).__name__}")
+        raise HTTPException(status_code=500, detail="Provider operation failed")
 
 
 @router.post("/providers/{name}/retry-detection")
@@ -435,8 +450,8 @@ async def retry_provider_detection(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error retrying detection for provider {name}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error retrying detection for provider {name}: {type(e).__name__}")
+        raise HTTPException(status_code=500, detail="Provider operation failed")
 
 
 @router.get("/providers/{name}/costs")
@@ -458,8 +473,8 @@ async def get_provider_costs(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error getting costs for {name}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error getting costs for {name}: {type(e).__name__}")
+        raise HTTPException(status_code=500, detail="Provider operation failed")
 
 
 @router.post("/providers/detect-capabilities")
@@ -523,8 +538,8 @@ async def detect_provider_capabilities(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error detecting capabilities: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error detecting capabilities: {type(e).__name__}")
+        raise HTTPException(status_code=500, detail="Provider operation failed")
 
 
 @router.get("/current")
@@ -540,8 +555,8 @@ async def get_current_provider(manager=Depends(get_provider_manager)):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error getting current provider: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error getting current provider: {type(e).__name__}")
+        raise HTTPException(status_code=500, detail="Provider operation failed")
 
 
 @router.get("/costs")
@@ -554,8 +569,8 @@ async def get_all_costs(manager=Depends(get_provider_manager)):
             "total_cost": sum(costs.values()),
         }
     except Exception as e:
-        logger.error(f"Error getting costs: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error getting costs: {type(e).__name__}")
+        raise HTTPException(status_code=500, detail="Provider operation failed")
 
 
 @router.websocket("/ws/notifications")
@@ -572,5 +587,5 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         notification_service.disconnect(websocket)
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
+        logger.error(f"WebSocket error: {type(e).__name__}")
         notification_service.disconnect(websocket)
