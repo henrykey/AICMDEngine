@@ -5,13 +5,49 @@ import re
 MATH = re.compile(r'\$\$[\s\S]*?\$\$|(?<![\\$])\$(?:\\.|[^$\\])+\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]')
 
 
+MATH_TOKEN = re.compile(r'(?<!\\)(?:\$\$|\$|\\[\[\]()]|\\(?:begin|end)\{[^{}]+\})')
+
+
+def math_spans(text):
+    """Protect nested environments and preserve an unclosed tail without guessing."""
+    stack = []
+    start = None
+    spans = []
+    for token in MATH_TOKEN.finditer(text):
+        value = token.group()
+        if stack and value == stack[-1]:
+            stack.pop()
+            if not stack:
+                spans.append((start, token.end(), True))
+        elif value.startswith(r'\begin{'):
+            if not stack:
+                start = token.start()
+            stack.append(value.replace(r'\begin', r'\end', 1))
+        elif not stack and value in ('$', '$$', r'\[', r'\('):
+            start = token.start()
+            stack.append({r'\[': r'\]', r'\(': r'\)'}.get(value, value))
+    if stack:
+        spans.append((start, len(text), False))
+    return spans
+
+
+def math_content(text):
+    values = []
+    for start, end, complete in math_spans(text):
+        if complete:
+            formula = text[start:end]
+            delimiter = 2 if formula.startswith(('$$', r'\[', r'\(')) else 1 if formula.startswith('$') else 0
+            values.append(formula[delimiter:-delimiter].strip() if delimiter else formula.strip())
+    return values
+
+
 def calculation_source_sections(text):
     """Keep exact offsets; split only outside complete math, never infer item types."""
-    spans = list(MATH.finditer(text))
+    spans = math_spans(text)
     lines = []
     start = 0
     for match in re.finditer('\n', text):
-        if not any(m.start() <= match.start() < m.end() for m in spans):
+        if not any(a <= match.start() < b for a, b, _ in spans):
             lines.append((start, match.start())); start = match.end()
     lines.append((start, len(text)))
     lines = [(a + len(text[a:b]) - len(text[a:b].lstrip()), b - len(text[a:b]) + len(text[a:b].rstrip()))
@@ -20,109 +56,184 @@ def calculation_source_sections(text):
     current = None
     for index, (a, b) in enumerate(lines):
         value = text[a:b]
-        # A short standalone label followed by math is a boundary, not a semantic classification.
-        next_math = index + 1 < len(lines) and MATH.match(text, lines[index + 1][0]) is not None
-        heading = (next_math and len(value) <= 160 and not MATH.search(value)
+        if (current and current['items'] and math_spans(current['items'][-1]['text'])
+                and re.match(r'^(?:(?:Exception|Note)\s*:|Except\b|Unless\b|注[:：]|例外[:：])', value, re.I)):
+            previous = current['items'][-1]
+            previous['source_range'][1] = b
+            previous['text'] = text[previous['source_range'][0]:b]
+            continue
+        # A standalone label before an expression/definition marks a boundary, not an item type.
+        following = text[slice(*lines[index + 1])] if index + 1 < len(lines) else ''
+        next_math = index + 1 < len(lines) and any(a == lines[index + 1][0] for a, _, _ in spans)
+        next_definition = bool(re.match(r'^[^\s=—–:]{1,80}\s*[—–:]\s+\S', following))
+        heading = bool(re.match(r'^#{1,6}\s+\S', value)) or ((next_math or next_definition) and len(value) <= 160 and not MATH.search(value)
                    and not re.search(r'[$\\=<>。.!?;；]', value)
                    and (value[:1].isupper() or re.search(r'[\u4e00-\u9fff]', value)))
         if heading:
-            current = {'id': f's{len(sections) + 1}', 'title': value, 'source_range': [a, b], 'items': []}
+            current = {'id': f's{len(sections) + 1}', 'title': re.sub(r'^#{1,6}\s+', '', value),
+                       'source_range': [a, b], 'items': []}
             sections.append(current)
             continue
         if current is None:
             current = {'id': f's{len(sections) + 1}', 'title': '', 'items': []}
             sections.append(current)
-        math = [m for m in spans if a <= m.start() and m.end() <= b]
+        math = [(left, right) for left, right, complete in spans if complete and a <= left and right <= b]
         # Split neighboring complete formulas only when the line begins with a formula.
-        separate = (math and math[0].start() == a
-                    and all(not text[left.end():right.start()].strip() for left, right in zip(math, math[1:])))
-        boundaries = [a] + ([m.start() for m in math[1:]] if separate else []) + [b]
+        separate = (math and math[0][0] == a
+                    and all(not text[left[1]:right[0]].strip() for left, right in zip(math, math[1:])))
+        boundaries = [a] + ([left for left, _ in math[1:]] if separate else []) + [b]
         for left, right in zip(boundaries, boundaries[1:]):
             while right > left and text[right - 1].isspace():
                 right -= 1
             if left < right:
                 current['items'].append({'id': f"{current['id']}-i{len(current['items']) + 1}",
-                                         'text': text[left:right], 'source_range': [left, right]})
+                                         'text': text[left:right], 'source_range': [left, right],
+                                         'math': math_content(text[left:right])})
     if len(sections) > 100 or sum(len(s['items']) for s in sections) > 500:
         raise ValueError('input_budget_exceeded')
     return sections
 
 
 def parse_framed_calculation(raw, ctx, item, parse):
-    """Reconcile source units through the existing validator; failed analysis stays editable."""
+    """Bind generated fields to deterministic units; retain every rejected source."""
     sections = ctx['source_sections']
     units = {u['id']: u for section in sections for u in section['items']}
     matches = {key: [] for key in units}
     rejected = []
-    if isinstance(raw, dict) and isinstance(raw.get('sections'), list):
+    revision_ok = not isinstance(raw, dict) or raw.get('source_revision', ctx.get('source_revision')) == ctx.get('source_revision')
+    if not revision_ok:
+        rejected.append({'reason': 'calculation_source_revision_mismatch'})
+    if revision_ok and isinstance(raw, dict) and isinstance(raw.get('sections'), list):
         for section in raw['sections']:
-            if not isinstance(section, dict) or not isinstance(section.get('items'), list):
-                continue
-            for entry in section['items']:
+            for entry in section.get('items', []) if isinstance(section, dict) and isinstance(section.get('items'), list) else []:
                 if not isinstance(entry, dict):
                     rejected.append({'reason': 'invalid_calculation_item', 'candidate': deepcopy(entry)})
                     continue
                 key = entry.get('source_item_id')
-                if key is None:
-                    # Existing exact citations can still identify a unique unit; never guess duplicates.
+                if key is None and 'source_item_ids' not in entry:
                     quotes = entry.get('sources')
-                    candidates = [u['id'] for u in units.values() if isinstance(quotes, list) and quotes
-                                  and all(isinstance(q, str) and q.strip() and q in u['text'] for q in quotes)]
-                    if len(candidates) == 1:
-                        key = candidates[0]
-                if isinstance(key, str) and key in units:
-                    matches[key].append(entry)
-                else:
+                    possible = [u['id'] for u in units.values() if isinstance(quotes, list) and quotes
+                                and all(isinstance(q, str) and q.strip() and q in u['text'] for q in quotes)]
+                    if len(possible) == 1:
+                        key = possible[0]
+                keys = entry.get('source_item_ids', [key])
+                if (not isinstance(keys, list) or not keys or len(keys) > 50
+                        or not all(isinstance(k, str) and k in units for k in keys)
+                        or len(set(keys)) != len(keys) or key != keys[0]):
                     rejected.append({'reason': 'invalid_source_item_id', 'candidate': deepcopy(entry)})
+                    continue
+                candidate = {'entry': deepcopy(entry), 'keys': keys}
+                for key in keys:
+                    matches[key].append(candidate)
+    invalid = set()
+    for values in matches.values():
+        if len(values) > 1:
+            parts = [c['entry'].get('source_part_id') for c in values]
+            if not all(isinstance(p, str) and 0 < len(p) <= 128 for p in parts) or len(set(parts)) != len(parts):
+                for candidate in values:
+                    invalid.add(id(candidate))
+                    rejected.append({'reason': 'duplicate_source_item_id', 'candidate': candidate['entry']})
     proposal = deepcopy(raw) if isinstance(raw, dict) else {}
     proposal['sections'] = []
+    bindings = {}
+    index = 0
     for section in sections:
         entries = []
         for unit in section['items']:
-            candidates = matches[unit['id']]
-            if len(candidates) == 1:
-                entry = deepcopy(candidates[0])
-                # ID refers to trusted input evidence; do not let generated quotes change it.
-                entry['sources'] = [unit['text']]
-                entry['source_ranges'] = [unit['source_range']]
-            else:
-                entry = {'kind': 'unresolved'}  # The validator records this, then we restore the raw unit.
-                if len(candidates) > 1:
-                    rejected.extend({'reason': 'duplicate_source_item_id', 'candidate': deepcopy(c)} for c in candidates)
-            entries.append(entry)
-        proposal['sections'].append({'title': section['title'], 'items': entries})
+            for candidate in matches[unit['id']]:
+                if id(candidate) in invalid or candidate['keys'][0] != unit['id']:
+                    continue
+                entry = deepcopy(candidate['entry'])
+                formulas = math_content(unit['text'])
+                if not formulas and entry.get('latex_source_index') is None:
+                    entry.pop('latex_source_index', None)
+                if ('latex_source_index' in entry or
+                        (len(formulas) == 1 and len(candidate['keys']) == 1 and not entry.get('latex'))):
+                    selection = entry.pop('latex_source_index', 0)
+                    if (type(selection) is not int or len(candidate['keys']) != 1
+                            or not 0 <= selection < len(formulas)
+                            or entry.get('latex') not in (None, '', formulas[selection])):
+                        rejected.append({'reason': 'invalid_math_source_index', 'candidate': candidate['entry']})
+                        continue
+                    entry['latex'] = formulas[selection]
+                    if entry.get('kind') == 'check' and not entry.get('checks'):
+                        entry['checks'] = [formulas[selection]]
+                entry['sources'] = [units[key]['text'] for key in candidate['keys']]
+                entry['source_ranges'] = [units[key]['source_range'] for key in candidate['keys']]
+                index += 1
+                bindings[f'item-{index}'] = candidate
+                entries.append(entry)
+        # The base validator requires nonempty sections. Empty headings are restored below.
+        if entries:
+            proposal['sections'].append({'title': section['title'], 'items': entries})
     sheet = parse(proposal, ctx, item)
+    sheet.setdefault('semantic_status', 'missing')
+    sheet.setdefault('semantic_desc', '')
     accepted = {entry['id']: entry for section in sheet['sections'] for entry in section['items']}
-    rebuilt = []
-    index = 0
-    pending = False
-    for section in sections:
-        output = {'title': section['title'], 'items': []}
-        for unit in section['items']:
-            index += 1
-            identifier = f'item-{index}'
-            entry = accepted.get(identifier)
-            if entry is None:
-                pending = True
-                entry = {'id': identifier, 'kind': 'note', 'name': unit['id'], 'content': unit['text'],
-                         'semantic_desc': '', 'semantic_status': 'missing', 'review_status': 'needs_completion',
-                         'rejected_fields': [{'field': 'analysis', 'reason': 'source_item_needs_completion'}],
-                         'source': {'sha256': ctx.get('sha256'), 'text_ranges': [unit['source_range']],
-                                    **{k: deepcopy(item[k]) for k in ('layout_id', 'bbox', 'bbox_space') if k in item},
-                                    'location_scope': 'source_text'}}
-            if not entry.get('semantic_desc'):
+    outputs = {key: [] for key in units}
+    represented = set()
+    structured = set()
+    review = {key for identifier, candidate in bindings.items() if identifier not in accepted for key in candidate['keys']}
+    for identifier, entry in accepted.items():
+        candidate = bindings[identifier]
+        keys = candidate['keys']
+        entry['source_item_id'] = keys[0]
+        if len(keys) > 1:
+            entry['source_item_ids'] = keys
+        if candidate['entry'].get('source_part_id'):
+            entry['source_part_id'] = candidate['entry']['source_part_id']
+        entry['source'].update(source_revision=ctx.get('source_revision'), range_unit='unicode_codepoint', location_scope='source_text')
+        if not entry.get('semantic_desc') or entry.get('rejected_fields') or any(key in review for key in keys):
+            entry['review_status'] = 'needs_completion'
+            review.update(keys)
+        represented.update(keys)
+        structured.update(keys)
+        outputs[keys[0]].append(entry)
+    for key, unit in units.items():
+        equations = [value for value in math_content(unit['text']) if re.search(r'[=<>]|\\(?:le|ge|lt|gt|neq)\b', value)]
+        results = [entry for entries in outputs.values() for entry in entries
+                   if key in entry.get('source_item_ids', [entry['source_item_id']])]
+        if any(not any(value == entry.get('latex') or value in entry.get('checks', []) for entry in results)
+               for value in equations):
+            review.add(key)
+            for entry in results:
                 entry['review_status'] = 'needs_completion'
-            entry['source_item_id'] = unit['id']
-            output['items'].append(entry)
+            sheet['unresolved'].append({'reason': 'formula_needs_completion', 'source_item_id': key})
+            sheet['validation_status'] = 'unresolved'
+    rebuilt = []
+    for section in sections:
+        output = {'title': section['title'], 'items': [], 'source_section_id': section['id']}
+        if 'source_range' in section:
+            output['source_range'] = section['source_range']
+        for unit in section['items']:
+            output['items'].extend(outputs[unit['id']])
+            if unit['id'] in represented:
+                continue
+            index += 1
+            output['items'].append({'id': f'item-{index}', 'kind': 'note', 'name': unit['id'], 'content': unit['text'],
+                'semantic_desc': '', 'semantic_status': 'missing', 'review_status': 'needs_completion',
+                'source_item_id': unit['id'],
+                'rejected_fields': [{'field': 'analysis', 'reason': 'source_item_needs_completion'}],
+                'source': {'sha256': ctx.get('sha256'), 'text_ranges': [unit['source_range']],
+                           'source_revision': ctx.get('source_revision'), 'range_unit': 'unicode_codepoint',
+                           **{k: deepcopy(item[k]) for k in ('layout_id', 'bbox', 'bbox_space') if k in item},
+                           'location_scope': 'source_text'}})
+            review.add(unit['id'])
         rebuilt.append(output)
     sheet['sections'] = rebuilt
+    sheet['source_revision'] = ctx.get('source_revision')
+    sheet['coverage'] = {'input_units': len(units), 'represented': len(units),
+                         'structured': len(structured), 'needs_review': len(review)}
     if rejected:
         sheet.setdefault('rejected_items', []).extend(rejected)
-    if pending or rejected:
+    if len(structured) < len(units) or rejected:
         sheet['validation_status'] = 'unresolved'
         sheet['unresolved'].append({'reason': 'source_item_needs_completion'})
-    if pending:
+    if review or sheet.get('semantic_status') == 'missing':
         sheet['semantic_status'] = 'missing'
         if 'calculation_semantics_missing' not in sheet['diagnostics']:
             sheet['diagnostics'].append('calculation_semantics_missing')
+    if any(not complete for _, _, complete in math_spans(ctx['text'])):
+        sheet['validation_status'] = 'unresolved'
+        sheet['unresolved'].append({'reason': 'calculation_math_unclosed'})
     return sheet

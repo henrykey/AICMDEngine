@@ -119,21 +119,36 @@ def test_data_table_unchanged():
     assert 'lookup_status' not in item
 
 
-def test_upload_reuses_one_semantic_call_and_survives_normalization():
+def framed_proposal(target):
+    return {**target, 'sections': [{'title': section['title'], 'items': [
+        {'source_item_id': unit['id'], 'kind': 'formula' if cs.math_content(unit['text']) else 'note',
+         'latex': cs.math_content(unit['text'])[0] if cs.math_content(unit['text']) else '',
+         'semantic_desc': 'Records the supplied calculation information for review.'}
+        for unit in section['items']]} for section in target['source_sections']],
+        'semantic_desc': 'Describes the source calculation and its inputs.',
+        'unresolved': [], 'image_discrepancies': []}
+
+
+def test_upload_reuses_existing_ocr_for_framed_semantics_and_survives_normalization():
     calls = []
     class VLM:
         def extract_region_structured(self, image_path, semantic_objects):
             calls.append(semantic_objects)
             assert 'calculation_source' in semantic_objects[0]
             return {'tables': [{'object_ref': 'tables:0', **proposal()}]}
+        def extract_calculation_sheet(self, image_path, target):
+            assert image_path is None
+            calls.append(target)
+            return framed_proposal(target)
     item = {'markdown': HTML, 'layout_id':'p1-t1'}
     payloads = {'tables': [item]}
-    assert pp._enrich_upload_semantics(VLM(), 'unused.png', {}, payloads, True) == 1
-    assert len(calls) == 1
+    assert pp._enrich_upload_semantics(VLM(), 'unused.png', {}, payloads, True) == 2
+    assert len(calls) == 2
     assert item['table_kind'] == 'calculation_sheet'
     normalized = pp._normalize_structured(payloads)
     out = pp._build_output_elements('', normalized, 'full_glm_ocr')['tables'][0]
     assert out['calculation_sheet']['validation_status'] == 'source_validated'
+    assert out['calculation_source']['pipeline']['semantic']['status'] == 'complete'
 
 
 def test_metadata_merge_single_page_and_query_guard():
@@ -167,11 +182,12 @@ def test_single_page_glm_classifies_before_any_grid_call(monkeypatch):
     _patch_clients(monkeypatch)
     FakeGLMOcrClient.result = OcrResult(tables=[OcrElement(kind='table', source='glm_ocr', markdown=HTML)])
     monkeypatch.setattr(FakeVLMClient, 'result_text', json.dumps({'tables':[{'index':0, **proposal()}]}))
+    monkeypatch.setattr(FakeVLMClient, 'extract_calculation_sheet', lambda self, path, target: framed_proposal(target) if path is None else pytest.fail('OCR must be reused'), raising=False)
     monkeypatch.setattr(sp, '_html_table_to_grid', lambda *_: pytest.fail('classification must precede grid'))
     out = json.loads(sp.extract_page_tables_direct(file_data=PNG_DATA, input_type='image',
         ocr_config={'glm_ocr': {'enabled':True, 'model':'stub', 'api_key':'stub', 'base_url':'http://stub'}},
         vlm_config={'model':'stub', 'api_key':'stub', 'base_url':'http://stub'}))
-    assert out['model_calls'] == {'glm_ocr':1, 'vlm_ocr':1}
+    assert out['model_calls'] == {'glm_ocr':1, 'vlm_ocr':2}
     assert out['table_kind'] == 'calculation_sheet'
     assert out['columns'] == [] and out['normalized_rows'] == []
     assert out['tableRowsContent'] == ''
@@ -300,9 +316,7 @@ def test_two_stage_upload_has_shared_budget(budget, expected_calls):
         def extract_calculation_sheet(self,path,target):
             events.append('extract')
             assert target['source_sections']
-            return {'object_ref':target['object_ref'], 'source_sha256':target['source_sha256'],
-                    'sections': [{'title':g['title'], 'items':[{'source_item_id':u['id'], 'kind':'note'} for u in g['items']]}
-                                 for g in target['source_sections']], 'unresolved':[], 'image_discrepancies':[]}
+            return framed_proposal(target)
     payload={'tables':[{'markdown':HTML}]}
     assert pp._enrich_upload_semantics(VLM(),'unused',{},payload,True)==expected_calls
     assert len(events)==expected_calls
@@ -329,7 +343,7 @@ def test_two_tables_do_not_each_receive_a_fresh_budget():
     assert payload['tables'][1]['calculation_sheet']['unresolved']==[{'reason':'table_analysis_budget_exhausted'}]
 
 
-@pytest.mark.parametrize('mode,reason', [('wrong_id','calculation_identity_mismatch'),('truncated','calculation_response_incomplete'),('failure','calculation_provider_failed')])
+@pytest.mark.parametrize('mode,reason', [('wrong_id','calculation_identity_mismatch'),('truncated','calculation_response_truncated'),('failure','calculation_provider_failed')])
 def test_dedicated_parser_checks_identity_and_provider_failure(mode,reason):
     class VLM:
         last_call_info={'finish_reason':'length' if mode=='truncated' else 'stop'}
@@ -338,7 +352,9 @@ def test_dedicated_parser_checks_identity_and_provider_failure(mode,reason):
             return {'object_ref':'wrong' if mode=='wrong_id' else target['object_ref'],
                     'source_sha256':target['source_sha256'],**proposal()['calculation_sheet']}
     item={};cs.extract_calculation_items(VLM(),'unused',item,HTML,'tables:0')
-    assert item['calculation_sheet']['unresolved']==[{'reason':reason}]
+    assert {'reason':reason} in item['calculation_sheet']['unresolved']
+    assert item['calculation_sheet']['coverage']['represented'] > 0
+    assert item['calculation_sheet']['coverage']['structured'] == 0
     assert 'private' not in json.dumps(item)
 
 
@@ -463,3 +479,102 @@ def test_explicit_source_ranges_disambiguate_repeated_formula_without_changing_i
     assert sheet['sections'][0]['items'][1]['source']['text_ranges'] == [[18, 22]]
     raw['sections'][0]['items'][1]['source_ranges'] = [[17, 21]]
     assert len(cs.parse_calculation_sheet(raw, cs.source_context(text), {})['sections'][0]['items']) == 1
+
+@pytest.mark.parametrize('opening,closing', [('$', '$'), ('$$', '$$'), (r'\(', r'\)'), (r'\[', r'\]')])
+def test_framed_symbol_note_accepts_only_outer_math_delimiters(opening, closing):
+    formula = r'S_{m}^{s}'
+    quote = f'{opening}{formula}{closing} = membrane stress in the short side.'
+    ctx = cs.source_context(quote)
+    ctx['source_sections'] = []
+    entry = {'kind': 'note', 'name': formula, 'latex': opening + formula + closing,
+             'sources': [quote], 'output': '', 'inputs': [],
+             'semantic_desc': 'Defines the short-side membrane stress symbol.'}
+    sheet = cs._parse_calculation_sheet({'sections': [{'title': '', 'items': [entry]}]}, ctx, {})
+    assert len(sheet['sections'][0]['items']) == 1
+    item = sheet['sections'][0]['items'][0]
+    assert item['latex'] == formula
+    assert not item.get('rejected_fields')
+    for altered in [r'S_{m}^{l}', r'S_{m}', r'S_{m}^{s}+1']:
+        bad = {**entry, 'latex': opening + altered + closing}
+        result = cs._parse_calculation_sheet({'sections': [{'title': '', 'items': [bad]}]}, ctx, {})
+        assert not result['sections'][0]['items']
+
+
+def test_empty_optional_output_is_not_a_source_error_but_foreign_output_is():
+    ctx = cs.source_context('$F=pA$')
+    entry = {'kind': 'formula', 'name': 'F', 'latex': 'F=pA', 'sources': ['$F=pA$'],
+             'output': '', 'semantic_desc': 'Calculates force from pressure and area.'}
+    sheet = cs._parse_calculation_sheet({'sections': [{'title': '', 'items': [entry]}]}, ctx, {})
+    assert not sheet['sections'][0]['items'][0].get('rejected_fields')
+    entry['output'] = 'foreign'
+    sheet = cs._parse_calculation_sheet({'sections': [{'title': '', 'items': [entry]}]}, ctx, {})
+    assert sheet['sections'][0]['items'][0]['rejected_fields'][0]['field'] == 'output'
+
+
+@pytest.mark.parametrize('kind,formula', [('check', r'S_m+S_b\le 1.5S'), ('note', r'S_{bi}^{sB},S_{bo}^{sB}')])
+def test_framed_math_selection_restores_exact_source_without_model_recopied_latex(kind, formula):
+    ctx = cs.source_context('$' + formula + '$')
+    ctx['source_sections'] = cs.calculation_source_sections(ctx['text'])
+    assert ctx['source_sections'][0]['items'][0]['math'] == [formula]
+    entry = {'source_item_id': 's1-i1', 'kind': kind, 'latex_source_index': 0,
+             'semantic_desc': 'Explains the supplied source expression.'}
+    raw = {'sections': [{'title': '', 'items': [entry]}]}
+    sheet = cs.parse_calculation_sheet(raw, ctx, {})
+    item = sheet['sections'][0]['items'][0]
+    assert item['latex'] == formula
+    if kind == 'check':
+        assert item['checks'] == [formula]
+    assert sheet['coverage']['structured'] == 1
+    for bad in [-1, 1, True, '0']:
+        entry['latex_source_index'] = bad
+        rejected = cs.parse_calculation_sheet(raw, ctx, {})
+        assert rejected['coverage']['structured'] == 0
+    entry['latex_source_index'] = 0
+    entry['latex'] = 'foreign'
+    rejected = cs.parse_calculation_sheet(raw, ctx, {})
+    assert rejected['coverage']['structured'] == 0
+
+
+@pytest.mark.parametrize('kind,formula', [('formula', 'x=y+z'), ('check', 'x<y'), ('note', 'x_i,x_o')])
+def test_framed_single_math_is_restored_without_redundant_model_index(kind, formula):
+    ctx = cs.source_context('$' + formula + '$')
+    ctx['source_sections'] = cs.calculation_source_sections(ctx['text'])
+    raw = {'sections': [{'title': '', 'items': [{'source_item_id': 's1-i1', 'kind': kind,
+           'semantic_desc': 'Explains this exact source relationship.'}]}]}
+    sheet = cs.parse_calculation_sheet(raw, ctx, {})
+    assert sheet['coverage']['structured'] == 1
+    item = sheet['sections'][0]['items'][0]
+    assert item['latex'] == formula
+    if kind == 'check':
+        assert item['checks'] == [formula]
+
+
+def test_framed_text_note_accepts_no_math_selection_but_rejects_false_index():
+    ctx = cs.source_context('Q means thermal energy.')
+    ctx['source_sections'] = cs.calculation_source_sections(ctx['text'])
+    entry = {'source_item_id': 's1-i1', 'kind': 'note', 'latex_source_index': None,
+             'semantic_desc': 'Defines Q as thermal energy.'}
+    raw = {'sections': [{'title': '', 'items': [entry]}]}
+    assert cs.parse_calculation_sheet(raw, ctx, {})['coverage']['structured'] == 1
+    for invalid in (-1, 0, '0', True):
+        entry['latex_source_index'] = invalid
+        assert cs.parse_calculation_sheet(raw, ctx, {})['coverage']['structured'] == 0
+
+
+def test_explicit_text_only_heading_preserves_its_source_range_without_display_markers():
+    text = '## Results\n$x=y$\n## Legend\nQ means thermal energy.'
+    sections = cs.calculation_source_sections(text)
+    assert [s['title'] for s in sections] == ['Results', 'Legend']
+    assert [len(s['items']) for s in sections] == [1, 1]
+    for section in sections:
+        a, b = section['source_range']
+        assert text[a:b] == '## ' + section['title']
+    assert sections[1]['items'][0]['text'] == 'Q means thermal energy.'
+
+
+def test_plain_heading_before_symbol_definition_is_a_section_not_a_note():
+    text = 'Calculation\n$Q=mcT$\nLegend\nQ – thermal energy.'
+    sections = cs.calculation_source_sections(text)
+    assert [s['title'] for s in sections] == ['Calculation', 'Legend']
+    assert [len(s['items']) for s in sections] == [1, 1]
+    assert sections[1]['items'][0]['text'] == 'Q – thermal energy.'

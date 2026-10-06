@@ -8,6 +8,8 @@ from .calculation_sheet import (
 )
 
 
+CONTINUATION_MARKER = r"(?:[（(](?:cont(?:inued|inue|[’']?d)?\.?|续表|续)[）)]|(?:continued|continue|cont[’']d|cont)\b|续表|续)"
+
 IDENTITY_KEYS = {'tenant_id', 'doc_id', 'version', 'page_no', 'table_pk', 'layout_id', 'source_sha256'}
 
 
@@ -80,13 +82,218 @@ def result_for(item, calls=0, reason=None):
     return result
 
 
+RESPONSE_CODES = {
+    'calculation_identity_mismatch', 'calculation_source_missing', 'calculation_source_rewritten',
+    'calculation_source_revision_mismatch', 'calculation_response_invalid', 'calculation_response_empty',
+    'calculation_response_truncated', 'calculation_response_filtered', 'calculation_response_incomplete',
+    'calculation_transcription_missing', 'calculation_transcription_empty',
+    'calculation_transcription_invalid_type', 'calculation_transcription_too_long',
+}
+
+
+def response_error(vlm):
+    return {'length': 'calculation_response_truncated', 'content_filter': 'calculation_response_filtered',
+            'tool_calls': 'calculation_response_incomplete'}.get(
+                getattr(vlm, 'last_call_info', {}).get('finish_reason'))
+
+
+def transcription_text(response):
+    if not isinstance(response, dict):
+        raise ValueError('calculation_response_invalid')
+    if 'source_text' not in response:
+        raise ValueError('calculation_transcription_missing')
+    text = response['source_text']
+    if not isinstance(text, str):
+        raise ValueError('calculation_transcription_invalid_type')
+    if not text.strip():
+        raise ValueError('calculation_transcription_empty')
+    if len(text) > 100000:
+        raise ValueError('calculation_transcription_too_long')
+    return text
+
+
+def transcription_body(text, caption):
+    """Separate an exact duplicated leading caption; retain original image text independently."""
+    if not isinstance(caption, str) or not caption.strip():
+        return text
+    expected = ' '.join(caption.split())
+    prefix = ''
+    for line in text.splitlines(keepends=True):
+        prefix += line
+        if ' '.join(prefix.split()) == expected:
+            remaining = text[len(prefix):].lstrip('\r\n')
+            return remaining if remaining.strip() else text
+        if len(' '.join(prefix.split())) >= len(expected):
+            break
+    return text
+
+
+def source_batches(sections):
+    """Bound semantic input at whole-unit boundaries; never split a formula."""
+    batches = []
+    batch = []
+    size = count = 0
+    for section in sections:
+        group = None
+        for unit in section['items'] or [None]:
+            length = len(section['title']) + (len(unit['text']) if unit else 0)
+            if batch and (size + length > 12000 or count >= 40):
+                batches.append(batch); batch = []; size = count = 0; group = None
+            if group is None:
+                group = {**section, 'items': []}
+                batch.append(group)
+            if unit:
+                group['items'].append(unit)
+                count += 1
+            size += length
+    if batch:
+        batches.append(batch)
+    return batches
+
+
+def structure_calculation_source(vlm, item, content, target, available_calls):
+    """Common text-only semantic stage for saved content and existing OCR."""
+    source = item.setdefault('calculation_source', {})
+    content = transcription_body(content, source.get('table_title'))
+    # OCR-generated math wrappers are presentation syntax, not formula characters.
+    # Keep the untouched image_transcription and repair only a provably redundant final dollar.
+    if source.get('origin') == 'image_transcription' and content.endswith('$$'):
+        from .calculation_input import math_spans
+        spans = math_spans(content)
+        candidate = content[:-1]
+        if (spans and not spans[-1][2] and content[spans[-1][0]:].startswith('$')
+                and not content[spans[-1][0]:].startswith('$$')
+                and all(complete for _, _, complete in math_spans(candidate))):
+            content = candidate
+            source['transcription_normalizations'] = ['redundant_trailing_math_delimiter']
+    ctx = source_context(content)
+    ctx['description_language'] = getattr(vlm, 'description_language', 'unknown')
+    source.update({**ctx, 'original_content': content})
+    pipeline = source.setdefault('pipeline', {})
+    pipeline['provider'] = getattr(vlm, 'provider', '')
+    pipeline['model'] = getattr(vlm, 'model', '')
+    pipeline['request_timeout_sec'] = getattr(vlm, 'timeout_sec', None)
+    pipeline['max_tokens'] = getattr(vlm, 'max_tokens', None)
+    pipeline['framing'] = {'status': 'failed', 'source_revision': ctx.get('source_revision')}
+    item.pop('calculation_sheet', None)
+    if not ctx['text'].strip():
+        return 0, 'calculation_source_missing'
+    try:
+        ctx['source_sections'] = calculation_source_sections(ctx['text'])
+    except ValueError:
+        pipeline['framing']['reason'] = 'calculation_framing_failed'
+        return 0, 'input_budget_exceeded'
+    total = sum(len(s['items']) for s in ctx['source_sections'])
+    pipeline['framing'].update(status='complete', input_units=total, output_units=total)
+    batches = source_batches(ctx['source_sections'])
+    combined = {'sections': [], 'unresolved': [], 'image_discrepancies': [],
+                'source_revision': ctx['source_revision']}
+    descriptions = []
+    errors = []
+    calls = 0
+    for batch in batches:
+        code = None
+        if calls >= available_calls:
+            code = 'table_analysis_budget_exhausted'
+        elif getattr(vlm, 'physical_request_limit', None) is not None and vlm.physical_requests >= vlm.physical_request_limit:
+            code = 'table_analysis_physical_budget_exhausted'
+        if code:
+            errors.append(code)
+            break
+        # Only a batch's citation text is sent. Ranges remain relative to the complete revision.
+        batch_text = ctx['text'] if len(batches) == 1 else '\n'.join(
+            value for s in batch for value in [s['title'], *[u['text'] for u in s['items']]] if value)
+        if len(batch_text) > 12000:
+            errors.append('calculation_unit_budget_exceeded')
+            continue
+        batch_target = {**target, 'calculation_stage': 'semantic', 'source_text': batch_text,
+                        'source_revision': ctx['source_revision'], 'source_sections': batch,
+                        'range_unit': 'unicode_codepoint'}
+        caption = source.get('table_title') or item.get('table_title') or item.get('tableTitle')
+        if isinstance(caption, str) and caption.strip():
+            batch_target['table_title'] = caption
+            source['table_title'] = caption
+        batch_target.pop('existing_content', None)
+        batch_target.pop('calculation_source', None)
+        batch_target.pop('adjacent_objects', None)
+        try:
+            calls += 1
+            raw = vlm.extract_calculation_sheet(None, batch_target)
+            code = response_error(vlm)
+            if code:
+                raise ValueError(code)
+            if not isinstance(raw, dict):
+                raise ValueError('calculation_response_invalid')
+            if raw.get('object_ref') != target['object_ref'] or raw.get('source_sha256') != target['source_sha256']:
+                raise ValueError('calculation_identity_mismatch')
+            if raw.get('source_revision', ctx['source_revision']) != ctx['source_revision']:
+                raise ValueError('calculation_source_revision_mismatch')
+            if raw.get('source_text', batch_text) != batch_text:
+                raise ValueError('calculation_source_rewritten')
+            if not isinstance(raw.get('sections'), list):
+                raise ValueError('calculation_response_invalid')
+            allowed = {u['id'] for s in batch for u in s['items']}
+            for section in raw['sections']:
+                for entry in section.get('items', []) if isinstance(section, dict) and isinstance(section.get('items'), list) else []:
+                    if isinstance(entry, dict):
+                        entry.pop('bbox', None)
+                        if ('source_item_id' in entry and (not isinstance(entry['source_item_id'], str) or entry['source_item_id'] not in allowed)
+                                or 'source_item_ids' in entry and (not isinstance(entry['source_item_ids'], list)
+                                or not all(isinstance(k, str) and k in allowed for k in entry['source_item_ids']))):
+                            entry['source_item_id'] = 'invalid-batch-source-id'
+            combined['sections'].extend(raw['sections'])
+            for field in ('unresolved', 'image_discrepancies'):
+                if raw.get(field) != []:
+                    combined[field].append({'reason': 'model_reported_unresolved'})
+            if isinstance(raw.get('semantic_desc'), str) and raw['semantic_desc'].strip():
+                descriptions.append(raw['semantic_desc'])
+            if len(batches) == 1:
+                for key in ('inputs', 'output', 'steps'):
+                    if key in raw:
+                        combined[key] = raw[key]
+        except PhysicalRequestBudgetExceeded:
+            errors.append('table_analysis_physical_budget_exhausted'); break
+        except TimeoutError:
+            errors.append('calculation_provider_timeout')
+        except Exception as exc:
+            errors.append(str(exc) if isinstance(exc, ValueError) and str(exc) in RESPONSE_CODES
+                          else 'calculation_provider_failed')
+    combined['semantic_desc'] = '\n'.join(descriptions)
+    sheet = parse_calculation_sheet(combined, ctx, item)
+    for code in dict.fromkeys(errors):
+        sheet['unresolved'].append({'reason': code})
+    if errors:
+        sheet['validation_status'] = 'unresolved'
+    if len(descriptions) != len(batches):
+        sheet['semantic_status'] = 'missing'
+    item['calculation_sheet'] = sheet
+    item['content_format'] = 'calculation_sheet_json'
+    if sheet.get('semantic_desc'):
+        item['semantic_desc'] = sheet['semantic_desc']
+    complete = (not errors and not sheet['unresolved'] and sheet['semantic_status'] != 'missing'
+                and sheet['coverage']['needs_review'] == 0 and total > 0)
+    pipeline['semantic'] = {'status': 'complete' if complete else 'partial',
+                            'reason': None if complete else (errors[0] if errors else 'calculation_semantic_partial'),
+                            'input_units': total, 'output_units': sheet['coverage']['structured'],
+                            'logical_calls': calls, 'batch_count': len(batches)}
+    pipeline['validation'] = {'status': 'complete' if complete else 'needs_review', **sheet['coverage']}
+    if getattr(vlm, 'physical_request_limit', None) is not None:
+        pipeline['physical_requests'] = vlm.physical_requests
+        pipeline['physical_request_limit'] = vlm.physical_request_limit
+    # Preserve failure envelopes for text-only callers while retaining a recovery draft inside them.
+    return calls, errors[0] if errors and not combined['sections'] else None
+
+
 def _read_response(item, response, identity, hint, mode, language):
-    if (not isinstance(response, dict) or response.get('object_ref') != identity['layout_id']
+    if not isinstance(response, dict):
+        raise ValueError('calculation_response_invalid')
+    if (response.get('object_ref') != identity['layout_id']
             or response.get('source_sha256') != identity['source_sha256']):
         raise ValueError('calculation_identity_mismatch')
-    content = item.get('existing_content', '') if mode == 'organize_existing' else response.get('source_text')
+    content = item.get('existing_content', '') if mode == 'organize_existing' else transcription_text(response)
     if not isinstance(content, str) or not content.strip() or len(content) > 100000:
         raise ValueError('calculation_source_missing')
+    original_transcription = content
     ctx = source_context(content); ctx['description_language'] = language
     if mode == 'organize_existing' and response.get('source_text') != ctx['text']:
         raise ValueError('calculation_source_rewritten')
@@ -109,8 +316,10 @@ def _read_response(item, response, identity, hint, mode, language):
             item['calculation_sheet'] = parse_calculation_sheet(response, ctx, item)
     # Keep image transcription separate from the full-document identity hash.
     item['calculation_source'] = {key: value for key, value in ctx.items() if key != 'source_sections'}
+    item['calculation_source']['original_content'] = content
     if mode != 'organize_existing':
         item['calculation_source']['origin'] = 'image_transcription'
+        item['calculation_source']['image_transcription'] = original_transcription
     else:
         item['calculation_source']['origin'] = 'existing_content'
         item['calculation_source']['original_content'] = content
@@ -157,11 +366,49 @@ def _continuation(raw, identity, content, known):
             'predecessor': deepcopy(predecessor)}
 
 
+def title_continuation(identity, content, known):
+    """Resolve an explicit title continuation through the existing scoped proposal contract."""
+    def compact(text):
+        return re.sub(r'\s+', ' ', re.sub(r'[#*]', '', text)).strip().casefold()
+
+    marker = CONTINUATION_MARKER
+    matches = []
+    current = compact(content)
+    for obj in known:
+        previous = obj.get('identity', {})
+        title = obj.get('table_title')
+        if (not valid_identity(previous) or obj.get('table_kind') != 'calculation_sheet'
+                or previous['page_no'] != identity['page_no'] - 1
+                or any(previous[k] != identity[k] for k in ('tenant_id', 'doc_id', 'version', 'source_sha256'))
+                or not isinstance(title, str) or not title.strip()):
+            continue
+        base = re.sub(marker + r'$', '', compact(title)).strip()
+        if not base or not current.startswith(base):
+            continue
+        if re.match(marker, current[len(base):].lstrip()):
+            matches.append(obj)
+    if len(matches) != 1:
+        return None
+    return _continuation({'status': 'proposed', 'predecessor': matches[0]['identity']}, identity, content, matches)
+
+
 def process_request(request, hint, mode, vlm, image_path=None, adjacent_images=None):
-    """One primary call and at most one joint review, sharing the configured budget."""
+    """Transcribe/classify, optionally review neighbors, then structure within one budget."""
     item = initial_item(request, hint, mode)
     calls = 0
+    structured = False
     def finish(reason=None):
+        nonlocal calls, structured
+        if not reason and not structured and item.get('table_kind') == 'calculation_sheet' and item.get('calculation_source', {}).get('text'):
+            structured = True
+            extra, stage_reason = structure_calculation_source(vlm, item, item['calculation_source']['original_content'], target, calculation_budget(vlm) - calls)
+            calls += extra
+            if 'calculation_sheet' not in item:
+                reason = stage_reason
+        if reason and mode != 'organize_existing' and calls and not item.get('calculation_source', {}).get('text'):
+            item.setdefault('calculation_source', {})['pipeline'] = {
+                'transcription': {'status': 'failed', 'reason': reason, 'logical_calls': calls},
+                'provider': getattr(vlm, 'provider', ''), 'model': getattr(vlm, 'model', '')}
         result = result_for(item, calls, reason)
         if getattr(vlm, 'physical_request_limit', None) is not None:
             result['budget'].update(physical_requests=vlm.physical_requests,
@@ -170,6 +417,9 @@ def process_request(request, hint, mode, vlm, image_path=None, adjacent_images=N
     try:
         validate_request(request, hint, mode)
         identity = request['identity']
+        title = request.get('table_title')
+        if isinstance(title, str) and title.strip() and len(title) <= 500:
+            item['table_title'] = title.strip()
         if getattr(vlm, 'physical_request_limit', None) == 0:
             return finish('table_analysis_physical_budget_exhausted')
         if calculation_budget(vlm) == 0:
@@ -177,6 +427,9 @@ def process_request(request, hint, mode, vlm, image_path=None, adjacent_images=N
         target = {'object_ref': identity['layout_id'], 'source_sha256': identity['source_sha256'],
                   'processing_mode': mode, 'table_kind_hint': hint,
                   'existing_content': request.get('existing_content', '')}
+        if mode != 'organize_existing' and hint != 'data_table':
+            target['calculation_stage'] = 'transcription' if hint == 'calculation_sheet' else 'classification_transcription'
+            target.pop('existing_content', None)
         if mode == 'organize_existing':
             target['source_text'] = source_context(request['existing_content'])['text']
             if hint == 'calculation_sheet':
@@ -185,15 +438,38 @@ def process_request(request, hint, mode, vlm, image_path=None, adjacent_images=N
                 return finish('calculation_source_missing')
         if mode != 'organize_existing' and not image_path:
             return finish('source_image_unavailable')
+        if mode == 'organize_existing' and hint == 'calculation_sheet':
+            structured = True
+            item['table_classification'] = {'kind': hint, 'status': 'manual_confirmed',
+                                            'reason': 'manual_type_constraint', 'evidence': []}
+            item['calculation_source'] = {'origin': 'existing_content'}
+            item['continuation'] = {'status': 'none', 'reason': 'not_assessed_text_only'}
+            calls, reason = structure_calculation_source(vlm, item, request['existing_content'], target, calculation_budget(vlm))
+            return finish(reason)
         calls += 1
         response = vlm.extract_calculation_sheet(image_path, target)
-        if getattr(vlm, 'last_call_info', {}).get('finish_reason') in {'length', 'content_filter', 'tool_calls'}:
-            return finish('calculation_response_incomplete')
+        if response_error(vlm):
+            return finish(response_error(vlm))
         content = _read_response(item, response, identity, hint, mode, getattr(vlm, 'description_language', 'unknown'))
+        item['calculation_source']['pipeline'] = {'transcription': {'status': 'complete', 'logical_calls': calls}}
+        title = response.get('table_title') or request.get('table_title')
+        if isinstance(title, str) and title.strip() and len(title) <= 500:
+            item['table_title'] = title.strip()
+            item['tableTitle'] = title.strip()
+            item['calculation_source']['table_title'] = title.strip()
+
         if mode == 'organize_existing':
             item['continuation'] = {'status': 'none', 'reason': 'not_assessed_text_only'}
             return finish()
+        if item['table_kind'] == 'calculation_sheet':
+            linked = title_continuation(identity, item.get('table_title') or content, request.get('adjacent_objects', []))
+            if linked and linked['status'] == 'proposed':
+                item['continuation'] = linked
+                return finish()
         raw_continuation = response.get('continuation')
+        if raw_continuation is None:
+            raw_continuation = {'status': 'pending' if re.search(
+                CONTINUATION_MARKER, item.get('table_title', ''), re.IGNORECASE) else 'none'}
         needs_context = (item['table_kind'] == 'uncertain' or response.get('continuation_required') is True
                          or isinstance(raw_continuation, dict) and raw_continuation.get('status') in ('pending', 'proposed'))
         adjacent = request.get('adjacent_objects', [])
@@ -214,9 +490,16 @@ def process_request(request, hint, mode, vlm, image_path=None, adjacent_images=N
         target['adjacent_objects'] = [{k: obj[k] for k in ('identity', 'source_text')} for obj, _ in ordered]
         calls += 1
         response = vlm.extract_calculation_sheet([image_path, *[path for _, path in ordered]], target)
-        if getattr(vlm, 'last_call_info', {}).get('finish_reason') in {'length', 'content_filter', 'tool_calls'}:
-            return finish('calculation_response_incomplete')
+        if response_error(vlm):
+            return finish(response_error(vlm))
         content = _read_response(item, response, identity, hint, mode, getattr(vlm, 'description_language', 'unknown'))
+        item['calculation_source']['pipeline'] = {'transcription': {'status': 'complete', 'logical_calls': calls}}
+        title = response.get('table_title') or request.get('table_title')
+        if isinstance(title, str) and title.strip() and len(title) <= 500:
+            item['table_title'] = title.strip()
+            item['tableTitle'] = title.strip()
+            item['calculation_source']['table_title'] = title.strip()
+
         reviews = response.get('reviewed_objects', [])
         if not isinstance(reviews, list) or len(reviews) > len(adjacent):
             return finish('continuation_identity_mismatch')
@@ -254,8 +537,6 @@ def process_request(request, hint, mode, vlm, image_path=None, adjacent_images=N
     except ValueError as exc:
         # Only our own bounded validation codes may be returned; never provider text.
         reason = str(exc)
-        return finish(reason if calls == 0 or reason in {
-            'calculation_identity_mismatch', 'calculation_source_missing', 'calculation_source_rewritten'
-        } else 'calculation_provider_failed')
+        return finish(reason if calls == 0 or reason in RESPONSE_CODES else 'calculation_provider_failed')
     except Exception:
         return finish('calculation_provider_failed')

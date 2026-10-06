@@ -1,5 +1,5 @@
 {
-  "contract_version": "2",
+  "contract_version": "3",
   "request": {
     "table_kind_hint": "calculation_sheet",
     "processing_mode": "organize_existing",
@@ -49,7 +49,8 @@
     "continuation": {
       "status": "none",
       "reason": "not_assessed_text_only"
-    }
+    },
+    "source_revision": "3dd2aa25a2f9a5b59da7e33de8ae8b289275ed732e6087b871d16b052e5416e3"
   },
   "expected": {
     "table_kind": "calculation_sheet",
@@ -93,6 +94,46 @@
           "reason": "manual_type_constraint",
           "evidence": []
         },
+        "calculation_source": {
+          "origin": "existing_content",
+          "status": "available",
+          "sha256": "c552e9650ee292f535d3077dcdbcb745d983f2b0b21d7c0014e20e75c13dda49",
+          "text": "Pressure p = MPa",
+          "source_revision": "3dd2aa25a2f9a5b59da7e33de8ae8b289275ed732e6087b871d16b052e5416e3",
+          "text_sha256": "c552e9650ee292f535d3077dcdbcb745d983f2b0b21d7c0014e20e75c13dda49",
+          "range_unit": "unicode_codepoint",
+          "range_scope": "text",
+          "normalization": "text_lines_v2",
+          "description_language": "unknown",
+          "original_content": "Pressure p = MPa",
+          "pipeline": {
+            "provider": "",
+            "model": "",
+            "request_timeout_sec": null,
+            "max_tokens": null,
+            "framing": {
+              "status": "complete",
+              "source_revision": "3dd2aa25a2f9a5b59da7e33de8ae8b289275ed732e6087b871d16b052e5416e3",
+              "input_units": 1,
+              "output_units": 1
+            },
+            "semantic": {
+              "status": "partial",
+              "reason": "calculation_semantic_partial",
+              "input_units": 1,
+              "output_units": 1,
+              "logical_calls": 1,
+              "batch_count": 1
+            },
+            "validation": {
+              "status": "needs_review",
+              "input_units": 1,
+              "represented": 1,
+              "structured": 1,
+              "needs_review": 1
+            }
+          }
+        },
         "calculation_sheet": {
           "contract_version": "1",
           "source_sha256": "c552e9650ee292f535d3077dcdbcb745d983f2b0b21d7c0014e20e75c13dda49",
@@ -121,14 +162,17 @@
                       ]
                     ],
                     "layout_id": "p2-o001-table",
-                    "location_scope": "source_text"
+                    "location_scope": "source_text",
+                    "source_revision": "3dd2aa25a2f9a5b59da7e33de8ae8b289275ed732e6087b871d16b052e5416e3",
+                    "range_unit": "unicode_codepoint"
                   },
                   "semantic_desc": "",
                   "semantic_status": "missing",
                   "source_item_id": "s1-i1",
                   "review_status": "needs_completion"
                 }
-              ]
+              ],
+              "source_section_id": "s1"
             }
           ],
           "unresolved": [],
@@ -141,17 +185,16 @@
             "calculation_semantics_missing"
           ],
           "unmapped_character_count": 0,
-          "render_markdown": "| Item / step | Content |\n| --- | --- |\n| Pressure | Pressure p = MPa |",
           "semantic_desc": "",
-          "semantic_status": "missing"
-        },
-        "calculation_source": {
-          "status": "available",
-          "sha256": "c552e9650ee292f535d3077dcdbcb745d983f2b0b21d7c0014e20e75c13dda49",
-          "text": "Pressure p = MPa",
-          "description_language": "unknown",
-          "origin": "existing_content",
-          "original_content": "Pressure p = MPa"
+          "semantic_status": "missing",
+          "render_markdown": "| Item / step | Content |\n| --- | --- |\n| Pressure | Pressure p = MPa |",
+          "source_revision": "3dd2aa25a2f9a5b59da7e33de8ae8b289275ed732e6087b871d16b052e5416e3",
+          "coverage": {
+            "input_units": 1,
+            "represented": 1,
+            "structured": 1,
+            "needs_review": 1
+          }
         }
       }
     ],
@@ -186,6 +229,46 @@
           "reason": "manual_type_constraint",
           "evidence": []
         },
+        "calculation_source": {
+          "origin": "existing_content",
+          "status": "available",
+          "sha256": "c552e9650ee292f535d3077dcdbcb745d983f2b0b21d7c0014e20e75c13dda49",
+          "text": "Pressure p = MPa",
+          "source_revision": "3dd2aa25a2f9a5b59da7e33de8ae8b289275ed732e6087b871d16b052e5416e3",
+          "text_sha256": "c552e9650ee292f535d3077dcdbcb745d983f2b0b21d7c0014e20e75c13dda49",
+          "range_unit": "unicode_codepoint",
+          "range_scope": "text",
+          "normalization": "text_lines_v2",
+          "description_language": "unknown",
+          "original_content": "Pressure p = MPa",
+          "pipeline": {
+            "provider": "",
+            "model": "",
+            "request_timeout_sec": null,
+            "max_tokens": null,
+            "framing": {
+              "status": "complete",
+              "source_revision": "3dd2aa25a2f9a5b59da7e33de8ae8b289275ed732e6087b871d16b052e5416e3",
+              "input_units": 1,
+              "output_units": 1
+            },
+            "semantic": {
+              "status": "partial",
+              "reason": "calculation_semantic_partial",
+              "input_units": 1,
+              "output_units": 1,
+              "logical_calls": 1,
+              "batch_count": 1
+            },
+            "validation": {
+              "status": "needs_review",
+              "input_units": 1,
+              "represented": 1,
+              "structured": 1,
+              "needs_review": 1
+            }
+          }
+        },
         "calculation_sheet": {
           "contract_version": "1",
           "source_sha256": "c552e9650ee292f535d3077dcdbcb745d983f2b0b21d7c0014e20e75c13dda49",
@@ -214,14 +297,17 @@
                       ]
                     ],
                     "layout_id": "p2-o001-table",
-                    "location_scope": "source_text"
+                    "location_scope": "source_text",
+                    "source_revision": "3dd2aa25a2f9a5b59da7e33de8ae8b289275ed732e6087b871d16b052e5416e3",
+                    "range_unit": "unicode_codepoint"
                   },
                   "semantic_desc": "",
                   "semantic_status": "missing",
                   "source_item_id": "s1-i1",
                   "review_status": "needs_completion"
                 }
-              ]
+              ],
+              "source_section_id": "s1"
             }
           ],
           "unresolved": [],
@@ -234,17 +320,16 @@
             "calculation_semantics_missing"
           ],
           "unmapped_character_count": 0,
-          "render_markdown": "| Item / step | Content |\n| --- | --- |\n| Pressure | Pressure p = MPa |",
           "semantic_desc": "",
-          "semantic_status": "missing"
-        },
-        "calculation_source": {
-          "status": "available",
-          "sha256": "c552e9650ee292f535d3077dcdbcb745d983f2b0b21d7c0014e20e75c13dda49",
-          "text": "Pressure p = MPa",
-          "description_language": "unknown",
-          "origin": "existing_content",
-          "original_content": "Pressure p = MPa"
+          "semantic_status": "missing",
+          "render_markdown": "| Item / step | Content |\n| --- | --- |\n| Pressure | Pressure p = MPa |",
+          "source_revision": "3dd2aa25a2f9a5b59da7e33de8ae8b289275ed732e6087b871d16b052e5416e3",
+          "coverage": {
+            "input_units": 1,
+            "represented": 1,
+            "structured": 1,
+            "needs_review": 1
+          }
         }
       }
     ],
@@ -296,6 +381,46 @@
       "reason": "manual_type_constraint",
       "evidence": []
     },
+    "calculation_source": {
+      "origin": "existing_content",
+      "status": "available",
+      "sha256": "c552e9650ee292f535d3077dcdbcb745d983f2b0b21d7c0014e20e75c13dda49",
+      "text": "Pressure p = MPa",
+      "source_revision": "3dd2aa25a2f9a5b59da7e33de8ae8b289275ed732e6087b871d16b052e5416e3",
+      "text_sha256": "c552e9650ee292f535d3077dcdbcb745d983f2b0b21d7c0014e20e75c13dda49",
+      "range_unit": "unicode_codepoint",
+      "range_scope": "text",
+      "normalization": "text_lines_v2",
+      "description_language": "unknown",
+      "original_content": "Pressure p = MPa",
+      "pipeline": {
+        "provider": "",
+        "model": "",
+        "request_timeout_sec": null,
+        "max_tokens": null,
+        "framing": {
+          "status": "complete",
+          "source_revision": "3dd2aa25a2f9a5b59da7e33de8ae8b289275ed732e6087b871d16b052e5416e3",
+          "input_units": 1,
+          "output_units": 1
+        },
+        "semantic": {
+          "status": "partial",
+          "reason": "calculation_semantic_partial",
+          "input_units": 1,
+          "output_units": 1,
+          "logical_calls": 1,
+          "batch_count": 1
+        },
+        "validation": {
+          "status": "needs_review",
+          "input_units": 1,
+          "represented": 1,
+          "structured": 1,
+          "needs_review": 1
+        }
+      }
+    },
     "calculation_sheet": {
       "contract_version": "1",
       "source_sha256": "c552e9650ee292f535d3077dcdbcb745d983f2b0b21d7c0014e20e75c13dda49",
@@ -324,14 +449,17 @@
                   ]
                 ],
                 "layout_id": "p2-o001-table",
-                "location_scope": "source_text"
+                "location_scope": "source_text",
+                "source_revision": "3dd2aa25a2f9a5b59da7e33de8ae8b289275ed732e6087b871d16b052e5416e3",
+                "range_unit": "unicode_codepoint"
               },
               "semantic_desc": "",
               "semantic_status": "missing",
               "source_item_id": "s1-i1",
               "review_status": "needs_completion"
             }
-          ]
+          ],
+          "source_section_id": "s1"
         }
       ],
       "unresolved": [],
@@ -344,17 +472,27 @@
         "calculation_semantics_missing"
       ],
       "unmapped_character_count": 0,
-      "render_markdown": "| Item / step | Content |\n| --- | --- |\n| Pressure | Pressure p = MPa |",
       "semantic_desc": "",
-      "semantic_status": "missing"
-    },
-    "calculation_source": {
-      "status": "available",
-      "sha256": "c552e9650ee292f535d3077dcdbcb745d983f2b0b21d7c0014e20e75c13dda49",
-      "text": "Pressure p = MPa",
-      "description_language": "unknown",
-      "origin": "existing_content",
-      "original_content": "Pressure p = MPa"
+      "semantic_status": "missing",
+      "render_markdown": "| Item / step | Content |\n| --- | --- |\n| Pressure | Pressure p = MPa |",
+      "source_revision": "3dd2aa25a2f9a5b59da7e33de8ae8b289275ed732e6087b871d16b052e5416e3",
+      "coverage": {
+        "input_units": 1,
+        "represented": 1,
+        "structured": 1,
+        "needs_review": 1
+      }
     }
+  },
+  "pipeline_contract": {
+    "range_unit": "unicode_codepoint",
+    "range_scope": "calculation_source.text",
+    "source_revision": "sha256 of UTF-8 calculation-source-v2 + NUL + original_content",
+    "text_sha256": "sha256 of normalized citation text UTF-8",
+    "source_sha256": "calculation_identity: PDF bytes; calculation_sheet: original content UTF-8",
+    "stage_location": "calculation_source.pipeline",
+    "coverage_location": "calculation_sheet.coverage",
+    "consumer_alignment": "pending; additive nested fields must survive persistence/edit/readback",
+    "recovery": "explicit organize_existing using original_content and the authorized identity; no implicit OCR"
   }
 }

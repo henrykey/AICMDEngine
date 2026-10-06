@@ -9,6 +9,7 @@ from .calculation_sheet import (
 from .semantic_language import detect_description_language, normalize_language, validate_descriptions
 
 import base64
+from contextlib import nullcontext
 from copy import deepcopy
 import hashlib
 import html
@@ -190,7 +191,12 @@ def _process_calculation_request(context, hint, mode, describe, vlm_config, lang
                                          images if all(images) else None)
                 result['items'][0].setdefault('calculation_source', {}).update(
                     image_sha256=hashlib.sha256(Path(ctx.image_path).read_bytes()).hexdigest(),
-                    image_scope='object_crop', original_bbox=bbox if not cropped else None)
+                    image_scope='object_crop', original_bbox=bbox if not cropped else request.get('image_bbox'),
+                    physical_page_no=request['identity']['page_no'],
+                    document_sha256=request['identity']['source_sha256'],
+                    render_dpi=ctx.render_dpi if ctx.input_type == 'pdf' else request.get('render_dpi'),
+                    render_rotate_deg=int(_routing_defaults(routing_config).get('render_rotate_deg', 0)) if ctx.input_type == 'pdf' else request.get('render_rotate_deg'),
+                    render_origin='mcp_pdf' if ctx.input_type == 'pdf' else 'caller_image')
             except Exception:
                 return result_for(item, reason="source_image_unavailable")
     table = result['items'][0]
@@ -886,12 +892,13 @@ def _enrich_table_metadata_with_vlm(
         return
     try:
         model_calls["vlm_ocr"] += 1
-        raw = vlm._call_image_prompt(
-            ctx.image_path,
-            _prompt_table_metadata(items, ctx.page_text, description_language),
-            max_tokens=min(vlm.max_tokens, 16384),
-            safe_errors=True,
-        )
+        with vlm.calculation_scope() if callable(getattr(vlm, 'calculation_scope', None)) else nullcontext():
+            raw = vlm._call_image_prompt(
+                ctx.image_path,
+                _prompt_table_metadata(items, ctx.page_text, description_language),
+                max_tokens=min(vlm.max_tokens, 16384),
+                safe_errors=True,
+            )
         if getattr(vlm, "last_call_info", {}).get("finish_reason") in {"length", "content_filter", "tool_calls"}:
             warnings.append("table_classification_response_incomplete")
             for item in items:

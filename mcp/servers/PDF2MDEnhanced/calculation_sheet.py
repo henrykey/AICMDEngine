@@ -7,7 +7,7 @@ import json
 import math
 import re
 
-from .calculation_input import calculation_source_sections, parse_framed_calculation
+from .calculation_input import calculation_source_sections, parse_framed_calculation, math_spans, math_content
 from .layout_ledger import validate_recovered_object
 from .semantic_language import detect_description_language, description_mismatch, valid_description
 
@@ -15,7 +15,7 @@ KINDS = {'data_table', 'calculation_sheet', 'mixed', 'uncertain'}
 ITEM_KINDS = {'input', 'formula', 'branch', 'check', 'reference', 'note'}
 METADATA_KEYS = ('table_kind', 'table_classification', 'calculation_sheet', 'lookup_status',
                  'lookup_sections', 'manualReviewRequired', 'degraded', 'content_format',
-                 'table_kind_source', 'continuation')
+                 'table_kind_source', 'continuation', 'calculation_source')
 
 
 class PhysicalRequestBudgetExceeded(RuntimeError):
@@ -32,11 +32,11 @@ class _SourceText(HTMLParser):
         self.parts.append(data)
 
     def handle_starttag(self, tag, attrs):
-        if tag in {'br', 'p', 'td', 'th', 'tr', 'table', 'caption', 'div'}:
+        if tag in {'br', 'p', 'td', 'th', 'tr', 'table', 'caption', 'div', 'li', 'ul', 'ol', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'section', 'blockquote', 'pre'}:
             self.parts.append('\n')
 
     def handle_endtag(self, tag):
-        if tag in {'p', 'td', 'th', 'tr', 'table', 'caption', 'div'}:
+        if tag in {'p', 'td', 'th', 'tr', 'table', 'caption', 'div', 'li', 'ul', 'ol', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'section', 'blockquote', 'pre'}:
             self.parts.append('\n')
 
 
@@ -44,16 +44,39 @@ def source_context(content):
     """No grid inference: preserve text, math and sequence even for broken spans."""
     if not isinstance(content, str) or len(content) > 100000:
         return {'status': 'input_budget_exceeded', 'text': ''}
-    if re.search(r'<(?:table|td|th)\b', content, re.I):
-        # Mathematical comparisons are text, not HTML tags (for example $S<S_a$).
-        math_pattern = r'\$\$[\s\S]*?\$\$|(?<!\\)\$(?:\\.|[^$\\])+\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]'
-        protected = re.sub(math_pattern, lambda match: match.group().replace('<', '&lt;').replace('>', '&gt;'), content)
-        parser = _SourceText(); parser.feed(protected)
+    if re.search(r'<(?:table|td|th|p|div|h[1-6]|ul|ol|li|section|blockquote|pre|span|br)\b', content, re.I):
+        # Escape comparisons before the HTML parser, including unclosed math tails.
+        protected = content
+        for start, end, _ in reversed(math_spans(content)):
+            # Keep recognized HTML wrappers available to HTMLParser even inside an
+            # unclosed math span; escape only mathematical angle brackets.
+            pieces = re.split(r'(</?(?:table|tbody|thead|tfoot|tr|td|th|p|div|h[1-6]|ul|ol|li|section|blockquote|pre|span|br|em|strong|sup|sub)\b[^>]*>)', content[start:end], flags=re.I)
+            escaped = ''.join(piece if index % 2 else piece.replace('<', '&lt;').replace('>', '&gt;')
+                              for index, piece in enumerate(pieces))
+            protected = protected[:start] + escaped + protected[end:]
+        parser = _SourceText(); parser.feed(protected); parser.close()
         text = ''.join(parser.parts)
+        transform = 'html_blocks_v2'
     else:
         text = content
+        transform = 'text_lines_v2'
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    spans = math_spans(text)
+    # Preserve each line intersecting math; normalize only exterior whitespace.
+    lines = []
+    offset = 0
+    for line in text.split('\n'):
+        protected_line = any(start <= offset + len(line) and end > offset for start, end, _ in spans)
+        if protected_line:
+            lines.append(line)
+        elif line.strip():
+            lines.append(line.strip())
+        offset += len(line) + 1
+    normalized = '\n'.join(lines).strip()
     return {'status': 'available', 'sha256': hashlib.sha256(content.encode()).hexdigest(),
-            'text': '\n'.join(line.strip() for line in text.splitlines() if line.strip())}
+            'text': normalized, 'source_revision': hashlib.sha256(('calculation-source-v2\0' + content).encode()).hexdigest(),
+            'text_sha256': hashlib.sha256(normalized.encode()).hexdigest(),
+            'range_unit': 'unicode_codepoint', 'range_scope': 'text', 'normalization': transform}
 
 
 def classification_prompt(include_items=True):
@@ -246,6 +269,11 @@ def _parse_calculation_sheet(raw, ctx, item):
                 for key in ('name', 'symbol', 'latex', 'unit') + (('value',) if 'value' in entry else ()):
                     field = key
                     value = entry.get(key, '')
+                    if key == 'latex' and isinstance(value, str):
+                        stripped = value.strip()
+                        spans = math_spans(stripped)
+                        if len(spans) == 1 and spans[0] == (0, len(stripped), True):
+                            value = math_content(stripped)[0]
                     if not isinstance(value, str) or (value and not any(value in q for q in quotes)):
                         if key == 'latex':
                             raise ValueError('formula_source_mismatch')
@@ -259,6 +287,10 @@ def _parse_calculation_sheet(raw, ctx, item):
                     # A missing label must not erase a correctly transcribed equation.
                     result['name'] = result['symbol'] or result['latex'] or quotes[0]
                 field = 'latex'
+                if result['latex'] and 'source_sections' in ctx:
+                    formulas = [formula for quote in quotes for formula in math_content(quote)]
+                    if formulas and result['latex'].strip() not in formulas:
+                        raise ValueError('formula_source_mismatch')
                 if result['latex']:
                     reason, _ = validate_recovered_object({'type': 'formula', 'layout_id': 'item'},
                         {'type': 'formula', 'layout_id': 'item', 'status': 'EXTRACTED',
@@ -363,6 +395,9 @@ def _knowledge_fields(raw, result, quotes, language, issue):
     for key in ('inputs', 'output'):
         if key not in raw:
             continue
+        if key == 'output' and isinstance(raw[key], str) and not raw[key].strip():
+            result[key] = ''
+            continue
         values = raw[key] if key == 'inputs' else [raw[key]]
         valid_values = []
         if not isinstance(values, list) or not all(isinstance(v, str) and v.strip() and any(v in q for q in quotes) for v in values):
@@ -450,38 +485,24 @@ def table_content_quality(items):
     return {'complete': not reviews, 'objects': reviews}
 
 
-def extract_calculation_items(vlm, image_path, item, content, object_ref):
-    """One dedicated image call, with echoed identity/hash and no local retry."""
+def extract_calculation_items(vlm, image_path, item, content, object_ref, available_calls=1):
+    """Reuse reliable OCR through the same semantic stage as manual organization."""
+    from .calculation_processing import structure_calculation_source
     ctx = source_context(content)
-    ctx['description_language'] = getattr(vlm, 'description_language', 'unknown')
-    target = {'object_ref': object_ref, 'source_sha256': ctx.get('sha256'),
-              'calculation_source': dict(ctx),
-              **{key: item[key] for key in ('layout_id', 'bbox', 'bbox_space') if key in item}}
-    reason = None
-    try:
-        ctx['source_sections'] = calculation_source_sections(ctx['text'])
-        target['source_sections'] = ctx['source_sections']
-        response = vlm.extract_calculation_sheet(image_path, target)
-        if (not isinstance(response, dict) or response.get('object_ref') != object_ref
-                or response.get('source_sha256') != ctx.get('sha256')):
-            reason = 'calculation_identity_mismatch'
-        elif getattr(vlm, 'last_call_info', {}).get('finish_reason') in {'length', 'content_filter', 'tool_calls'}:
-            reason = 'calculation_response_incomplete'
-        else:
-            item['calculation_sheet'] = parse_calculation_sheet(response, ctx, item)
-            if item['calculation_sheet'].get('semantic_desc'):
-                item['semantic_desc'] = item['calculation_sheet']['semantic_desc']
-                item['description'] = item['semantic_desc']
-    except Exception:
-        reason = 'calculation_provider_failed'
-    if reason:
-        item['calculation_sheet'] = parse_calculation_sheet(None, ctx, item)
-        item['calculation_sheet']['unresolved'] = [{'reason': reason}]
+    target = {'object_ref': object_ref, 'source_sha256': ctx.get('sha256')}
+    item.setdefault('calculation_source', {})['origin'] = 'existing_ocr'
+    calls, reason = structure_calculation_source(vlm, item, content, target, available_calls)
+    if reason and 'calculation_sheet' in item:
+        item['calculation_sheet']['validation_status'] = 'unresolved'
+    if item.get('semantic_desc'):
+        item['description'] = item['semantic_desc']
+    return calls
 
 
 def needs_calculation_call(item):
     return (item.get('table_kind') == 'calculation_sheet'
-            and item.get('calculation_sheet', {}).get('validation_status') != 'source_validated')
+            and ('pipeline' not in item.get('calculation_source', {})
+                 or item.get('calculation_sheet', {}).get('validation_status') != 'source_validated'))
 
 
 def calculation_budget(vlm):
@@ -496,10 +517,12 @@ def complete_calculation_batch(vlm, image_path, targets, used_calls):
         if not needs_calculation_call(item):
             continue
         if used_calls + additional >= calculation_budget(vlm):
+            extract_calculation_items(vlm, image_path, item, content, object_ref, 0)
             item['calculation_sheet']['unresolved'] = [{'reason': 'table_analysis_budget_exhausted'}]
         elif not callable(getattr(vlm, 'extract_calculation_sheet', None)):
+            extract_calculation_items(vlm, image_path, item, content, object_ref, 0)
             item['calculation_sheet']['unresolved'] = [{'reason': 'calculation_provider_unavailable'}]
         else:
-            additional += 1
-            extract_calculation_items(vlm, image_path, item, content, object_ref)
+            additional += extract_calculation_items(vlm, image_path, item, content, object_ref,
+                                                     calculation_budget(vlm) - used_calls - additional)
     return additional
