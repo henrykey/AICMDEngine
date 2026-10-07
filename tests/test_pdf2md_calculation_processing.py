@@ -178,7 +178,7 @@ def test_image_rpc_does_not_scan_neighbors_and_retains_image_hash(monkeypatch, t
         context={'object_crop': True, 'calculation_request': req}))
     assert out['status'] == 'needs_review'
     assert len(out['calculation_source']['image_sha256']) == 64
-    assert len(out['items']) == 1
+    assert 'items' not in out and 'tables' not in out
 
 
 def test_disabled_descriptions_do_not_add_calls(monkeypatch):
@@ -374,7 +374,7 @@ def test_processing_rpc_reports_physical_exhaustion_without_discarding_content(m
         assert out['budget']['physical_request_limit'] == 1
         assert out['budget']['sdk_retries'] == 0
         assert out['table_kind'] == 'calculation_sheet'
-        assert out['items'][0]['existing_content'] == request()['existing_content']
+        assert out['existing_content'] == request()['existing_content']
     finally:
         for client in clients:
             client.close()
@@ -409,7 +409,7 @@ def test_physical_budget_cannot_exceed_processing_cap(limit):
 ])
 def test_organizer_uses_one_citation_text_and_preserves_raw_source(content):
     req = request(); req['existing_content'] = content
-    text = cp.source_context(content)['text']
+    text = cp.source_context(content, structural=True)['text']
     vlm = Provider(response(req['identity'], text))
     out = cp.process_request(req, 'calculation_sheet', 'organize_existing', vlm)
     assert out['status'] == 'needs_review'
@@ -464,7 +464,8 @@ def test_organize_preprocessing_retains_missing_rejected_and_duplicate_items():
     assert [x['content'] for x in items] == ['$x=1$', '$y=2$', '$z=3$']
     assert items[0]['kind'] == 'formula'
     assert [x.get('review_status') for x in items[1:]] == ['needs_completion'] * 2
-    assert out['calculation_sheet']['rejected_items']
+    assert items[1]['latex'] == 'y=2'
+    assert items[1]['rejected_fields'][0]['field'] == 'checks'
     assert req['existing_content'] == out['calculation_sheet']['source_text']
 
 
@@ -826,8 +827,8 @@ def test_generic_pipeline_real_wire_separates_current_image_and_text_with_physic
             assert target['calculation_stage'] == 'semantic'
             assert 'source_text' not in target
             assert target['source_sections'][0]['items'][0]['text'] == '$x<y$'
-            raw = {'object_ref':target['object_ref'], 'source_sha256':target['source_sha256'],
-                   'source_revision':target['source_revision'], 'semantic_desc':'Checks a value against its permitted limit.',
+            assert not {'object_ref', 'source_sha256', 'source_revision'} & target.keys()
+            raw = {'semantic_desc':'Checks a value against its permitted limit.',
                    'sections':[{'title':'Checks','items':[{'source_item_id':'s1-i1','kind':'check',
                    'latex':'x<y','checks':['x<y'],'semantic_desc':'The value must remain below the permitted limit.'}]}],
                    'unresolved':[], 'image_discrepancies':[]}
@@ -854,6 +855,8 @@ def test_generic_pipeline_real_wire_separates_current_image_and_text_with_physic
         assert out['calculation_source']['physical_page_no'] == req['identity']['page_no']
         assert out['calculation_source']['render_dpi'] is None
         assert out['calculation_source']['pipeline']['semantic']['status'] == 'complete'
+        assert out['calculation_identity'] == req['identity']
+        assert out['calculation_source']['source_revision'] == cp.source_context('Checks\n$x<y$')['source_revision']
     finally:
         for client in clients:
             client.close()
@@ -1073,7 +1076,7 @@ def test_calculation_semantic_instructions_are_separate_from_untrusted_source(mo
     assert 'discarded_assumptions' in messages[0]['content']
     data = json.loads(messages[1]['content'])
     assert data['source_sections'] == target['source_sections']
-    assert data['source_revision'] == target['source_revision']
+    assert not {'object_ref', 'source_sha256', 'source_revision'} & data.keys()
     assert data['table_title'] == target['table_title']
     assert 'source_text' not in data
     client._call_text_prompt('Ordinary text', 100)
@@ -1176,3 +1179,487 @@ def test_fragment_guard_keeps_valid_math_definitions_and_valid_sibling():
     out = cp.process_request(req, 'calculation_sheet', 'organize_existing', Semantic())
     assert out['calculation_sheet']['coverage']['represented'] == 2
     assert out['calculation_sheet']['coverage']['structured'] == 1
+
+
+@pytest.mark.parametrize('origin,content,caption', [
+    ('manual_text', 'Design scope\nChecks\n$x<y$', 'Design scope'),
+    ('image_transcription', '$x=1$$', ''),
+])
+def test_structuring_keeps_saved_source_hash_and_revision(origin, content, caption):
+    from tests.test_pdf2md_calculation_sheet import framed_proposal
+    class Semantic(Provider):
+        def extract_calculation_sheet(self, image, target):
+            self.calls.append((image, target))
+            return framed_proposal(target)
+    item = {'calculation_source': {'origin': origin, 'table_title': caption}}
+    client = Semantic()
+    cp.structure_calculation_source(client, item, content,
+        {'object_ref': 'table', 'source_sha256': 'a'*64}, 1)
+    expected = cp.source_context(content)
+    saved = item['calculation_source']
+    assert saved['original_content'] == content
+    assert saved['sha256'] == expected['sha256']
+    assert saved['source_revision'] == expected['source_revision']
+    assert client.calls[0][1]['source_revision'] == expected['source_revision']
+    if origin == 'manual_text':
+        assert client.calls[0][1]['source_text'] == content
+
+
+def test_saved_batch_progress_resumes_only_unfinished_units_with_bounded_calls():
+    from tests.test_pdf2md_calculation_sheet import framed_proposal
+    req = request()
+    req['existing_content'] = '\n'.join(f'$v_{n}={n}$' for n in range(85))
+    class Batched(Provider):
+        table_analysis_max_model_calls = 1
+        def extract_calculation_sheet(self, image, target):
+            self.calls.append((image, copy.deepcopy(target)))
+            return framed_proposal(target)
+    seen = []
+    for expected in (40, 80, 85):
+        client = Batched()
+        result = cp.process_request(req, 'calculation_sheet', 'organize_existing', client)
+        assert result['calculation_sheet']['coverage']['structured'] == expected
+        assert len(client.calls) == 1
+        seen.extend(u['id'] for s in client.calls[0][1]['source_sections'] for u in s['items'])
+        progress = result['calculation_source']['pipeline']['semantic']
+        assert len(progress['batches']) == 3
+        req['calculation_resume'] = progress
+    assert len(seen) == len(set(seen)) == 85
+    client = Batched()
+    result = cp.process_request(req, 'calculation_sheet', 'organize_existing', client)
+    assert not client.calls
+    assert result['calculation_source']['pipeline']['semantic']['status'] == 'complete'
+
+
+@pytest.mark.parametrize('change', ['source', 'identity'])
+def test_batch_resume_rejects_changed_source_or_object_without_provider_call(change):
+    from tests.test_pdf2md_calculation_sheet import framed_proposal
+    req = request(); req['existing_content'] = '$x=1$'
+    class Semantic(Provider):
+        def extract_calculation_sheet(self, image, target):
+            self.calls.append((image, target))
+            return framed_proposal(target)
+    result = cp.process_request(req, 'calculation_sheet', 'organize_existing', Semantic())
+    req['calculation_resume'] = result['calculation_source']['pipeline']['semantic']
+    if change == 'source':
+        req['existing_content'] = '$x=2$'
+    else:
+        req['identity']['table_pk'] = 'other-table'
+    client = Semantic()
+    result = cp.process_request(req, 'calculation_sheet', 'organize_existing', client)
+    assert result['status'] == 'failed'
+    assert result['reason'] == 'calculation_resume_mismatch'
+    assert not client.calls
+
+
+def test_retry_keeps_successful_later_batch_after_middle_timeout():
+    from tests.test_pdf2md_calculation_sheet import framed_proposal
+    req = request(); req['existing_content'] = '\n'.join(f'$v_{n}={n}$' for n in range(85))
+    class Batched(Provider):
+        table_analysis_max_model_calls = 3
+        def extract_calculation_sheet(self, image, target):
+            self.calls.append(target)
+            if len(self.calls) == 2:
+                raise TimeoutError()
+            return framed_proposal(target)
+    first = cp.process_request(req, 'calculation_sheet', 'organize_existing', Batched())
+    progress = first['calculation_source']['pipeline']['semantic']
+    assert [b['status'] for b in progress['batches']] == ['complete', 'failed', 'complete']
+    assert first['calculation_sheet']['coverage']['structured'] == 45
+    req['calculation_resume'] = progress
+    retry = Batched(); retry.table_analysis_max_model_calls = 1
+    result = cp.process_request(req, 'calculation_sheet', 'organize_existing', retry)
+    assert len(retry.calls) == 1
+    assert retry.calls[0]['source_sections'][0]['items'][0]['id'] == 's1-i41'
+    assert result['calculation_sheet']['coverage']['structured'] == 85
+    assert result['calculation_source']['pipeline']['semantic']['status'] == 'complete'
+
+
+@pytest.mark.parametrize('hint,mode', [('calculation_sheet', 'reextract'), ('auto', 'auto')])
+def test_transcription_stage_returns_exact_source_without_semantic_request(hint, mode):
+    req = request(); req['stage'] = 'transcription'
+    text = 'Design limits\n$x<y$'
+    client = Provider(response(req['identity'], text))
+    result = cp.process_request(req, hint, mode, client, 'object.png')
+    assert result['status'] == 'needs_review'
+    assert len(client.calls) == 1
+    assert client.calls[0][0] == 'object.png'
+    assert result['calculation_source']['original_content'] == text
+    assert result['calculation_source']['pipeline']['semantic']['status'] == 'pending'
+    assert 'calculation_sheet' not in result
+
+
+@pytest.mark.parametrize('hint,mode,stage', [
+    ('data_table', 'reextract', 'transcription'),
+    ('calculation_sheet', 'organize_existing', 'transcription'),
+    ('calculation_sheet', 'reextract', 'unknown'),
+])
+def test_invalid_stage_never_calls_provider(hint, mode, stage):
+    req = request(); req['stage'] = stage
+    client = Provider()
+    result = cp.process_request(req, hint, mode, client, 'object.png')
+    assert result['reason'] == 'invalid_calculation_processing_stage'
+    assert not client.calls
+
+
+@pytest.mark.parametrize('format', ['markdown', 'html'])
+def test_table_cell_context_survives_formula_batches(format):
+    formulas = '<br>'.join(f'$q={i}$ for mode A' for i in range(45))
+    content = (f'| Scope | Equations |\n|---|---|\n| Shared applicability | {formulas} |'
+               if format == 'markdown' else
+               f'<table><tr><th>Scope</th><th>Equations</th></tr><tr><td>Shared applicability</td><td>{formulas}</td></tr></table>')
+    item = {'layout_id': 'synthetic-table'}
+    provider = Provider()
+    cp.structure_calculation_source(provider, item, content, {}, 0)
+    ctx = item['calculation_source']
+    sections = cp.calculation_source_sections(ctx['text'], ctx['table_rows'])
+    units = [u for section in sections for u in section['items'] if u['math']]
+    assert len(units) == 45
+    assert len({u['id'] for u in units}) == 45
+    for unit in units:
+        assert [c['text'] for c in unit['row_context']] == ['Shared applicability']
+        for source in [unit, *unit['row_context']]:
+            assert ctx['text'][slice(*source['source_range'])] == source['text']
+    batches = cp.source_batches(sections)
+    assert len(batches) == 2
+    assert all('Shared applicability' in u['row_context'][0]['text']
+               for batch in batches for s in batch for u in s['items'] if u['math'])
+    assert ctx['original_content'] == content
+
+
+def test_markdown_cells_keep_math_pipes_multiline_environment_and_duplicate_symbols():
+    content = r'''| Scope | Equations |
+| --- | --- |
+| Case A | $q=|x|$ <br> $q=2$ when $x=0$ |
+| Case B | \\begin{aligned}
+q &= 3 \\\\
+x &= |y|
+\\end{aligned} |'''.replace('\\\\', '\\')
+    ctx = cp.source_context(content, structural=True)
+    sections = cp.calculation_source_sections(ctx['text'], ctx['table_rows'])
+    units = [u for s in sections for u in s['items'] if u['math']]
+    assert len(units) == 3
+    assert units[0]['math'] == ['q=|x|']
+    assert units[1]['math'] == ['q=2', 'x=0']
+    assert '\\begin{aligned}' in units[2]['text'] and '|y|' in units[2]['text']
+    assert [u['row_context'][0]['text'] for u in units] == ['Case A', 'Case A', 'Case B']
+
+
+def test_row_context_is_citable_and_retained_when_model_omits_formula():
+    content = '| Applicability | Equations |\n| --- | --- |\n| Shared scope | $q=1$ <br> $q=2$ |'
+    class ScopedProvider:
+        description_language = 'en'
+        last_call_info = {}
+        def extract_calculation_sheet(self, images, target):
+            assert images is None
+            return {'object_ref': target['object_ref'], 'source_sha256': target['source_sha256'],
+                    'source_revision': target['source_revision'], 'semantic_desc': 'Equations for the supplied scope.',
+                    'unresolved': [], 'image_discrepancies': [], 'sections': [{'title': '', 'items': [
+                        {'source_item_id': u['id'], 'kind': 'branch' if u['math'] else 'note',
+                         'conditions': ['Shared scope'] if u['math'] else []}
+                        for s in target['source_sections'] for u in s['items'] if u['math'] != ['q=2']]}]}
+    req = request(); req['existing_content'] = content
+    out = cp.process_request(req, 'calculation_sheet', 'organize_existing', ScopedProvider())
+    items = [u for s in out['calculation_sheet']['sections'] for u in s['items']]
+    formula = next(u for u in items if u.get('latex') == 'q=1')
+    assert formula['conditions'] == ['Shared scope']
+    assert formula['content'] == '$q=1$'
+    assert formula['source']['row_context'][0]['text'] == 'Shared scope'
+    missing = next(u for u in items if u['content'] == '$q=2$')
+    assert missing['review_status'] == 'needs_completion'
+    assert missing['source']['row_context'][0]['text'] == 'Shared scope'
+    assert out['calculation_sheet']['coverage']['needs_review'] == 1
+
+
+def test_html_cell_ranges_account_for_trimmed_math_edge_whitespace():
+    ctx = cp.source_context('<table><tr><td> Scope </td><td> $q=1$ </td></tr></table>', structural=True)
+    units = [u for s in cp.calculation_source_sections(ctx['text'], ctx['table_rows']) for u in s['items']]
+    formula = next(u for u in units if u['math'])
+    assert formula['text'] == '$q=1$'
+    assert formula['row_context'][0]['text'] == 'Scope'
+    assert ctx['text'][slice(*formula['source_range'])] == formula['text']
+
+
+def test_explicit_markdown_headings_keep_standalone_annotation_as_item():
+    text = '## Defined limits\n$x<3$\nNo check in this region\n$y<4$\n## Symbols\n$x$ is an input.'
+    sections = cp.calculation_source_sections(text)
+    assert [s['title'] for s in sections] == ['Defined limits', 'Symbols']
+    assert [u['text'] for u in sections[0]['items']] == ['$x<3$', 'No check in this region', '$y<4$']
+    for section in sections:
+        for unit in section['items']:
+            assert text[slice(*unit['source_range'])] == unit['text']
+
+
+@pytest.mark.parametrize('count', [1, 45])
+def test_section_heading_can_be_cited_across_bounded_batches(count):
+    text = '## Service condition A\n' + '\n'.join(f'$q={i}$' for i in range(count))
+    class HeadingProvider:
+        description_language = 'en'
+        last_call_info = {}
+        def extract_calculation_sheet(self, image, target):
+            assert image is None
+            return {'object_ref': target['object_ref'], 'source_sha256': target['source_sha256'],
+                    'source_revision': target['source_revision'], 'semantic_desc': 'Equations under the supplied service condition.',
+                    'unresolved': [], 'image_discrepancies': [], 'sections': [{'title': s['title'], 'items': [
+                        {'source_item_id': u['id'], 'kind': 'formula', 'conditions': [s['title']]}
+                        for u in s['items']]} for s in target['source_sections']]}
+    req = request(); req['existing_content'] = text
+    out = cp.process_request(req, 'calculation_sheet', 'organize_existing', HeadingProvider())
+    sheet = out['calculation_sheet']
+    assert sheet['coverage']['needs_review'] == 0
+    items = [u for s in sheet['sections'] for u in s['items']]
+    assert len(items) == count
+    for unit in items:
+        assert unit['conditions'] == ['Service condition A']
+        assert any('Service condition A' in sheet['source_text'][slice(*r)] for r in unit['source']['text_ranges'])
+        assert 'Service condition A' not in unit['content']
+
+
+def test_other_section_heading_cannot_be_cited_as_current_condition():
+    text = '## Service condition A\n$q=1$\n## Service condition B\n$q=2$'
+    class WrongHeading:
+        description_language = 'en'
+        last_call_info = {}
+        def extract_calculation_sheet(self, image, target):
+            return {'object_ref': target['object_ref'], 'source_sha256': target['source_sha256'],
+                    'source_revision': target['source_revision'], 'semantic_desc': 'Equations under separate conditions.',
+                    'unresolved': [], 'image_discrepancies': [], 'sections': [{'title': s['title'], 'items': [
+                        {'source_item_id': u['id'], 'kind': 'formula', 'conditions': ['Service condition B']}
+                        for u in s['items']]} for s in target['source_sections']]}
+    req = request(); req['existing_content'] = text
+    out = cp.process_request(req, 'calculation_sheet', 'organize_existing', WrongHeading())
+    first = out['calculation_sheet']['sections'][0]['items'][0]
+    assert first['latex'] == 'q=1'
+    assert first['conditions'] == []
+    assert first['review_status'] == 'needs_completion'
+
+
+def test_review_text_rpc_checkpoints_after_one_batch_and_resumes_only_unfinished(monkeypatch):
+    from tests.test_pdf2md_calculation_sheet import framed_proposal
+    req = request(); req['existing_content'] = '\n'.join(f'$q={i}$' for i in range(85))
+    class BatchProvider(Provider):
+        def extract_calculation_sheet(self, image, target):
+            assert image is None
+            self.calls.append(copy.deepcopy(target))
+            return framed_proposal(target)
+    seen = []
+    for expected in [40, 80, 85]:
+        client = BatchProvider()
+        monkeypatch.setattr(sp, 'DynamicVLMClient', lambda *_: client)
+        out = json.loads(sp.extract_page_tables_direct(table_kind_hint='calculation_sheet',
+            processing_mode='organize_existing', context={'calculation_request': req}))
+        assert len(client.calls) == 1
+        seen.extend(u['id'] for s in client.calls[0]['source_sections'] for u in s['items'])
+        sheet = out['calculation_sheet']
+        assert sheet['coverage']['represented'] == 85
+        assert sheet['coverage']['structured'] == expected
+        req['calculation_resume'] = out['calculation_source']['pipeline']['semantic']
+    assert len(seen) == len(set(seen)) == 85
+    assert req['calculation_resume']['status'] == 'complete'
+
+
+def test_semantic_adapter_binds_request_identity_without_model_echo(monkeypatch):
+    client = DynamicVLMClient(None)
+    target = {'calculation_stage': 'semantic', 'object_ref': 'fixture-layout',
+              'source_sha256': 'a' * 64, 'source_revision': 'b' * 64,
+              'source_sections': []}
+    captured = []
+    monkeypatch.setattr(client, '_call_text_prompt',
+                        lambda prompt, **kw: captured.append((prompt, kw)) or json.dumps({'sections': []}))
+    result = client._staged_calculation(None, target)
+    for key in ('object_ref', 'source_sha256', 'source_revision'):
+        assert result[key] == target[key]
+        assert key not in json.loads(captured[0][0])
+        assert key not in captured[0][1]['system_prompt']
+
+
+@pytest.mark.parametrize('field,reason', [
+    ('object_ref', 'calculation_identity_mismatch'),
+    ('source_sha256', 'calculation_identity_mismatch'),
+    ('source_revision', 'calculation_source_revision_mismatch'),
+])
+def test_semantic_adapter_rejects_unsolicited_conflicting_identity(monkeypatch, field, reason):
+    client = DynamicVLMClient(None)
+    target = {'calculation_stage': 'semantic', 'object_ref': 'fixture-layout',
+              'source_sha256': 'a' * 64, 'source_revision': 'b' * 64,
+              'source_sections': []}
+    monkeypatch.setattr(client, '_call_text_prompt',
+                        lambda *args, **kw: json.dumps({**target, field: 'wrong'}))
+    with pytest.raises(ValueError, match=reason):
+        client._staged_calculation(None, target)
+
+
+@pytest.mark.parametrize('count', [1, 45])
+def test_leading_document_headings_are_citable_in_every_batch(count):
+    text = '# Calculation fragment\n# Shared document scope\n## Equations\n' + '\n'.join(f'$q={i}$' for i in range(count))
+    class DocumentHeadingProvider:
+        description_language = 'en'
+        last_call_info = {}
+        def extract_calculation_sheet(self, image, target):
+            assert [s['title'] for s in target['source_sections'][:2]] == ['Calculation fragment', 'Shared document scope']
+            return {'object_ref': target['object_ref'], 'source_sha256': target['source_sha256'],
+                    'source_revision': target['source_revision'], 'semantic_desc': 'Equations from the supplied fragment.',
+                    'unresolved': [], 'image_discrepancies': [], 'sections': [{'title': s['title'], 'items': [
+                        {'source_item_id': u['id'], 'kind': 'formula', 'references': ['Shared document scope']}
+                        for u in s['items']]} for s in target['source_sections']]}
+    req = request(); req['existing_content'] = text
+    out = cp.process_request(req, 'calculation_sheet', 'organize_existing', DocumentHeadingProvider())
+    sheet = out['calculation_sheet']
+    assert sheet['coverage']['structured'] == count
+    assert sheet['coverage']['needs_review'] == 0
+    for unit in [u for s in sheet['sections'] for u in s['items']]:
+        assert unit['references'] == ['Shared document scope']
+        assert 'Shared document scope' not in unit['content']
+        assert any('Shared document scope' in sheet['source_text'][slice(*r)] for r in unit['source']['text_ranges'])
+
+
+def test_mixed_formula_annotation_unit_retains_independent_outputs():
+    req = request(); req['existing_content'] = '## Limits\n$x<3$ No check for the middle region $y<4$'
+    class MixedProvider:
+        description_language = 'en'
+        last_call_info = {}
+        def extract_calculation_sheet(self, image, target):
+            unit = target['source_sections'][0]['items'][0]
+            return {'object_ref': target['object_ref'], 'source_sha256': target['source_sha256'],
+                    'source_revision': target['source_revision'], 'semantic_desc': 'Two limits and an independent region annotation.',
+                    'unresolved': [], 'image_discrepancies': [], 'sections': [{'title': 'Limits', 'items': [
+                        {'source_item_id': unit['id'], 'source_part_id': 'left', 'kind': 'check', 'latex_source_index': 0},
+                        {'source_item_id': unit['id'], 'source_part_id': 'middle', 'kind': 'note', 'name': 'No check for the middle region'},
+                        {'source_item_id': unit['id'], 'source_part_id': 'right', 'kind': 'check', 'latex_source_index': 1}]}]}
+    out = cp.process_request(req, 'calculation_sheet', 'organize_existing', MixedProvider())
+    sheet = out['calculation_sheet']; items = [u for s in sheet['sections'] for u in s['items']]
+    assert sheet['coverage']['needs_review'] == 0
+    assert [u['latex'] for u in items if u['kind'] == 'check'] == ['x<3', 'y<4']
+    assert len([u for u in items if u['kind'] == 'note']) == 1
+    assert all(not u.get('conditions') for u in items)
+
+
+def test_staged_prompts_preserve_independent_formula_and_annotation_boundaries(monkeypatch):
+    client = DynamicVLMClient(None); prompts = []
+    monkeypatch.setattr(client, '_call_text_prompt', lambda prompt, **kw: prompts.append(kw['system_prompt']) or '{}')
+    monkeypatch.setattr(client, '_call_image_prompt', lambda image, prompt, **kw: prompts.append(prompt) or '{}')
+    client._staged_calculation(None, {'calculation_stage': 'semantic', 'source_sections': []})
+    client._staged_calculation('synthetic.png', {'calculation_stage': 'transcription'})
+    assert '独立公式' in prompts[0] and 'source_part_id' in prompts[0]
+    assert '独立段落' in prompts[1]
+
+
+@pytest.mark.parametrize('count', [1, 45])
+def test_plain_document_preamble_is_citable_without_becoming_item_body(count):
+    text = 'Calculation fragment\nShared document scope\n## Equations\n' + '\n'.join(f'$q={i}$' for i in range(count))
+    class PreambleProvider:
+        description_language = 'en'
+        last_call_info = {}
+        def extract_calculation_sheet(self, image, target):
+            return {'object_ref': target['object_ref'], 'source_sha256': target['source_sha256'],
+                    'source_revision': target['source_revision'], 'semantic_desc': 'Equations from the supplied fragment.',
+                    'unresolved': [], 'image_discrepancies': [], 'sections': [{'title': s['title'], 'items': [
+                        {'source_item_id': u['id'], 'kind': 'formula' if u['math'] else 'note',
+                         'references': ['Shared document scope']}
+                        for u in s['items']]} for s in target['source_sections']]}
+    req = request(); req['existing_content'] = text
+    out = cp.process_request(req, 'calculation_sheet', 'organize_existing', PreambleProvider())
+    sheet = out['calculation_sheet']; items = [u for s in sheet['sections'] for u in s['items']]
+    assert sheet['coverage']['structured'] == count + 2
+    assert sheet['coverage']['needs_review'] == 0
+    assert len([u for u in items if u.get('latex')]) == count
+    for unit in [u for u in items if u.get('latex')]:
+        assert unit['references'] == ['Shared document scope']
+        assert 'Shared document scope' not in unit['content']
+
+
+def test_formula_section_cannot_become_shared_document_preamble():
+    text = '$a=1$\nLocal note\n## Other scope\n$b=2$'
+    class NotGlobalProvider:
+        description_language = 'en'
+        last_call_info = {}
+        def extract_calculation_sheet(self, image, target):
+            return {'object_ref': target['object_ref'], 'source_sha256': target['source_sha256'],
+                    'source_revision': target['source_revision'], 'semantic_desc': 'Two local scopes.',
+                    'unresolved': [], 'image_discrepancies': [], 'sections': [{'title': s['title'], 'items': [
+                        {'source_item_id': u['id'], 'kind': 'formula' if u['math'] else 'note',
+                         'references': ['Local note'] if u['text'] == '$b=2$' else []}
+                        for u in s['items']]} for s in target['source_sections']]}
+    req = request(); req['existing_content'] = text
+    out = cp.process_request(req, 'calculation_sheet', 'organize_existing', NotGlobalProvider())
+    unit = next(u for s in out['calculation_sheet']['sections'] for u in s['items'] if u.get('latex') == 'b=2')
+    assert any(r['reason'] == 'field_source_mismatch' for r in unit['rejected_fields'])
+
+
+@pytest.mark.parametrize('reference,valid', [('Calculation fragment Shared document scope', True),
+                                           ('Calculation fragment Different document scope', False)])
+def test_preamble_reference_restores_source_whitespace_without_changing_words(reference, valid):
+    text = 'Calculation fragment\nShared document scope\n## Equations\n$q=1$'
+    class WrappedReferenceProvider:
+        description_language = 'en'
+        last_call_info = {}
+        def extract_calculation_sheet(self, image, target):
+            return {'object_ref': target['object_ref'], 'source_sha256': target['source_sha256'],
+                    'source_revision': target['source_revision'], 'semantic_desc': 'Equations from the supplied fragment.',
+                    'unresolved': [], 'image_discrepancies': [], 'sections': [{'title': s['title'], 'items': [
+                        {'source_item_id': u['id'], 'kind': 'formula' if u['math'] else 'note',
+                         'references': [reference] if u['math'] else []}
+                        for u in s['items']]} for s in target['source_sections']]}
+    req = request(); req['existing_content'] = text
+    out = cp.process_request(req, 'calculation_sheet', 'organize_existing', WrappedReferenceProvider())
+    sheet = out['calculation_sheet']; unit = next(u for s in sheet['sections'] for u in s['items'] if u.get('latex'))
+    assert unit['latex'] == 'q=1'
+    assert sheet['source_text'] == text
+    if valid:
+        assert sheet['coverage']['needs_review'] == 0
+        assert unit['references'] == ['Calculation fragment\nShared document scope']
+        assert any(text[slice(*r)] == unit['references'][0] for r in unit['source']['text_ranges'])
+    else:
+        assert any(r['reason'] == 'field_source_mismatch' for r in unit['rejected_fields'])
+
+
+@pytest.mark.parametrize('reason', [None, 'calculation_response_truncated'])
+def test_calculation_wire_has_one_lossless_object_and_no_duplicate_envelopes(reason):
+    item = cp.initial_item(request(), 'calculation_sheet', 'organize_existing')
+    item['calculation_sheet'] = {'sections': [{'title': 'Synthetic', 'items': [
+        {'id': str(i), 'latex': f'q={i}', 'source': {'text_ranges': [[i, i+1]]}}
+        for i in range(77)]}], 'source_text': request()['existing_content']}
+    item['calculation_source'] = {'pipeline': {'semantic': {'batches': [
+        {'id': 1, 'status': 'complete', 'result': {'sections': item['calculation_sheet']['sections']}},
+        {'id': 2, 'status': 'pending'}]}}}
+    result = cp.result_for(item, 1, reason)
+    before = copy.deepcopy(result)
+    wire = sp._serialize_result(result, 'json')
+    decoded = json.loads(wire)
+    assert 'items' not in decoded and 'tables' not in decoded
+    assert decoded == {k: v for k, v in result.items() if k not in ('items', 'tables')}
+    assert result == before
+    assert len(wire) < len(json.dumps(result, ensure_ascii=False)) * 0.36
+
+
+def test_ordinary_table_wire_contract_remains_unchanged():
+    item = {'table_kind': 'data_table', 'columns': ['Name'], 'normalized_rows': [['A']]}
+    result = {'tool': 'extract_page_tables', 'items': [item], 'tables': [item], **item}
+    assert sp._serialize_result(result, 'json') == json.dumps(result, ensure_ascii=False)
+
+
+@pytest.mark.parametrize('content,title,pending', [
+    ("# New sheet (Cont'd)\n\nFragment only.\n$x=1$", "New sheet (Cont'd)", True),
+    ("<h2>New <em>sheet</em> (Continued)</h2><p>Fragment only.</p><p>$x=1$</p>", "New sheet (Continued)", True),
+    ("# New independent sheet\n$x=1$", "New independent sheet", False),
+])
+def test_saved_source_heading_replaces_stale_title_and_continuation(content, title, pending):
+    class SourceProvider(Provider):
+        def extract_calculation_sheet(self, image, target):
+            self.calls.append((image, target))
+            assert image is None
+            assert target['table_title'] == title
+            return {'object_ref': target['object_ref'], 'source_sha256': target['source_sha256'],
+                    'source_revision': target['source_revision'], 'semantic_desc': 'Only the supplied calculation fragment.',
+                    'unresolved': [], 'sections': [{'title': s['title'], 'items': [
+                        {'source_item_id': u['id'], 'kind': 'formula' if '$' in u['text'] else 'note'}
+                        for u in s['items']]} for s in target['source_sections']]}
+    req = request(); req.update(existing_content=content, table_title='Old table heading')
+    provider = SourceProvider()
+    out = cp.process_request(req, 'calculation_sheet', 'organize_existing', provider)
+    assert out['table_title'] == out['tableTitle'] == title
+    assert out['calculation_source']['table_title'] == title
+    assert out['continuation']['status'] == ('pending' if pending else 'none')
+    assert 'predecessor' not in out['continuation']
+    assert len(provider.calls) == 1
+    assert out['calculation_sheet']['coverage']['needs_review'] == 0

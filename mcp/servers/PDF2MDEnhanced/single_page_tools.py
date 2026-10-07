@@ -94,10 +94,10 @@ def extract_page_tables_direct(
     if table_kind_hint != "auto" or processing_mode != "auto" or isinstance(context, dict) and "calculation_request" in context:
         if query_enhancement is not None or output_format != "json":
             raise ValueError("calculation processing requires JSON output and no query enhancement")
-        return json.dumps(_process_calculation_request(
+        return _serialize_result(_process_calculation_request(
             context or {}, table_kind_hint, processing_mode, describe, vlm_config or _vlm_ocr_config(ocr_config),
             description_language, file_path, file_data, file_url, page_no, input_type, routing_config,
-        ), ensure_ascii=False)
+        ), output_format)
     if query_enhancement is not None:
         from .table_query import enhance_table
 
@@ -146,6 +146,9 @@ def _process_calculation_request(context, hint, mode, describe, vlm_config, lang
     if getattr(vlm, 'physical_request_limit', None) == 0:
         return process_request(request, hint, mode, vlm)
     if mode == "organize_existing":
+        if hint == "calculation_sheet":
+            # Return a durable checkpoint before another slow batch can outlive the RPC.
+            vlm.table_analysis_max_model_calls = min(calculation_budget(vlm), 1)
         result = process_request(request, hint, mode, vlm)
     else:
         bbox = request.get("bbox")
@@ -1789,6 +1792,12 @@ def _source_payload(ctx: SinglePageContext) -> Dict[str, Any]:
 def _serialize_result(result: Dict[str, Any], output_format: str) -> str:
     fmt = str(output_format or "json").strip().lower()
     if fmt == "json":
+        if (result.get("tool") == "extract_page_tables" and result.get("calculation_identity")
+                and result.get("table_kind") != "data_table"):
+            # Exact-object calculation responses already carry the full object at the root.
+            # Keep source evidence and resumable checkpoints once, without the two aliases.
+            return json.dumps({k: v for k, v in result.items() if k not in ("items", "tables")},
+                              ensure_ascii=False, separators=(",", ":"))
         return json.dumps(result, ensure_ascii=False)
     if fmt == "markdown":
         return _result_to_markdown(result)

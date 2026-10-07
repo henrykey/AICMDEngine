@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 mcp = FastMCP(name="pdf2md-enhanced", mask_error_details=True)
 manager = TaskManager(output_dir=OUTPUT_DIR)
+_calculation_page_operations = {}
 
 
 @mcp.tool("health_check")
@@ -98,6 +99,45 @@ async def process_task_page(
     description_language: str = "unknown",
     routing_config: Optional[Dict[str, Any]] = None,
 ) -> str:
+    if not (routing_config or {}).get("calculation_async"):
+        return await _process_task_page(task_id, page_no, vlm_config, ocr_config, policy,
+                                        prev_context, description_language, routing_config)
+    key = (task_id, page_no)
+    entry = _calculation_page_operations.get(key)
+    if entry is None:
+        if (routing_config or {}).get("calculation_poll"):
+            return json.dumps({"task_id": task_id, "page_no": page_no, "error": "calculation_page_execution_missing"})
+        started = asyncio.Event()
+        operation = asyncio.create_task(_process_task_page(task_id, page_no, vlm_config, ocr_config, policy,
+                    prev_context, description_language, routing_config, started))
+        _calculation_page_operations[key] = entry = (operation, started)
+    operation, started = entry
+    if not operation.done() and not started.is_set():
+        notification = asyncio.create_task(started.wait())
+        try:
+            await asyncio.wait((operation, notification), return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            notification.cancel()
+    if operation.done():
+        # Ordinary pages retain their synchronous lifecycle and response shape.
+        if not started.is_set():
+            _calculation_page_operations.pop(key, None)
+        return operation.result()
+    return json.dumps({"task_id": task_id, "page_no": page_no, "status": "processing",
+                       "reason": "calculation_source_saved", "poll_after_ms": 1000})
+
+
+async def _process_task_page(
+    task_id: str,
+    page_no: int,
+    vlm_config: Optional[Dict[str, Any]] = None,
+    ocr_config: Optional[Dict[str, Any]] = None,
+    policy: str = "auto",
+    prev_context: Optional[Dict[str, Any]] = None,
+    description_language: str = "unknown",
+    routing_config: Optional[Dict[str, Any]] = None,
+    calculation_started: Optional[asyncio.Event] = None,
+) -> str:
     loop = asyncio.get_event_loop()
     effective_routing_config = dict(routing_config or {})
     if ocr_config:
@@ -106,6 +146,7 @@ async def process_task_page(
     effective_vlm_config = _normalize_vlm_config(vlm_config or (ocr_vlm_config if ocr_vlm_config.get("enabled", True) else None))
     vlm_used = _vlm_runtime_info(effective_vlm_config)
     page_timeout_sec = _resolve_page_timeout(effective_vlm_config)
+    work_timeout_sec = page_timeout_sec
     try:
         await loop.run_in_executor(None, manager.update_page_running, task_id, page_no)
 
@@ -116,19 +157,30 @@ async def process_task_page(
         effective_routing_config["description_language"] = effective_description_language
         # Internal context for page processor policy decisions.
         effective_routing_config["__task_total_pages"] = len(task.planned_pages)
-        result = await asyncio.wait_for(
-            loop.run_in_executor(
-                None,
-                process_page,
-                task.source_path,
-                page_no,
-                policy,
-                effective_vlm_config,
-                effective_routing_config,
-                prev_context,
-            ),
-            timeout=page_timeout_sec,
-        )
+        def save_source(ref, item, content):
+            artifact = manager.save_calculation_source(task_id, page_no, ref, item, content)
+            if calculation_started is not None:
+                loop.call_soon_threadsafe(calculation_started.set)
+            return artifact
+        effective_routing_config["__calculation_source_store"] = save_source
+        work = loop.run_in_executor(None, process_page, task.source_path, page_no, policy,
+                                    effective_vlm_config, effective_routing_config, prev_context)
+        if calculation_started is None:
+            result = await asyncio.wait_for(work, timeout=page_timeout_sec)
+        else:
+            notification = asyncio.create_task(calculation_started.wait())
+            try:
+                done, _ = await asyncio.wait((work, notification), timeout=page_timeout_sec,
+                                             return_when=asyncio.FIRST_COMPLETED)
+                if not done:
+                    raise asyncio.TimeoutError()
+                # Only a persisted calculation source enables bounded background semantics.
+                calls = (effective_vlm_config or {}).get('table_analysis_max_model_calls', 2)
+                calls = calls if type(calls) is int and 1 <= calls <= 8 else 1
+                work_timeout_sec = page_timeout_sec * calls
+                result = await asyncio.wait_for(work, timeout=work_timeout_sec)
+            finally:
+                notification.cancel()
         await loop.run_in_executor(None, manager.update_page_result, task_id, page_no, result)
         res = {
             "task_id": task_id,
@@ -142,7 +194,7 @@ async def process_task_page(
             "vlm": vlm_used,
         }
     except asyncio.TimeoutError:
-        msg = f"process_task_page timeout after {page_timeout_sec}s"
+        msg = f"process_task_page timeout after {work_timeout_sec}s"
         await loop.run_in_executor(None, manager.update_page_failed, task_id, page_no, msg)
         logger.warning(
             "process_task_page timeout: task_id=%s page_no=%s timeout=%ss",
@@ -492,6 +544,10 @@ async def retry_failed_pages(task_id: str, pages: Optional[List[int]] = None) ->
     loop = asyncio.get_event_loop()
     try:
         res = await loop.run_in_executor(None, manager.retry_failed_pages, task_id, pages)
+        for page_no in res.get('retry_pages', []):
+            entry = _calculation_page_operations.get((task_id, page_no))
+            if entry is not None and entry[0].done():
+                _calculation_page_operations.pop((task_id, page_no), None)
     except Exception as exc:
         res = {"error": str(exc)}
     return json.dumps(res, ensure_ascii=False)
@@ -502,6 +558,9 @@ async def finalize_task(task_id: str, merge_mode: str = "none") -> str:
     loop = asyncio.get_event_loop()
     try:
         res = await loop.run_in_executor(None, manager.finalize_task, task_id, merge_mode)
+        for key, (operation, _) in list(_calculation_page_operations.items()):
+            if key[0] == task_id and operation.done():
+                _calculation_page_operations.pop(key, None)
     except Exception as exc:
         res = {"error": str(exc)}
     return json.dumps(res, ensure_ascii=False)

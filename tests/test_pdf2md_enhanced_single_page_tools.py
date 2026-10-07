@@ -2551,3 +2551,66 @@ def test_review_title_image_recovery_and_failure_are_bounded(monkeypatch):
     assert result["items"][0]["caption"] == ""
     assert result["items"][0]["title_source"] == "missing"
     assert "title_recovery_failed" in result["warnings"]
+
+
+@pytest.mark.parametrize('calculation', [True, False])
+def test_calculation_page_handoff_keeps_one_worker_and_ordinary_sync(monkeypatch, calculation):
+    import threading
+    release = threading.Event()
+    entered = threading.Event()
+    class FakeManager:
+        calls = 0
+        saved = None
+        def get_task(self, task_id):
+            return type('Task', (), {'source_path': '/tmp/synthetic.pdf', 'planned_pages': [1], 'description_language': 'en'})()
+        def update_page_running(self, *args): self.calls += 1
+        def save_calculation_source(self, *args): return {'artifact_id': 'saved'}
+        def update_page_result(self, task_id, page_no, result): self.saved = result
+        def update_page_failed(self, *args): raise AssertionError('Worker must survive the initial RPC deadline')
+    manager = FakeManager()
+    monkeypatch.setattr(server, 'manager', manager)
+    monkeypatch.setattr(server, '_resolve_page_timeout', lambda cfg: .1)
+    def process(*args):
+        entered.set()
+        if calculation:
+            args[4]['__calculation_source_store']('tables:0', {}, '$x=1$')
+        release.wait(1)
+        return {'page_no': 1, 'render': {'markdown': 'kept'}}
+    monkeypatch.setattr(server, 'process_page', process)
+    fn = getattr(server.process_task_page, 'fn', server.process_task_page)
+    async def run():
+        args = dict(task_id='async-calculation-test-' + str(calculation), page_no=1,
+                    routing_config={'calculation_async': True})
+        pending = asyncio.create_task(fn(**args))
+        try:
+            while not entered.is_set(): await asyncio.sleep(.001)
+            if calculation:
+                first = json.loads(await asyncio.wait_for(asyncio.shield(pending), .2))
+                assert first['status'] == 'processing'
+                poll = {**args, 'routing_config': {'calculation_async': True, 'calculation_poll': True}}
+                await asyncio.sleep(.12)  # Beyond the original synchronous page deadline.
+                assert json.loads(await fn(**poll))['status'] == 'processing'
+            else:
+                await asyncio.sleep(.02)
+                assert not pending.done()
+            release.set()
+            if calculation:
+                for _ in range(100):
+                    result = json.loads(await fn(**poll))
+                    if 'page_result' in result: break
+                    await asyncio.sleep(.005)
+            else: result = json.loads(await pending)
+            assert result['page_result'] == manager.saved
+            assert manager.calls == 1
+        finally:
+            release.set()
+            await pending
+    asyncio.run(run())
+
+
+def test_calculation_page_poll_missing_handle_never_restarts(monkeypatch):
+    monkeypatch.setattr(server, 'process_page', lambda *args: pytest.fail('Polling cannot start a worker'))
+    fn = getattr(server.process_task_page, 'fn', server.process_task_page)
+    result = json.loads(asyncio.run(fn(task_id='missing-handle', page_no=1,
+        routing_config={'calculation_async': True, 'calculation_poll': True})))
+    assert result['error'] == 'calculation_page_execution_missing'

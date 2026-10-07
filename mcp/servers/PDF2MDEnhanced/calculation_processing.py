@@ -30,6 +30,9 @@ def validate_request(request, hint, mode):
         raise ValueError('manual_table_kind_required')
     if not isinstance(request, dict) or not valid_identity(request.get('identity')):
         raise ValueError('calculation_identity_mismatch')
+    if request.get('stage') is not None and (request['stage'] != 'transcription'
+            or mode == 'organize_existing' or hint == 'data_table'):
+        raise ValueError('invalid_calculation_processing_stage')
     content = request.get('existing_content', '')
     if not isinstance(content, str) or len(content) > 100000:
         raise ValueError('input_budget_exceeded')
@@ -129,17 +132,23 @@ def transcription_body(text, caption):
     return text
 
 
-def source_batches(sections):
+def source_batches(sections, context_size=0):
     """Bound semantic input at whole-unit boundaries; never split a formula."""
-    batches = []
-    batch = []
-    size = count = 0
+    leading = []
     for section in sections:
+        if section['items']:
+            break
+        leading.append(section)
+    heading_size = context_size + sum(len(s['title']) for s in leading)
+    batches = []
+    batch = deepcopy(leading)
+    size, count = heading_size, 0
+    for section in sections[len(leading):]:
         group = None
         for unit in section['items'] or [None]:
-            length = len(section['title']) + (len(unit['text']) if unit else 0)
-            if batch and (size + length > 12000 or count >= 40):
-                batches.append(batch); batch = []; size = count = 0; group = None
+            length = len(section['title']) + (len(unit['text']) + sum(len(c['text']) for c in unit.get('row_context', [])) if unit else 0)
+            if count and (size + length > 12000 or count >= 40):
+                batches.append(batch); batch = deepcopy(leading); size, count = heading_size, 0; group = None
             if group is None:
                 group = {**section, 'items': []}
                 batch.append(group)
@@ -152,10 +161,13 @@ def source_batches(sections):
     return batches
 
 
-def structure_calculation_source(vlm, item, content, target, available_calls):
+def structure_calculation_source(vlm, item, content, target, available_calls, resume=None, identity=None):
     """Common text-only semantic stage for saved content and existing OCR."""
     source = item.setdefault('calculation_source', {})
-    content = transcription_body(content, source.get('table_title'))
+    original_content = content
+    original_context = source_context(content)
+    if source.get('origin') == 'image_transcription':
+        content = transcription_body(content, source.get('table_title'))
     # OCR-generated math wrappers are presentation syntax, not formula characters.
     # Keep the untouched image_transcription and repair only a provably redundant final dollar.
     if source.get('origin') == 'image_transcription' and content.endswith('$$'):
@@ -166,9 +178,13 @@ def structure_calculation_source(vlm, item, content, target, available_calls):
                 and all(complete for _, _, complete in math_spans(candidate))):
             content = candidate
             source['transcription_normalizations'] = ['redundant_trailing_math_delimiter']
-    ctx = source_context(content)
+    ctx = source_context(content, structural=True)
+    # Parsing text may be normalized; identity always belongs to the saved source.
+    for key in ('sha256', 'source_revision'):
+        if key in original_context:
+            ctx[key] = original_context[key]
     ctx['description_language'] = getattr(vlm, 'description_language', 'unknown')
-    source.update({**ctx, 'original_content': content})
+    source.update({**ctx, 'original_content': original_content})
     pipeline = source.setdefault('pipeline', {})
     pipeline['provider'] = getattr(vlm, 'provider', '')
     pipeline['model'] = getattr(vlm, 'model', '')
@@ -179,10 +195,16 @@ def structure_calculation_source(vlm, item, content, target, available_calls):
     if not ctx['text'].strip():
         return 0, 'calculation_source_missing'
     try:
-        ctx['source_sections'] = calculation_source_sections(ctx['text'])
+        ctx['source_sections'] = calculation_source_sections(ctx['text'], ctx.get('table_rows'))
     except ValueError:
         pipeline['framing']['reason'] = 'calculation_framing_failed'
         return 0, 'input_budget_exceeded'
+    first_section = ctx['source_sections'][0] if ctx['source_sections'] else {}
+    preamble = first_section.get('items', []) if not first_section.get('title') else []
+    ctx['document_preamble'] = []
+    if preamble and all(not u['math'] and not re.search(r'[=<>≤≥]', u['text']) for u in preamble):
+        start, end = preamble[0]['source_range'][0], preamble[-1]['source_range'][1]
+        ctx['document_preamble'] = [{'text': ctx['text'][start:end], 'source_range': [start, end]}]
     total = sum(len(s['items']) for s in ctx['source_sections'])
     pipeline['framing'].update(status='complete', input_units=total, output_units=total)
     invalid_units = [u for section in ctx['source_sections'] for u in section['items']
@@ -191,7 +213,8 @@ def structure_calculation_source(vlm, item, content, target, available_calls):
     invalid_ids = {u['id'] for u in invalid_units}
     eligible = [{**section, 'items': [u for u in section['items'] if u['id'] not in invalid_ids]}
                 for section in ctx['source_sections']]
-    batches = source_batches([section for section in eligible if section['items'] or not invalid_units])
+    batches = source_batches([section for section in eligible if section['items'] or not invalid_units],
+                             sum(len(u['text']) for u in ctx['document_preamble']))
     if invalid_units:
         pipeline['framing'].update(status='needs_review', reason='calculation_source_math_invalid',
                                    invalid_units=len(invalid_units))
@@ -199,25 +222,46 @@ def structure_calculation_source(vlm, item, content, target, available_calls):
                 'source_revision': ctx['source_revision']}
     descriptions = []
     errors = ['calculation_source_math_invalid'] if invalid_units else []
+    identity = identity or {k: target.get(k) for k in ('object_ref', 'source_sha256')}
+    progress = [{'id': index + 1, 'source_item_ids': [u['id'] for s in batch for u in s['items']],
+                 'status': 'pending'} for index, batch in enumerate(batches)]
+    previous = {}
+    if resume is not None:
+        if (not isinstance(resume, dict) or resume.get('source_revision') != ctx['source_revision']
+                or resume.get('identity') != identity or not isinstance(resume.get('batches'), list)
+                or len(resume['batches']) != len(progress)):
+            return 0, 'calculation_resume_mismatch'
+        for expected, saved in zip(progress, resume['batches']):
+            if (not isinstance(saved, dict) or saved.get('id') != expected['id']
+                    or saved.get('source_item_ids') != expected['source_item_ids']
+                    or saved.get('status') not in ('pending', 'complete', 'partial', 'failed')):
+                return 0, 'calculation_resume_mismatch'
+            if saved['status'] == 'complete':
+                if not isinstance(saved.get('result'), dict):
+                    return 0, 'calculation_resume_mismatch'
+                previous[expected['id']] = saved['result']
     calls = 0
-    for batch in batches:
+    for batch, checkpoint in zip(batches, progress):
+        cached = previous.get(checkpoint['id'])
         code = None
-        if calls >= available_calls:
+        if cached is None and calls >= available_calls:
             code = 'table_analysis_budget_exhausted'
-        elif getattr(vlm, 'physical_request_limit', None) is not None and vlm.physical_requests >= vlm.physical_request_limit:
+        elif cached is None and getattr(vlm, 'physical_request_limit', None) is not None and vlm.physical_requests >= vlm.physical_request_limit:
             code = 'table_analysis_physical_budget_exhausted'
         if code:
             errors.append(code)
-            break
+            checkpoint['reason'] = code
+            continue
         # Only a batch's citation text is sent. Ranges remain relative to the complete revision.
         batch_text = ctx['text'] if len(batches) == 1 else '\n'.join(
-            value for s in batch for value in [s['title'], *[u['text'] for u in s['items']]] if value)
+            value for s in batch for value in [s['title'], *[part['text'] for u in s['items'] for part in [u, *u.get('row_context', [])]]] if value)
         if len(batch_text) > 12000:
             errors.append('calculation_unit_budget_exceeded')
+            checkpoint.update(status='failed', reason='calculation_unit_budget_exceeded')
             continue
         batch_target = {**target, 'calculation_stage': 'semantic', 'source_text': batch_text,
                         'source_revision': ctx['source_revision'], 'source_sections': batch,
-                        'range_unit': 'unicode_codepoint'}
+                        'document_preamble': ctx['document_preamble'], 'range_unit': 'unicode_codepoint'}
         caption = source.get('table_title') or item.get('table_title') or item.get('tableTitle')
         if isinstance(caption, str) and caption.strip():
             batch_target['table_title'] = caption
@@ -226,11 +270,14 @@ def structure_calculation_source(vlm, item, content, target, available_calls):
         batch_target.pop('calculation_source', None)
         batch_target.pop('adjacent_objects', None)
         try:
-            calls += 1
-            raw = vlm.extract_calculation_sheet(None, batch_target)
-            code = response_error(vlm)
-            if code:
-                raise ValueError(code)
+            if cached is None:
+                calls += 1
+                raw = vlm.extract_calculation_sheet(None, batch_target)
+                code = response_error(vlm)
+                if code:
+                    raise ValueError(code)
+            else:
+                raw = deepcopy(cached)
             if not isinstance(raw, dict):
                 raise ValueError('calculation_response_invalid')
             if raw.get('object_ref') != target['object_ref'] or raw.get('source_sha256') != target['source_sha256']:
@@ -250,6 +297,20 @@ def structure_calculation_source(vlm, item, content, target, available_calls):
                                 or 'source_item_ids' in entry and (not isinstance(entry['source_item_ids'], list)
                                 or not all(isinstance(k, str) and k in allowed for k in entry['source_item_ids']))):
                             entry['source_item_id'] = 'invalid-batch-source-id'
+            batch_sheet = parse_calculation_sheet(raw, {**ctx, 'source_sections': batch}, item)
+            # Absolute source ranges still reference the whole text. Other batches
+            # are intentionally unmapped here; framed coverage checks every local unit.
+            batch_issues = [issue for issue in batch_sheet['unresolved']
+                            if issue.get('reason') != 'unmapped_source_text']
+            batch_complete = (not batch_issues and raw.get('unresolved') == []
+                              and raw.get('image_discrepancies') == []
+                              and batch_sheet.get('semantic_status') != 'missing'
+                              and batch_sheet['coverage']['needs_review'] == 0)
+            checkpoint['status'] = 'complete' if batch_complete else 'partial'
+            if batch_complete:
+                checkpoint['result'] = {key: deepcopy(raw[key]) for key in (
+                    'object_ref', 'source_sha256', 'source_revision', 'sections', 'semantic_desc',
+                    'unresolved', 'image_discrepancies', 'inputs', 'output', 'steps') if key in raw}
             combined['sections'].extend(raw['sections'])
             for field in ('unresolved', 'image_discrepancies'):
                 if raw.get(field) != []:
@@ -261,12 +322,15 @@ def structure_calculation_source(vlm, item, content, target, available_calls):
                     if key in raw:
                         combined[key] = raw[key]
         except PhysicalRequestBudgetExceeded:
-            errors.append('table_analysis_physical_budget_exhausted'); break
+            errors.append('table_analysis_physical_budget_exhausted')
+            checkpoint.update(status='failed', reason=errors[-1])
         except TimeoutError:
             errors.append('calculation_provider_timeout')
+            checkpoint.update(status='failed', reason=errors[-1])
         except Exception as exc:
             errors.append(str(exc) if isinstance(exc, ValueError) and str(exc) in RESPONSE_CODES
                           else 'calculation_provider_failed')
+            checkpoint.update(status='failed', reason=errors[-1])
     combined['semantic_desc'] = '\n'.join(descriptions)
     sheet = parse_calculation_sheet(combined, ctx, item)
     for unit in invalid_units:
@@ -287,7 +351,8 @@ def structure_calculation_source(vlm, item, content, target, available_calls):
     pipeline['semantic'] = {'status': 'complete' if complete else 'partial',
                             'reason': None if complete else (errors[0] if errors else 'calculation_semantic_partial'),
                             'input_units': total, 'output_units': sheet['coverage']['structured'],
-                            'logical_calls': calls, 'batch_count': len(batches)}
+                            'logical_calls': calls, 'batch_count': len(batches),
+                            'source_revision': ctx['source_revision'], 'identity': deepcopy(identity), 'batches': progress}
     pipeline['validation'] = {'status': 'complete' if complete else 'needs_review', **sheet['coverage']}
     if getattr(vlm, 'physical_request_limit', None) is not None:
         pipeline['physical_requests'] = vlm.physical_requests
@@ -311,7 +376,7 @@ def _read_response(item, response, identity, hint, mode, language):
         raise ValueError('calculation_source_rewritten')
     if mode == 'organize_existing':
         if hint == 'calculation_sheet':
-            ctx['source_sections'] = calculation_source_sections(ctx['text'])
+            ctx['source_sections'] = calculation_source_sections(ctx['text'], ctx.get('table_rows'))
         response = deepcopy(response)
         for section in response.get('sections', []) if isinstance(response.get('sections'), list) else []:
             if not isinstance(section, dict) or not isinstance(section.get('items'), list):
@@ -409,11 +474,16 @@ def process_request(request, hint, mode, vlm, image_path=None, adjacent_images=N
     item = initial_item(request, hint, mode)
     calls = 0
     structured = False
+    transcription_only = isinstance(request, dict) and request.get('stage') == 'transcription'
     def finish(reason=None):
         nonlocal calls, structured
-        if not reason and not structured and item.get('table_kind') == 'calculation_sheet' and item.get('calculation_source', {}).get('text'):
+        if not reason and transcription_only and item.get('table_kind') == 'calculation_sheet':
+            item.pop('calculation_sheet', None)
+            item.setdefault('calculation_source', {}).setdefault('pipeline', {})['semantic'] = {
+                'status': 'pending', 'reason': 'source_persistence_required', 'logical_calls': 0}
+        if not reason and not transcription_only and not structured and item.get('table_kind') == 'calculation_sheet' and item.get('calculation_source', {}).get('text'):
             structured = True
-            extra, stage_reason = structure_calculation_source(vlm, item, item['calculation_source']['original_content'], target, calculation_budget(vlm) - calls)
+            extra, stage_reason = structure_calculation_source(vlm, item, item['calculation_source']['original_content'], target, calculation_budget(vlm) - calls, identity=identity)
             calls += extra
             if 'calculation_sheet' not in item:
                 reason = stage_reason
@@ -456,7 +526,15 @@ def process_request(request, hint, mode, vlm, image_path=None, adjacent_images=N
                                             'reason': 'manual_type_constraint', 'evidence': []}
             item['calculation_source'] = {'origin': 'existing_content'}
             item['continuation'] = {'status': 'none', 'reason': 'not_assessed_text_only'}
-            calls, reason = structure_calculation_source(vlm, item, request['existing_content'], target, calculation_budget(vlm))
+            source_title = source_context(request['existing_content']).get('title')
+            if source_title:
+                item['table_title'] = item['tableTitle'] = source_title
+                item['calculation_source']['table_title'] = source_title
+                fragment = bool(re.search(CONTINUATION_MARKER, source_title, re.IGNORECASE))
+                item['continuation'] = {'status': 'pending' if fragment else 'none',
+                                        'reason': 'adjacent_context_required' if fragment else 'no_continuation_evidence'}
+            calls, reason = structure_calculation_source(vlm, item, request['existing_content'], target, calculation_budget(vlm),
+                                                         request.get('calculation_resume'), identity)
             return finish(reason)
         calls += 1
         response = vlm.extract_calculation_sheet(image_path, target)
@@ -482,6 +560,9 @@ def process_request(request, hint, mode, vlm, image_path=None, adjacent_images=N
         if raw_continuation is None:
             raw_continuation = {'status': 'pending' if re.search(
                 CONTINUATION_MARKER, item.get('table_title', ''), re.IGNORECASE) else 'none'}
+        if transcription_only:
+            item['continuation'] = _continuation(raw_continuation, identity, content, request.get('adjacent_objects', []))
+            return finish()
         needs_context = (item['table_kind'] == 'uncertain' or response.get('continuation_required') is True
                          or isinstance(raw_continuation, dict) and raw_continuation.get('status') in ('pending', 'proposed'))
         adjacent = request.get('adjacent_objects', [])

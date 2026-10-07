@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -89,6 +91,54 @@ class TaskManager:
         task.updated_at = now_iso()
         self._persist_task(task)
         return task
+
+    def save_calculation_source(self, task_id: str, page_no: int, object_ref: str,
+                                item: Dict[str, Any], content: str) -> Dict[str, Any]:
+        """Persist an immutable object source in the existing task before semantics."""
+        task = self.get_task(task_id)
+        page = self._get_page(task, page_no)
+        if (not isinstance(content, str) or not content.strip() or len(content) > 100000
+                or not isinstance(object_ref, str) or not 0 < len(object_ref) <= 256):
+            raise ValueError('invalid_calculation_source')
+        layout_id = item.get('layout_id')
+        if layout_id is not None and (not isinstance(layout_id, str) or len(layout_id) > 256):
+            raise ValueError('invalid_calculation_source')
+        with open(task.source_path, 'rb') as source:
+            source_hash = hashlib.file_digest(source, 'sha256').hexdigest()
+        content_hash = hashlib.sha256(content.encode()).hexdigest()
+        identity = {'task_id': task_id, 'page_no': page_no, 'object_ref': object_ref,
+                    'layout_id': layout_id, 'source_sha256': source_hash, 'content_sha256': content_hash}
+        artifact_id = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+        snapshot = {**identity, 'artifact_id': artifact_id, 'origin': 'existing_ocr',
+                    'run_id': f'{task_id}:{page_no}:{page.attempts}', 'created_at': now_iso(),
+                    'format': 'markdown', 'original_content': content}
+        directory = self._task_dir(task_id) / 'calculation_sources'
+        directory.mkdir(mode=0o700, exist_ok=True)
+        destination = directory / (artifact_id + '.json')
+        if not destination.exists():
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=directory, delete=False) as output:
+                    temporary = Path(output.name)
+                    json.dump(snapshot, output, ensure_ascii=False)
+                    output.flush()
+                    os.fsync(output.fileno())
+                try:
+                    os.link(temporary, destination)
+                except FileExistsError:
+                    pass
+                descriptor = os.open(directory, os.O_RDONLY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+        stored = json.loads(destination.read_text(encoding='utf-8'))
+        if any(stored.get(key) != value for key, value in identity.items()) or stored.get('original_content') != content:
+            raise ValueError('calculation_source_artifact_conflict')
+        return {key: value for key, value in stored.items() if key != 'original_content'}
 
     def update_page_result(self, task_id: str, page_no: int, result: Dict[str, Any]) -> TaskRecord:
         task = self.get_task(task_id)

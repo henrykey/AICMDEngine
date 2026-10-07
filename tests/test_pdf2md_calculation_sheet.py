@@ -59,7 +59,7 @@ def test_organize_existing_rpc_honors_manual_type_without_reading_images(monkeyp
     assert result['calculation_sheet']['image_verified'] is False
     assert result['calculation_sheet']['sections'][0]['items'][0]['content'] == 'Pressure p = MPa'
     assert result['model_calls']['vlm_ocr'] == 1
-    assert result == fixture['mcp_response']
+    assert result == {k: v for k, v in fixture['mcp_response'].items() if k not in ('items', 'tables')}
 
 
 def proposal(content=HTML):
@@ -578,3 +578,100 @@ def test_plain_heading_before_symbol_definition_is_a_section_not_a_note():
     assert [s['title'] for s in sections] == ['Calculation', 'Legend']
     assert [len(s['items']) for s in sections] == [1, 1]
     assert sections[1]['items'][0]['text'] == 'Q – thermal energy.'
+
+
+def source_first_sheet(text, entry):
+    ctx = cs.source_context(text)
+    ctx['source_sections'] = cs.calculation_source_sections(ctx['text'])
+    ctx['description_language'] = 'en'
+    unit = ctx['source_sections'][0]['items'][0]
+    raw = {'semantic_desc': 'Describes the supplied calculation expression and its applicability.',
+           'sections': [{'title': '', 'items': [{'source_item_id': unit['id'], **entry}]}],
+           'unresolved': [], 'image_discrepancies': []}
+    return cs.parse_calculation_sheet(raw, ctx, {})
+
+
+def test_source_first_optional_item_description_does_not_make_complete_formula_missing():
+    sheet = source_first_sheet('$r=a/b$', {'kind': 'formula', 'latex_source_index': 0})
+    assert sheet['sections'][0]['items'][0]['latex'] == 'r=a/b'
+    assert sheet['coverage']['needs_review'] == 0
+    assert sheet['semantic_status'] == 'model_proposed'
+
+
+def test_source_first_second_math_in_condition_is_not_a_missing_main_formula():
+    sheet = source_first_sheet('$r=2$ for identical members with $a=b$',
+                               {'kind': 'formula', 'latex_source_index': 0,
+                                'conditions': ['for identical members with $a=b$']})
+    assert sheet['coverage']['needs_review'] == 0
+    assert not any(issue['reason'] == 'formula_needs_completion' for issue in sheet['unresolved'])
+
+
+def test_source_first_bad_auxiliary_field_keeps_formula_and_valid_conditions():
+    sheet = source_first_sheet('$r=a/b$ for $b>0$',
+                               {'kind': 'formula', 'latex_source_index': 0,
+                                'conditions': ['for $b>0$', 'invented condition']})
+    item = sheet['sections'][0]['items'][0]
+    assert item['latex'] == 'r=a/b'
+    assert item['conditions'] == ['for $b>0$']
+    assert any(field['field'] == 'conditions' for field in item['rejected_fields'])
+    assert sheet['coverage']['needs_review'] == 1
+
+
+@pytest.mark.parametrize('persistence_failure', [False, True])
+def test_upload_saves_source_before_semantics_and_never_structures_unsaved_source(persistence_failure):
+    events = []
+    class VLM:
+        def extract_region_structured(self, image_path, semantic_objects):
+            events.append('classify')
+            return {'tables': [{'object_ref': 'tables:0', **proposal()}]}
+        def extract_calculation_sheet(self, image_path, target):
+            assert events == ['classify', 'save']
+            events.append('semantic')
+            assert image_path is None
+            return framed_proposal(target)
+    def save(ref, item, content):
+        events.append('save')
+        assert ref == 'tables:0' and content == HTML and item['layout_id'] == 'region-a'
+        if persistence_failure:
+            raise OSError('synthetic disk failure')
+        return {'artifact_id': 'saved-source', 'task_id': 'task', 'page_no': 1}
+    item = {'markdown': HTML, 'layout_id': 'region-a'}
+    pp._enrich_upload_semantics(VLM(), 'unused.png', {}, {'tables': [item]}, True, source_store=save)
+    assert events == (['classify', 'save'] if persistence_failure else ['classify', 'save', 'semantic'])
+    assert item['calculation_source']['original_content'] == HTML
+    if persistence_failure:
+        assert item['calculation_source']['pipeline']['semantic']['reason'] == 'calculation_source_persistence_failed'
+        assert item['calculation_sheet']['coverage']['structured'] == 0
+    else:
+        assert item['calculation_source']['artifact']['artifact_id'] == 'saved-source'
+
+
+def test_upload_task_wires_durable_source_before_semantic_model(monkeypatch, tmp_path):
+    import asyncio
+    import fitz
+    from tests.test_pdf2md_enhanced_single_page_tools import server
+    pdf_path = tmp_path / 'synthetic.pdf'
+    with fitz.open() as pdf:
+        pdf.new_page(); pdf.save(pdf_path)
+    manager = server.TaskManager(str(tmp_path / 'output'))
+    monkeypatch.setattr(server, 'manager', manager)
+    class VLM:
+        def extract_region_structured(self, image_path, semantic_objects):
+            return {'tables': [{'object_ref': 'tables:0', **proposal()}]}
+        def extract_calculation_sheet(self, image_path, target):
+            paths = list((tmp_path / 'output').glob('tasks/*/calculation_sources/*.json'))
+            assert len(paths) == 1
+            assert json.loads(paths[0].read_text())['original_content'] == HTML
+            return framed_proposal(target)
+    def process(source, page, policy, vlm, routing, previous):
+        payload = {'tables': [{'markdown': HTML, 'layout_id': 'region-a'}]}
+        pp._enrich_upload_semantics(VLM(), 'unused.png', {}, payload, True,
+                                    source_store=routing['__calculation_source_store'])
+        return {'elements': payload}
+    monkeypatch.setattr(server, 'process_page', process)
+    started = manager.start_task('source-first-synthetic', file_path=str(pdf_path))
+    response = json.loads(asyncio.run(server.process_task_page(started.task_id, 1)))
+    item = response['page_result']['elements']['tables'][0]
+    assert item['calculation_source']['artifact']['task_id'] == started.task_id
+    assert item['calculation_source']['pipeline']['semantic']['status'] == 'complete'
+    assert manager.get_task(started.task_id).pages[1].result['elements']['tables'][0] == item

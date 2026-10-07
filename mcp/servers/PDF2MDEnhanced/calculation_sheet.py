@@ -7,7 +7,7 @@ import json
 import math
 import re
 
-from .calculation_input import calculation_source_sections, parse_framed_calculation, math_spans, math_content
+from .calculation_input import calculation_source_sections, parse_framed_calculation, math_spans, math_content, markdown_table_html
 from .layout_ledger import validate_recovered_object
 from .semantic_language import detect_description_language, description_mismatch, valid_description
 
@@ -27,54 +27,115 @@ class _SourceText(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.parts = []
+        self.size = 0
+        self.rows = []
+        self.row = None
+        self.cell_start = None
+        self.title_start = None
+        self.title = None
+
+    def append(self, text):
+        self.parts.append(text)
+        self.size += len(text)
 
     def handle_data(self, data):
-        self.parts.append(data)
+        self.append(data)
 
     def handle_starttag(self, tag, attrs):
+        if tag in {'h1', 'h2', 'h3', 'h4', 'h5', 'h6'} and not ''.join(self.parts).strip():
+            self.title_start = self.size
         if tag in {'br', 'p', 'td', 'th', 'tr', 'table', 'caption', 'div', 'li', 'ul', 'ol', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'section', 'blockquote', 'pre'}:
-            self.parts.append('\n')
+            self.append('\n')
+
+        if tag == 'tr':
+            self.row = {'source_range': [self.size, None], 'cells': []}
+        if tag in {'td', 'th'} and self.row is not None:
+            self.cell_start = self.size
 
     def handle_endtag(self, tag):
+        if tag in {'h1', 'h2', 'h3', 'h4', 'h5', 'h6'} and self.title_start is not None:
+            self.title = ''.join(self.parts)[self.title_start:].strip()
+            self.title_start = None
+        if tag in {'td', 'th'} and self.row is not None and self.cell_start is not None:
+            self.row['cells'].append([self.cell_start, self.size])
+            self.cell_start = None
+        if tag == 'tr' and self.row is not None:
+            self.row['source_range'][1] = self.size
+            self.rows.append(self.row)
+            self.row = None
         if tag in {'p', 'td', 'th', 'tr', 'table', 'caption', 'div', 'li', 'ul', 'ol', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'section', 'blockquote', 'pre'}:
-            self.parts.append('\n')
+            self.append('\n')
 
 
-def source_context(content):
+def source_context(content, structural=False):
     """No grid inference: preserve text, math and sequence even for broken spans."""
     if not isinstance(content, str) or len(content) > 100000:
         return {'status': 'input_budget_exceeded', 'text': ''}
-    if re.search(r'<(?:table|td|th|p|div|h[1-6]|ul|ol|li|section|blockquote|pre|span|br)\b', content, re.I):
+    parsed_content = content.replace('\r\n', '\n').replace('\r', '\n')
+    if structural:
+        parsed_content = markdown_table_html(parsed_content)
+    table_rows = []
+    title = None
+    if re.search(r'<(?:table|td|th|p|div|h[1-6]|ul|ol|li|section|blockquote|pre|span|br)\b', parsed_content, re.I):
         # Escape comparisons before the HTML parser, including unclosed math tails.
-        protected = content
-        for start, end, _ in reversed(math_spans(content)):
+        protected = parsed_content
+        for start, end, _ in reversed(math_spans(parsed_content)):
             # Keep recognized HTML wrappers available to HTMLParser even inside an
             # unclosed math span; escape only mathematical angle brackets.
-            pieces = re.split(r'(</?(?:table|tbody|thead|tfoot|tr|td|th|p|div|h[1-6]|ul|ol|li|section|blockquote|pre|span|br|em|strong|sup|sub)\b[^>]*>)', content[start:end], flags=re.I)
+            pieces = re.split(r'(</?(?:table|tbody|thead|tfoot|tr|td|th|p|div|h[1-6]|ul|ol|li|section|blockquote|pre|span|br|em|strong|sup|sub)\b[^>]*>)', parsed_content[start:end], flags=re.I)
             escaped = ''.join(piece if index % 2 else piece.replace('<', '&lt;').replace('>', '&gt;')
                               for index, piece in enumerate(pieces))
             protected = protected[:start] + escaped + protected[end:]
         parser = _SourceText(); parser.feed(protected); parser.close()
         text = ''.join(parser.parts)
+        title = parser.title
+        table_rows = parser.rows if structural else []
         transform = 'html_blocks_v2'
     else:
-        text = content
+        text = parsed_content
+        heading = re.match(r'^\s*#{1,6}\s+([^\n]+)', text)
+        title = heading.group(1).strip() if heading else None
         transform = 'text_lines_v2'
     text = text.replace('\r\n', '\n').replace('\r', '\n')
     spans = math_spans(text)
     # Preserve each line intersecting math; normalize only exterior whitespace.
     lines = []
     offset = 0
+    mappings = []
+    normalized_offset = 0
     for line in text.split('\n'):
         protected_line = any(start <= offset + len(line) and end > offset for start, end, _ in spans)
-        if protected_line:
-            lines.append(line)
-        elif line.strip():
-            lines.append(line.strip())
+        kept = line if protected_line else line.strip()
+        if protected_line or kept:
+            left = 0 if protected_line else len(line) - len(line.lstrip())
+            mappings.append((offset + left, offset + left + len(kept), normalized_offset))
+            lines.append(kept)
+            normalized_offset += len(kept) + 1
         offset += len(line) + 1
-    normalized = '\n'.join(lines).strip()
-    return {'status': 'available', 'sha256': hashlib.sha256(content.encode()).hexdigest(),
-            'text': normalized, 'source_revision': hashlib.sha256(('calculation-source-v2\0' + content).encode()).hexdigest(),
+    joined = '\n'.join(lines)
+    trim = len(joined) - len(joined.lstrip())
+    normalized = joined.strip()
+
+    def mapped_range(span):
+        pieces = [(n + max(a, span[0]) - a - trim, n + min(b, span[1]) - a - trim)
+                  for a, b, n in mappings if max(a, span[0]) < min(b, span[1])]
+        if not pieces:
+            return None
+        a, b = max(0, pieces[0][0]), min(len(normalized), pieces[-1][1])
+        while a < b and normalized[a].isspace():
+            a += 1
+        while b > a and normalized[b - 1].isspace():
+            b -= 1
+        return [a, b] if a < b else None
+
+    rows = []
+    for row in table_rows:
+        cells = [mapped_range(span) for span in row['cells']]
+        cells = [{'source_range': span, 'text': normalized[slice(*span)]} for span in cells if span]
+        if cells:
+            rows.append({'source_range': [cells[0]['source_range'][0], cells[-1]['source_range'][1]], 'cells': cells})
+    return {'status': 'available', **({'title': title} if title and len(title) <= 500 else {}), 'sha256': hashlib.sha256(content.encode()).hexdigest(),
+            'text': normalized, **({'table_rows': rows} if structural and rows else {}), 'source_revision': hashlib.sha256(('calculation-source-v2\0' + content).encode()).hexdigest(),
             'text_sha256': hashlib.sha256(normalized.encode()).hexdigest(),
             'range_unit': 'unicode_codepoint', 'range_scope': 'text', 'normalization': transform}
 
@@ -300,18 +361,23 @@ def _parse_calculation_sheet(raw, ctx, item):
                 for key in ('conditions', 'checks', 'references'):
                     field = key
                     values = entry.get(key, [])
-                    if not isinstance(values, list) or not all(isinstance(v, str) and v and any(v in q for q in quotes) for v in values):
-                        raise ValueError('field_source_mismatch')
-                    result[key] = deepcopy(values)
+                    valid_values = [v for v in values if isinstance(v, str) and v and any(v in q for q in quotes)] if isinstance(values, list) else []
+                    if not isinstance(values, list) or len(valid_values) != len(values):
+                        issue('field_source_mismatch')
+                        result.setdefault('rejected_fields', []).append({'field': key, 'candidate': deepcopy(values),
+                                                                       'reason': 'field_source_mismatch'})
+                    result[key] = deepcopy(valid_values)
                 field = 'latex'
                 if entry['kind'] in {'formula', 'branch'} and not result['latex']:
                     raise ValueError('formula_missing')
                 field = 'conditions'
                 if entry['kind'] == 'branch' and not result['conditions']:
-                    raise ValueError('conditions_missing')
+                    issue('conditions_missing')
+                    result.setdefault('rejected_fields', []).append({'field': 'conditions', 'reason': 'conditions_missing'})
                 field = 'checks'
                 if entry['kind'] == 'check' and not result['checks']:
-                    raise ValueError('checks_missing')
+                    issue('checks_missing')
+                    result.setdefault('rejected_fields', []).append({'field': 'checks', 'reason': 'checks_missing'})
                 result['source'] = {'sha256': ctx['sha256'], 'text_ranges': [list(r) for r in ranges],
                                     **{k: deepcopy(item[k]) for k in ('layout_id', 'bbox', 'bbox_space') if k in item},
                                     'location_scope': 'table'}
@@ -429,8 +495,7 @@ def _link_calculation_inputs(sheet):
                     entry['depends_on'].append(matches[0])
             else:
                 entry['unresolved_inputs'].append(symbol)
-    sheet['semantic_status'] = ('model_proposed' if sheet.get('semantic_desc') and all(
-        entry.get('semantic_desc') for entry in items if entry['kind'] in {'formula', 'branch', 'check'}) else 'missing')
+    sheet['semantic_status'] = 'model_proposed' if sheet.get('semantic_desc') else 'missing'
 
 
 def _calculation_steps(raw, sheet, text, language, issue):
@@ -510,12 +575,28 @@ def calculation_budget(vlm):
     return value if type(value) is int and 0 <= value <= 8 else 0
 
 
-def complete_calculation_batch(vlm, image_path, targets, used_calls):
+def complete_calculation_batch(vlm, image_path, targets, used_calls, source_store=None):
     """Share one analysis budget across all tables, including the classification call."""
     additional = 0
     for item, content, object_ref in targets:
         if not needs_calculation_call(item):
             continue
+        if source_store is not None:
+            try:
+                artifact = source_store(object_ref, item, content)
+                item.setdefault('calculation_source', {})['artifact'] = artifact
+            except Exception:
+                extract_calculation_items(vlm, image_path, item, content, object_ref, 0)
+                sheet = item.get('calculation_sheet')
+                if sheet is not None:
+                    sheet['unresolved'] = [issue for issue in sheet['unresolved']
+                                           if issue.get('reason') != 'table_analysis_budget_exhausted']
+                    sheet['unresolved'].append({'reason': 'calculation_source_persistence_failed'})
+                semantic = item['calculation_source']['pipeline'].setdefault('semantic', {})
+                semantic.update(status='partial', reason='calculation_source_persistence_failed')
+                for batch in semantic.get('batches', []):
+                    batch['reason'] = 'calculation_source_persistence_failed'
+                continue
         if used_calls + additional >= calculation_budget(vlm):
             extract_calculation_items(vlm, image_path, item, content, object_ref, 0)
             item['calculation_sheet']['unresolved'] = [{'reason': 'table_analysis_budget_exhausted'}]

@@ -123,14 +123,33 @@
               "input_units": 1,
               "output_units": 1,
               "logical_calls": 1,
-              "batch_count": 1
+              "batch_count": 1,
+              "source_revision": "3dd2aa25a2f9a5b59da7e33de8ae8b289275ed732e6087b871d16b052e5416e3",
+              "identity": {
+                "tenant_id": "test-tenant",
+                "doc_id": "synthetic-document",
+                "version": 1,
+                "page_no": 2,
+                "table_pk": "synthetic-p2-table",
+                "layout_id": "p2-o001-table",
+                "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              },
+              "batches": [
+                {
+                  "id": 1,
+                  "source_item_ids": [
+                    "s1-i1"
+                  ],
+                  "status": "partial"
+                }
+              ]
             },
             "validation": {
               "status": "needs_review",
               "input_units": 1,
               "represented": 1,
               "structured": 1,
-              "needs_review": 1
+              "needs_review": 0
             }
           }
         },
@@ -168,8 +187,7 @@
                   },
                   "semantic_desc": "",
                   "semantic_status": "missing",
-                  "source_item_id": "s1-i1",
-                  "review_status": "needs_completion"
+                  "source_item_id": "s1-i1"
                 }
               ],
               "source_section_id": "s1"
@@ -193,7 +211,7 @@
             "input_units": 1,
             "represented": 1,
             "structured": 1,
-            "needs_review": 1
+            "needs_review": 0
           }
         }
       }
@@ -258,14 +276,33 @@
               "input_units": 1,
               "output_units": 1,
               "logical_calls": 1,
-              "batch_count": 1
+              "batch_count": 1,
+              "source_revision": "3dd2aa25a2f9a5b59da7e33de8ae8b289275ed732e6087b871d16b052e5416e3",
+              "identity": {
+                "tenant_id": "test-tenant",
+                "doc_id": "synthetic-document",
+                "version": 1,
+                "page_no": 2,
+                "table_pk": "synthetic-p2-table",
+                "layout_id": "p2-o001-table",
+                "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              },
+              "batches": [
+                {
+                  "id": 1,
+                  "source_item_ids": [
+                    "s1-i1"
+                  ],
+                  "status": "partial"
+                }
+              ]
             },
             "validation": {
               "status": "needs_review",
               "input_units": 1,
               "represented": 1,
               "structured": 1,
-              "needs_review": 1
+              "needs_review": 0
             }
           }
         },
@@ -303,8 +340,7 @@
                   },
                   "semantic_desc": "",
                   "semantic_status": "missing",
-                  "source_item_id": "s1-i1",
-                  "review_status": "needs_completion"
+                  "source_item_id": "s1-i1"
                 }
               ],
               "source_section_id": "s1"
@@ -328,7 +364,7 @@
             "input_units": 1,
             "represented": 1,
             "structured": 1,
-            "needs_review": 1
+            "needs_review": 0
           }
         }
       }
@@ -410,14 +446,33 @@
           "input_units": 1,
           "output_units": 1,
           "logical_calls": 1,
-          "batch_count": 1
+          "batch_count": 1,
+          "source_revision": "3dd2aa25a2f9a5b59da7e33de8ae8b289275ed732e6087b871d16b052e5416e3",
+          "identity": {
+            "tenant_id": "test-tenant",
+            "doc_id": "synthetic-document",
+            "version": 1,
+            "page_no": 2,
+            "table_pk": "synthetic-p2-table",
+            "layout_id": "p2-o001-table",
+            "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "batches": [
+            {
+              "id": 1,
+              "source_item_ids": [
+                "s1-i1"
+              ],
+              "status": "partial"
+            }
+          ]
         },
         "validation": {
           "status": "needs_review",
           "input_units": 1,
           "represented": 1,
           "structured": 1,
-          "needs_review": 1
+          "needs_review": 0
         }
       }
     },
@@ -455,8 +510,7 @@
               },
               "semantic_desc": "",
               "semantic_status": "missing",
-              "source_item_id": "s1-i1",
-              "review_status": "needs_completion"
+              "source_item_id": "s1-i1"
             }
           ],
           "source_section_id": "s1"
@@ -480,7 +534,7 @@
         "input_units": 1,
         "represented": 1,
         "structured": 1,
-        "needs_review": 1
+        "needs_review": 0
       }
     }
   },

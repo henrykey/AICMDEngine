@@ -41,7 +41,78 @@ def math_content(text):
     return values
 
 
-def calculation_source_sections(text):
+def markdown_table_html(text):
+    """Recognize explicit Markdown tables without splitting mathematical pipes/newlines."""
+    spans = math_spans(text)
+    boundaries = [0] + [m.end() for m in re.finditer('\n', text)
+                        if not any(a <= m.start() < b for a, b, _ in spans)] + [len(text)]
+    lines = [text[a:b] for a, b in zip(boundaries, boundaries[1:])]
+
+    def cells(line):
+        protected = math_spans(line)
+        cuts = [m.start() for m in re.finditer(r'(?<!\\)\|', line)
+                if not any(a <= m.start() < b for a, b, _ in protected)]
+        if not cuts:
+            return None
+        edges = [-1, *cuts, len(line)]
+        values = [line[a + 1:b].strip() for a, b in zip(edges, edges[1:])]
+        if not values[0]:
+            values.pop(0)
+        if values and not values[-1]:
+            values.pop()
+        return values if len(values) > 1 else None
+
+    output = []
+    index = 0
+    while index < len(lines):
+        header = cells(lines[index])
+        separator = cells(lines[index + 1]) if index + 1 < len(lines) else None
+        if (header and separator and len(header) == len(separator)
+                and all(re.fullmatch(r':?-{3,}:?', c) for c in separator)):
+            output.append('<table><tr>' + ''.join('<th>' + c + '</th>' for c in header) + '</tr>')
+            index += 2
+            while index < len(lines):
+                row = cells(lines[index])
+                if not row or len(row) != len(header):
+                    break
+                output.append('<tr>' + ''.join('<td>' + c + '</td>' for c in row) + '</tr>')
+                index += 1
+            output.append('</table>\n')
+        else:
+            output.append(lines[index])
+            index += 1
+    return ''.join(output)
+
+
+def calculation_source_sections(text, table_rows=None):
+    if table_rows:
+        sections = []
+        cursor = 0
+
+        def append_part(start, end, context=()):
+            for section in calculation_source_sections(text[start:end]):
+                section['id'] = f's{len(sections) + 1}'
+                if 'source_range' in section:
+                    section['source_range'] = [n + start for n in section['source_range']]
+                for index, unit in enumerate(section['items'], 1):
+                    unit['id'] = f"{section['id']}-i{index}"
+                    unit['source_range'] = [n + start for n in unit['source_range']]
+                    if context:
+                        unit['row_context'] = deepcopy(context)
+                sections.append(section)
+
+        for row in table_rows:
+            cells = row['cells']
+            start, end = row['source_range']
+            append_part(cursor, start)
+            for index, cell in enumerate(cells):
+                append_part(*cell['source_range'], [c for j, c in enumerate(cells) if j != index])
+            cursor = end
+        append_part(cursor, len(text))
+        if len(sections) > 100 or sum(len(s['items']) for s in sections) > 500:
+            raise ValueError('input_budget_exceeded')
+        return sections
+
     """Keep exact offsets; split only outside complete math, never infer item types."""
     spans = math_spans(text)
     lines = []
@@ -54,6 +125,7 @@ def calculation_source_sections(text):
              for a, b in lines if text[a:b].strip()]
     sections = []
     current = None
+    explicit_headings = any(re.match(r'^#{1,6}\s+\S', text[a:b]) for a, b in lines)
     for index, (a, b) in enumerate(lines):
         value = text[a:b]
         if (current and current['items'] and math_spans(current['items'][-1]['text'])
@@ -66,7 +138,7 @@ def calculation_source_sections(text):
         following = text[slice(*lines[index + 1])] if index + 1 < len(lines) else ''
         next_math = index + 1 < len(lines) and any(a == lines[index + 1][0] for a, _, _ in spans)
         next_definition = bool(re.match(r'^[^\s=—–:]{1,80}\s*[—–:]\s+\S', following))
-        heading = bool(re.match(r'^#{1,6}\s+\S', value)) or ((next_math or next_definition) and len(value) <= 160 and not MATH.search(value)
+        heading = bool(re.match(r'^#{1,6}\s+\S', value)) or (not explicit_headings and (next_math or next_definition) and len(value) <= 160 and not MATH.search(value)
                    and not re.search(r'[$\\=<>。.!?;；]', value)
                    and (value[:1].isupper() or re.search(r'[\u4e00-\u9fff]', value)))
         if heading:
@@ -98,6 +170,17 @@ def parse_framed_calculation(raw, ctx, item, parse):
     """Bind generated fields to deterministic units; retain every rejected source."""
     sections = ctx['source_sections']
     units = {u['id']: u for section in sections for u in section['items']}
+    headings = {u['id']: {'text': ctx['text'][slice(*section['source_range'])],
+                          'source_range': section['source_range']}
+                for section in sections if section.get('source_range')
+                for u in section['items']}
+    document_headings = []
+    for section in sections:
+        if section['items']:
+            break
+        if section.get('source_range'):
+            document_headings.append({'text': ctx['text'][slice(*section['source_range'])],
+                                      'source_range': section['source_range']})
     matches = {key: [] for key in units}
     rejected = []
     revision_ok = not isinstance(raw, dict) or raw.get('source_revision', ctx.get('source_revision')) == ctx.get('source_revision')
@@ -158,8 +241,31 @@ def parse_framed_calculation(raw, ctx, item, parse):
                     entry['latex'] = formulas[selection]
                     if entry.get('kind') == 'check' and not entry.get('checks'):
                         entry['checks'] = [formulas[selection]]
-                entry['sources'] = [units[key]['text'] for key in candidate['keys']]
-                entry['source_ranges'] = [units[key]['source_range'] for key in candidate['keys']]
+                latex = entry.get('latex')
+                if isinstance(latex, str) and latex and not any(
+                        latex in units[key]['text'] or any(value in units[key]['math'] for value in math_content(latex))
+                        for key in candidate['keys']):
+                    rejected.append({'reason': 'formula_source_mismatch', 'candidate': candidate['entry']})
+                    continue
+                citations = []
+                for key in candidate['keys']:
+                    for source in [units[key], *units[key].get('row_context', []), *ctx.get('document_preamble', []), *document_headings, *([headings[key]] if key in headings else [])]:
+                        if source['source_range'] not in [c['source_range'] for c in citations]:
+                            citations.append(source)
+                # Restore presentation-only whitespace in generated references to the
+                # exact cited source. Formulas, checks and conditions remain literal.
+                if isinstance(entry.get('references'), list):
+                    for position, value in enumerate(entry['references']):
+                        if not isinstance(value, str) or not value.strip():
+                            continue
+                        pattern = r'\s+'.join(re.escape(word) for word in value.split())
+                        for source in citations:
+                            match = re.search(pattern, source['text'])
+                            if match:
+                                entry['references'][position] = match.group(0)
+                                break
+                entry['sources'] = [source['text'] for source in citations]
+                entry['source_ranges'] = [source['source_range'] for source in citations]
                 index += 1
                 bindings[f'item-{index}'] = candidate
                 entries.append(entry)
@@ -177,13 +283,17 @@ def parse_framed_calculation(raw, ctx, item, parse):
     for identifier, entry in accepted.items():
         candidate = bindings[identifier]
         keys = candidate['keys']
+        entry['content'] = '\n'.join(units[key]['text'] for key in keys)
         entry['source_item_id'] = keys[0]
+        contexts = [c for key in keys for c in units[key].get('row_context', [])]
+        if contexts:
+            entry['source']['row_context'] = deepcopy(contexts)
         if len(keys) > 1:
             entry['source_item_ids'] = keys
         if candidate['entry'].get('source_part_id'):
             entry['source_part_id'] = candidate['entry']['source_part_id']
         entry['source'].update(source_revision=ctx.get('source_revision'), range_unit='unicode_codepoint', location_scope='source_text')
-        if not entry.get('semantic_desc') or entry.get('rejected_fields') or any(key in review for key in keys):
+        if entry.get('rejected_fields') or any(key in review for key in keys):
             entry['review_status'] = 'needs_completion'
             review.update(keys)
         represented.update(keys)
@@ -193,7 +303,8 @@ def parse_framed_calculation(raw, ctx, item, parse):
         equations = [value for value in math_content(unit['text']) if re.search(r'[=<>]|\\(?:le|ge|lt|gt|neq)\b', value)]
         results = [entry for entries in outputs.values() for entry in entries
                    if key in entry.get('source_item_ids', [entry['source_item_id']])]
-        if any(not any(value == entry.get('latex') or value in entry.get('checks', []) for entry in results)
+        if any(not any(value == entry.get('latex') or value in entry.get('checks', [])
+                          or any(value in condition for condition in entry.get('conditions', [])) for entry in results)
                for value in equations):
             review.add(key)
             for entry in results:
@@ -215,6 +326,7 @@ def parse_framed_calculation(raw, ctx, item, parse):
                 'source_item_id': unit['id'],
                 'rejected_fields': [{'field': 'analysis', 'reason': 'source_item_needs_completion'}],
                 'source': {'sha256': ctx.get('sha256'), 'text_ranges': [unit['source_range']],
+                           **({'row_context': deepcopy(unit['row_context'])} if unit.get('row_context') else {}),
                            'source_revision': ctx.get('source_revision'), 'range_unit': 'unicode_codepoint',
                            **{k: deepcopy(item[k]) for k in ('layout_id', 'bbox', 'bbox_space') if k in item},
                            'location_scope': 'source_text'}})
@@ -229,7 +341,7 @@ def parse_framed_calculation(raw, ctx, item, parse):
     if len(structured) < len(units) or rejected:
         sheet['validation_status'] = 'unresolved'
         sheet['unresolved'].append({'reason': 'source_item_needs_completion'})
-    if review or sheet.get('semantic_status') == 'missing':
+    if sheet.get('semantic_status') == 'missing':
         sheet['semantic_status'] = 'missing'
         if 'calculation_semantics_missing' not in sheet['diagnostics']:
             sheet['diagnostics'].append('calculation_semantics_missing')

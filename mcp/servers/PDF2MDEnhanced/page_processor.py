@@ -361,6 +361,7 @@ def process_page(
                 layout_outcome.get("payloads") if layout_driven else None,
                 bool(rc.get("vlm_ocr_enabled") and vlm.enabled and not page_semantic_attempted),
                 page_text=semantic_page_text, formula_semantic_calls=formula_semantic_calls,
+                source_store=(routing_config or {}).get("__calculation_source_store"),
             )
 
         elif rc.get("vlm_ocr_enabled") and vlm.enabled:
@@ -370,7 +371,8 @@ def process_page(
                                     structured.get("table_metadata", {}).items()])
             extra_calls = complete_calculation_batch(vlm, str(image_path),
                 [(item, item.get("markdown", ""), f"tables:{index}")
-                 for index, item in enumerate(table_payloads)], 1)
+                 for index, item in enumerate(table_payloads)], 1,
+                source_store=(routing_config or {}).get("__calculation_source_store"))
             vlm_calls += extra_calls
             if not layout_driven:
                 for item in table_payloads:
@@ -2271,7 +2273,7 @@ def _merge_table_image_metadata(table: Dict[str, Any], candidate: Dict[str, Any]
 def _enrich_upload_semantics(
     vlm: DynamicVLMClient, image_path: str, structured: Dict[str, Any],
     payloads: Optional[Dict[str, Any]], enabled: bool,
-    page_text: str = "", formula_semantic_calls: Optional[Dict[str, int]] = None,
+    page_text: str = "", formula_semantic_calls: Optional[Dict[str, int]] = None, source_store=None,
 ) -> int:
     targets = []
     destinations = {}
@@ -2368,7 +2370,7 @@ def _enrich_upload_semantics(
                                       else 'calculation_provider_failed', content)
     calls += complete_calculation_batch(vlm, image_path,
         [(destinations[target['object_ref']][2], destinations[target['object_ref']][1], target['object_ref'])
-         for target in table_targets], table_calls)
+         for target in table_targets], table_calls, source_store=source_store)
     if formula_targets:
         calls += 1
         if formula_semantic_calls is not None:
