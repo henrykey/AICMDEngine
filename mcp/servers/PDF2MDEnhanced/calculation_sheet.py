@@ -608,9 +608,13 @@ def extract_calculation_items(vlm, image_path, item, content, object_ref, availa
     block_manifest = None
     transcribe = getattr(vlm, 'transcribe_calculation_blocks', None)
     if callable(transcribe):
-        replacement, block_manifest = transcribe(item)
-        if replacement is not None:
-            content = replacement
+        try:
+            replacement, block_manifest = transcribe(item)
+            if replacement is not None:
+                content = replacement
+        except Exception:
+            block_manifest = {'status': 'fallback', 'reason': 'block_transcription_failed',
+                              'logical_calls': 0, 'blocks': []}
     source.update(origin='existing_ocr', original_content=content)
     if block_manifest is not None:
         source['block_transcription'] = block_manifest

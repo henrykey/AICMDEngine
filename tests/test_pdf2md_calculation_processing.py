@@ -1771,9 +1771,11 @@ def test_manual_default_ocr_has_no_vlm_transcription_fallback(monkeypatch, avail
     calls = []
     class OCR:
         enabled = available
+        use_layout_parsing = False
         def __init__(self, config, **kwargs):
             assert config['max_retries'] == 0
         def extract_page(self, image):
+            self.request_guard(None)
             calls.append(image)
             return SimpleNamespace(markdown='# Relation\n$x=1$', page_text='')
     monkeypatch.setattr(sp, 'OpenAICompatibleOcrClient', OCR)

@@ -335,6 +335,12 @@ class MCPProtocolHandler:
 
         mcp_name, tool_name = parts
 
+        if mcp_name == "pdf2md-enhanced" and "source_identity" in arguments:
+            identity = arguments["source_identity"]
+            if (not isinstance(identity, dict) or not tenant_id
+                    or identity.get("tenant_id") != str(tenant_id)):
+                raise ValueError("source_identity_tenant_mismatch")
+
         logger.info(f"Executing tool: {mcp_name}.{tool_name}")
 
         # ===== Membership API 推送的系统服务 token 处理 =====

@@ -53,6 +53,7 @@ async def start_task(
     routing_config: Optional[Dict[str, Any]] = None,
     ocr_config: Optional[Dict[str, Any]] = None,
     vlm_defaults: Optional[Dict[str, Any]] = None,
+    source_identity: Optional[Dict[str, Any]] = None,
 ) -> str:
     _ = routing_config
     _ = ocr_config
@@ -70,6 +71,7 @@ async def start_task(
                 storage_config=storage_config,
                 pages=pages,
                 description_language=description_language,
+                source_identity=source_identity,
             ),
         )
         res = {
@@ -98,7 +100,16 @@ async def process_task_page(
     prev_context: Optional[Dict[str, Any]] = None,
     description_language: str = "unknown",
     routing_config: Optional[Dict[str, Any]] = None,
+    source_identity: Optional[Dict[str, Any]] = None,
 ) -> str:
+    try:
+        manager.validate_source_identity(task_id, source_identity)
+        if source_identity:
+            if page_no != 1 or (routing_config or {}).get("source_page_no", source_identity["source_page_no"]) != source_identity["source_page_no"]:
+                raise ValueError("task_source_page_mismatch")
+            routing_config = {**(routing_config or {}), "source_page_no": source_identity["source_page_no"]}
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
     if not (routing_config or {}).get("calculation_async"):
         return await _process_task_page(task_id, page_no, vlm_config, ocr_config, policy,
                                         prev_context, description_language, routing_config)
@@ -547,9 +558,10 @@ def _resolve_page_timeout(cfg: Optional[Dict[str, Any]]) -> int:
 
 
 @mcp.tool("get_task_status")
-async def get_task_status(task_id: str) -> str:
+async def get_task_status(task_id: str, source_identity: Optional[Dict[str, Any]] = None) -> str:
     loop = asyncio.get_event_loop()
     try:
+        manager.validate_source_identity(task_id, source_identity)
         res = await loop.run_in_executor(None, manager.status, task_id)
     except Exception as exc:
         res = {"error": str(exc)}
@@ -557,9 +569,10 @@ async def get_task_status(task_id: str) -> str:
 
 
 @mcp.tool("retry_failed_pages")
-async def retry_failed_pages(task_id: str, pages: Optional[List[int]] = None) -> str:
+async def retry_failed_pages(task_id: str, pages: Optional[List[int]] = None, source_identity: Optional[Dict[str, Any]] = None) -> str:
     loop = asyncio.get_event_loop()
     try:
+        manager.validate_source_identity(task_id, source_identity)
         res = await loop.run_in_executor(None, manager.retry_failed_pages, task_id, pages)
         for page_no in res.get('retry_pages', []):
             entry = _calculation_page_operations.get((task_id, page_no))
@@ -571,9 +584,10 @@ async def retry_failed_pages(task_id: str, pages: Optional[List[int]] = None) ->
 
 
 @mcp.tool("finalize_task")
-async def finalize_task(task_id: str, merge_mode: str = "none") -> str:
+async def finalize_task(task_id: str, merge_mode: str = "none", source_identity: Optional[Dict[str, Any]] = None) -> str:
     loop = asyncio.get_event_loop()
     try:
+        manager.validate_source_identity(task_id, source_identity)
         res = await loop.run_in_executor(None, manager.finalize_task, task_id, merge_mode)
         for key, (operation, _) in list(_calculation_page_operations.items()):
             if key[0] == task_id and operation.done():

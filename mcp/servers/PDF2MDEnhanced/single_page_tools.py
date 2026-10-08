@@ -148,7 +148,6 @@ def _process_calculation_request(context, hint, mode, describe, vlm_config, lang
                              (routing_config or {}).get('calculation_transcription_mode', 'whole'))
     if block_mode not in ('whole', 'blocks'):
         return result_for(item, reason='invalid_calculation_transcription_mode')
-    block_source = None
     block_manifest = None
     def transcribe(image, target):
         nonlocal block_manifest
@@ -161,35 +160,19 @@ def _process_calculation_request(context, hint, mode, describe, vlm_config, lang
         if isinstance(image, list):
             raise ValueError('calculation_ocr_single_image_required')
         if block_mode == 'blocks':
-            block_manifest = {'mode': 'blocks', 'status': 'fallback',
-                              'reason': 'original_pdf_geometry_unavailable', 'blocks': [], 'logical_calls': 0}
-            if block_source is not None:
-                from .calculation_blocks import calculation_block_boxes, transcribe_calculation_blocks
-                original_path, original_image, original_page, original_bbox, original_dpi, directory = block_source
-                with fitz.open(original_path) as original:
-                    selected_page = original[original_page-1]
-                    boxes = calculation_block_boxes(selected_page, original_bbox)
-                    with vlm.calculation_scope():
-                        if getattr(vlm, 'optional_formula_budget', False):
-                            vlm.physical_request_limit += len(boxes)
-                        class CountedOcr:
-                            def extract_page(self, path):
-                                from .calculation_sheet import PhysicalRequestBudgetExceeded
-                                if vlm.physical_requests >= vlm.physical_request_limit:
-                                    raise PhysicalRequestBudgetExceeded()
-                                vlm.physical_requests += 1
-                                return ocr.extract_page(path)
-                        text, block_manifest = transcribe_calculation_blocks(selected_page, original_image,
-                            original_bbox, CountedOcr(), directory, original_dpi)
-                if text is not None:
-                    vlm.last_call_info = {}
-                    return {**target, 'source_text': text}
+            from .calculation_blocks import BudgetedCalculationOcr, transcribe_calculation_blocks
+            with vlm.calculation_scope():
+                text, block_manifest = transcribe_calculation_blocks(image, [0, 0, 1, 1],
+                    BudgetedCalculationOcr(ocr, vlm), Path(image).parent / 'calculation_blocks', vlm=vlm)
+            # This request already supplies an object crop. Never claim page coordinates.
+            for block in block_manifest['blocks']:
+                block['bbox_space'] = 'normalized_object'
+            if text is not None:
+                vlm.last_call_info = {}
+                return {**target, 'source_text': text}
+        from .calculation_blocks import BudgetedCalculationOcr
         with vlm.calculation_scope():
-            from .calculation_sheet import PhysicalRequestBudgetExceeded
-            if vlm.physical_requests >= vlm.physical_request_limit:
-                raise PhysicalRequestBudgetExceeded()
-            vlm.physical_requests += 1
-            result = ocr.extract_page(image)
+            result = BudgetedCalculationOcr(ocr, vlm).extract_page(image)
         text = result.markdown or result.page_text
         if not isinstance(text, str) or not text.strip():
             raise ValueError('calculation_transcription_empty')
@@ -218,8 +201,6 @@ def _process_calculation_request(context, hint, mode, describe, vlm_config, lang
                     if (ctx.page_no != request['identity']['page_no'] or ctx.input_type != 'pdf'
                             or hashlib.sha256(Path(ctx.source_path).read_bytes()).hexdigest() != request['identity']['source_sha256']):
                         return result_for(item, reason="calculation_identity_mismatch")
-                    if not int(_routing_defaults(routing_config).get('render_rotate_deg', 0)):
-                        block_source = (ctx.source_path, ctx.image_path, ctx.page_no, bbox, ctx.render_dpi, directory)
                     from .page_processor import _crop_layout_block_image
                     selected, _ = _crop_layout_block_image(
                         Path(ctx.image_path), {"bbox": bbox}, Path(directory),

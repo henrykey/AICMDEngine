@@ -776,6 +776,7 @@ class FakePage:
 
 
 class FakeDoc:
+    is_pdf = True
     def __len__(self):
         return 1
 
@@ -1654,6 +1655,9 @@ def test_process_task_page_does_not_promote_single_page_table_schema(monkeypatch
         description_language = "unknown"
 
     class FakeManager:
+        def validate_source_identity(self, task_id, source_identity):
+            assert source_identity is None
+
         def update_page_running(self, task_id, page_no):
             self.running = (task_id, page_no)
 
@@ -1750,6 +1754,9 @@ def test_process_task_page_uses_task_description_language_when_request_is_unknow
         description_language = "zh"
 
     class FakeManager:
+        def validate_source_identity(self, task_id, source_identity):
+            assert source_identity is None
+
         def update_page_running(self, task_id, page_no):
             pass
 
@@ -2562,6 +2569,9 @@ def test_calculation_page_handoff_keeps_one_worker_and_ordinary_sync(monkeypatch
     release = threading.Event()
     entered = threading.Event()
     class FakeManager:
+        def validate_source_identity(self, task_id, source_identity):
+            assert source_identity is None
+
         calls = 0
         saved = None
         def get_task(self, task_id):
@@ -2615,6 +2625,7 @@ def test_calculation_page_handoff_keeps_one_worker_and_ordinary_sync(monkeypatch
 
 
 def test_calculation_page_poll_missing_handle_never_restarts(monkeypatch):
+    monkeypatch.setattr(server.manager, "validate_source_identity", lambda task_id, source_identity: None)
     monkeypatch.setattr(server, 'process_page', lambda *args: pytest.fail('Polling cannot start a worker'))
     fn = getattr(server.process_task_page, 'fn', server.process_task_page)
     result = json.loads(asyncio.run(fn(task_id='missing-handle', page_no=1,

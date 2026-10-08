@@ -48,13 +48,33 @@ class OpenAICompatibleOcrClient:
         self.layout_url = str(cfg.get("layout_url") or cfg.get("api_url") or "").strip()
         self.use_layout_parsing = self._should_use_layout_parsing()
         self.enabled = bool(cfg.get("enabled", False) and self.model and self.base_url)
+        self.request_guard = None
         self._client = None
         if self.enabled and not self.use_layout_parsing:
             from openai import OpenAI, DefaultHttpxClient
 
             self._client = OpenAI(api_key=self.api_key, base_url=self.base_url, default_headers=self.extra_headers,
                                   max_retries=0 if self.max_retries == 0 else 2,
-                                  http_client=DefaultHttpxClient(event_hooks={"request": [lambda request: provider_send()]}))
+                                  http_client=DefaultHttpxClient(event_hooks={"request": [self._before_request]}))
+
+    def _before_request(self, request=None):
+        if self.request_guard is not None:
+            self.request_guard(request)
+        else:
+            provider_send()
+
+    def _open_request(self, request):
+        self._before_request(request)
+        if self.request_guard is None:
+            return urllib.request.urlopen(request, timeout=self.timeout_sec)
+        before_redirect = self._before_request
+        class GuardedRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+                if redirected is not None:
+                    before_redirect(redirected)
+                return redirected
+        return urllib.request.build_opener(GuardedRedirect()).open(request, timeout=self.timeout_sec)
 
     @property
     def supports_number_ocr(self) -> bool:
@@ -79,8 +99,7 @@ class OpenAICompatibleOcrClient:
             headers={"Authorization": f"Bearer {self.api_key}",
                      "Content-Type": f"multipart/form-data; boundary={boundary}"}, method="POST")
         # Deliberately no retries: missing numbers allow at most one additional request.
-        provider_send()
-        with urllib.request.urlopen(request, timeout=self.timeout_sec) as response:
+        with self._open_request(request) as response:
             data = json.loads(response.read())
         if not isinstance(data, dict) or data.get("status") != "succeeded":
             raise ValueError("number_ocr_failed")
@@ -196,8 +215,7 @@ class OpenAICompatibleOcrClient:
             try:
                 t0 = time.time()
                 request = urllib.request.Request(url, data=body, headers=headers, method="POST")
-                provider_send()
-                with urllib.request.urlopen(request, timeout=self.timeout_sec) as response:
+                with self._open_request(request) as response:
                     raw = response.read().decode("utf-8")
                 elapsed = time.time() - t0
                 logger.info(

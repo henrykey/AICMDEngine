@@ -34,6 +34,8 @@ class TaskRecord:
     source_size_bytes: Optional[int] = None
     source_sha1: Optional[str] = None
     description_language: str = "unknown"
+    source_identity: Dict[str, Any] = field(default_factory=dict)
+    input_image: Dict[str, Any] = field(default_factory=dict)
     status: str = "UPLOADED"
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)

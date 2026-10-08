@@ -71,7 +71,7 @@ class PDFSourceResolver:
         raw = base64.b64decode(file_data)
         self._validate_size(len(raw))
         digest = hashlib.sha1(raw).hexdigest()
-        path = self._target_path(task_name, digest)
+        path = self._target_path(task_name, digest, raw)
         path.write_bytes(raw)
         return ResolvedSource(str(path), "file_data", None, len(raw), digest)
 
@@ -83,7 +83,7 @@ class PDFSourceResolver:
         with urllib.request.urlopen(file_url, timeout=self._download_timeout) as response:
             raw = self._read_limited(response)
         digest = hashlib.sha1(raw).hexdigest()
-        path = self._target_path(task_name, digest)
+        path = self._target_path(task_name, digest, raw)
         path.write_bytes(raw)
         return ResolvedSource(str(path), "file_url", safe_ref, len(raw), digest)
 
@@ -122,7 +122,7 @@ class PDFSourceResolver:
         obj = client.get_object(Bucket=bucket, Key=key)
         raw = self._read_limited(obj["Body"])
         digest = hashlib.sha1(raw).hexdigest()
-        path = self._target_path(task_name, digest)
+        path = self._target_path(task_name, digest, raw)
         path.write_bytes(raw)
         return ResolvedSource(str(path), "s3", f"{bucket}/{key}", len(raw), digest)
 
@@ -144,9 +144,10 @@ class PDFSourceResolver:
             chunks.append(chunk)
         return b"".join(chunks)
 
-    def _target_path(self, task_name: str, digest: str) -> Path:
+    def _target_path(self, task_name: str, digest: str, raw: bytes) -> Path:
         safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", task_name).strip("._") or "pdf"
-        return self._uploads / f"{safe_name}_{digest[:12]}.pdf"
+        suffix = "png" if raw.startswith(b"\x89PNG\r\n\x1a\n") else "pdf"
+        return self._uploads / f"{safe_name}_{digest[:12]}.{suffix}"
 
     def _validate_size(self, size: int) -> None:
         if size <= 0:

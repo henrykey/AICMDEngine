@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import re
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -88,8 +89,18 @@ def process_page(
         raise ValueError(f"page_no out of range: {page_no} / {len(doc)}")
 
     page = doc[page_no - 1]
-    metrics = _collect_metrics(page)
-    bad_text_eval = _detect_bad_text(page, metrics, rc.get("bad_text_policy") or {})
+    image_input = not doc.is_pdf
+    if image_input:
+        # Image tasks have no authoritative PDF text layer or vector geometry.
+        metrics = dict(text_chars=0, text_sample="", text_blocks=0, image_area_ratio=1.0,
+                       drawing_density=0.0, noise_ratio=0.0, formula_score=0.0,
+                       table_score=0.0, native_table_count=0, non_text_blocks=1,
+                       visual_content_detected=True)
+        bad_text_eval = {"detected": False, "reasons": [], "summary": {}}
+        policy = "auto"
+    else:
+        metrics = _collect_metrics(page)
+        bad_text_eval = _detect_bad_text(page, metrics, rc.get("bad_text_policy") or {})
     mode, reasons = _decide_mode(policy, metrics, rc)
     if policy != "force_direct" and bad_text_eval["detected"]:
         fallback_action = str((rc.get("bad_text_policy") or {}).get("fallback_action") or "").strip()
@@ -98,6 +109,9 @@ def process_page(
             reasons = _unique_keep_order(list(reasons) + ["bad_text_detected"] + list(bad_text_eval["reasons"]))
     route_decision = _decide_capability_route(policy, mode, reasons, metrics, bad_text_eval, rc)
     route_selected = route_decision["route_selected"]
+    if image_input and route_selected == "text_only":
+        doc.close()
+        raise ValueError("image_ocr_unavailable")
     mode = route_decision["mode"]
     reasons = route_decision["reasons"]
     metrics.update(route_decision["signals"])
@@ -143,17 +157,20 @@ def process_page(
         glm_ocr_config["description_language"] = description_language
         glm_ocr = OpenAICompatibleOcrClient(glm_ocr_config, source="glm_ocr")
         if rc['calculation_transcription_mode'] == 'blocks' and not rc['render_rotate_deg']:
-            from .calculation_blocks import transcribe_calculation_blocks
+            from .calculation_blocks import BudgetedCalculationOcr, transcribe_calculation_blocks
             block_ocr = OpenAICompatibleOcrClient({**glm_ocr_config, 'max_retries': 0}, source='glm_ocr')
             def transcribe_calculation(item):
-                nonlocal glm_calls
-                result, manifest = transcribe_calculation_blocks(page, str(image_path),
-                    item.get('bbox') if item.get('bbox_space') == 'normalized_page' else None,
-                    block_ocr, Path(work_dir)/'calculation_blocks', rc['render_dpi'])
+                nonlocal glm_calls, vlm_calls
+                with vlm.calculation_scope():
+                    result, manifest = transcribe_calculation_blocks(str(image_path),
+                        item.get('bbox') if item.get('bbox_space') == 'normalized_page' else None,
+                        BudgetedCalculationOcr(block_ocr, vlm), Path(work_dir)/'calculation_blocks', rc['render_dpi'],
+                        layout=(layout_outcome or {}).get('layout'), vlm=vlm)
                 glm_calls += manifest['logical_calls']
+                vlm_calls += manifest['vlm_calls']
                 return result, manifest
             vlm.transcribe_calculation_blocks = transcribe_calculation
-        layout_enabled = bool(rc.get("layout_ledger_enabled", True))
+        layout_enabled = image_input or bool(rc.get("layout_ledger_enabled", True))
         layout_driven = False
         layout_outcome = None
 
@@ -177,11 +194,16 @@ def process_page(
                 try:
                     glm_calls += 1
                     raw_layout = glm_ocr.parse_layout(str(image_path))
-                    render_scale = max(float(rc["render_dpi"]) / 72.0, 0.01)
-                    fallback_width = float(page.rect.width) * render_scale
-                    fallback_height = float(page.rect.height) * render_scale
-                    if int(rc.get("render_rotate_deg", 0)) % 180:
-                        fallback_width, fallback_height = fallback_height, fallback_width
+                    if image_input:
+                        from PIL import Image
+                        with Image.open(image_path) as rendered:
+                            fallback_width, fallback_height = rendered.size
+                    else:
+                        render_scale = max(float(rc["render_dpi"]) / 72.0, 0.01)
+                        fallback_width = float(page.rect.width) * render_scale
+                        fallback_height = float(page.rect.height) * render_scale
+                        if int(rc.get("render_rotate_deg", 0)) % 180:
+                            fallback_width, fallback_height = fallback_height, fallback_width
                     layout_outcome = build_layout_outcome(
                         raw_layout,
                         display_page_no,
@@ -507,6 +529,11 @@ def process_page(
                 "missing": failed_layout_ids,
                 "reason": "" if reconciliation["complete"] else "layout_objects_incomplete",
             }
+
+    if image_input and (reconciliation is None or not reconciliation.get("complete")):
+        semantic_status["complete"] = False
+        semantic_status["missing"] = _unique_keep_order([*semantic_status.get("missing", []), "layout"])
+        semantic_status["reason"] = semantic_status.get("reason") or "image_layout_incomplete"
 
     # Keep coverage and field completeness separate, with lossless object references.
     semantic_objects = []
@@ -1054,6 +1081,11 @@ def _render_page_image(
 ) -> Path:
     out = out_dir / f"page_{page_no}.png"
     page = doc[page_no - 1]
+    if not doc.is_pdf:
+        if rotate_deg:
+            raise ValueError("image_task_rotation_must_be_applied_by_caller")
+        shutil.copyfile(doc.name, out)
+        return out
     if int(rotate_deg or 0) == 0:
         page.get_pixmap(dpi=dpi).save(str(out))
     else:

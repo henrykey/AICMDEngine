@@ -116,6 +116,7 @@ class FakePage:
 
 
 class FakeDoc:
+    is_pdf = True
     def __init__(self, pages):
         self._pages = pages
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -31,7 +32,19 @@ class TaskManager:
         storage_config: Optional[Dict[str, Any]] = None,
         pages: Optional[List[int]] = None,
         description_language: str = "unknown",
+        source_identity: Optional[Dict[str, Any]] = None,
     ) -> TaskRecord:
+        identity = dict(source_identity or {})
+        if source_identity is not None:
+            strings = ('tenant_id', 'doc_id', 'run_id')
+            keys = {*strings, 'version', 'source_page_no', 'source_file_sha256', 'render_dpi'}
+            if (set(identity) != keys
+                    or any(not isinstance(identity[k], str) or not 0 < len(identity[k].strip()) <= 256 for k in strings)
+                    or any(type(identity[k]) is not int or identity[k] < 1 for k in ('version', 'source_page_no'))
+                    or type(identity['render_dpi']) is not int or identity['render_dpi'] < 300
+                    or not isinstance(identity['source_file_sha256'], str)
+                    or not re.fullmatch(r'[a-f0-9]{64}', identity['source_file_sha256'])):
+                raise ValueError('invalid_source_identity')
         source = self._source_resolver.resolve(
             task_name=task_name,
             file_path=file_path,
@@ -45,7 +58,20 @@ class TaskManager:
 
         doc = fitz.open(source_path)
         total_pages = len(doc)
+        image_input = not doc.is_pdf
         doc.close()
+        input_image = {}
+        if image_input:
+            from PIL import Image
+            with Image.open(source_path) as image:
+                if image.format != 'PNG':
+                    raise ValueError('page_image_must_be_png')
+                image.verify()
+                input_image = {'width': image.width, 'height': image.height,
+                               'sha256': hashlib.sha256(Path(source_path).read_bytes()).hexdigest(),
+                               'content_type': 'image/png'}
+        elif identity:
+            raise ValueError('scoped_page_task_requires_png')
 
         if pages is None:
             planned_pages = list(range(1, total_pages + 1))
@@ -66,6 +92,8 @@ class TaskManager:
             source_size_bytes=source.size_bytes,
             source_sha1=source.sha1,
             description_language=str(description_language or "unknown"),
+            source_identity=identity,
+            input_image=input_image,
         )
         for p in planned_pages:
             task.pages[p] = PageRecord(page_no=p)
@@ -73,6 +101,11 @@ class TaskManager:
         self._tasks[task_id] = task
         self._persist_task(task)
         return task
+
+    def validate_source_identity(self, task_id: str, source_identity: Optional[Dict[str, Any]]) -> None:
+        task = self.get_task(task_id)
+        if task.source_identity != (source_identity or {}):
+            raise ValueError('task_source_identity_mismatch')
 
     def get_task(self, task_id: str) -> TaskRecord:
         task = self._tasks.get(task_id)
@@ -110,15 +143,17 @@ class TaskManager:
         origin = source.get('origin', 'existing_ocr')
         image_evidence = {key: source[key] for key in ('image_sha256', 'image_scope', 'original_bbox')
                           if key in source} if origin == 'image_transcription' else {}
-        identity = {'task_id': task_id, 'page_no': page_no, 'object_ref': object_ref,
+        identity = {'task_id': task_id, 'page_no': task.source_identity.get('source_page_no', page_no), 'object_ref': object_ref,
                     'layout_id': layout_id, 'source_sha256': source_hash, 'content_sha256': content_hash,
                     'origin': origin, **image_evidence}
+        if task.source_identity:
+            identity.update(source_identity=dict(task.source_identity), input_image=dict(task.input_image), input_page_no=page_no)
         if isinstance(source.get('block_transcription'), dict):
             identity['block_transcription_sha256'] = hashlib.sha256(
                 json.dumps(source['block_transcription'], sort_keys=True).encode()).hexdigest()
         artifact_id = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
         snapshot = {**identity, 'artifact_id': artifact_id,
-                    'run_id': f'{task_id}:{page_no}:{page.attempts}', 'created_at': now_iso(),
+                    'run_id': task.source_identity.get('run_id') or f'{task_id}:{page_no}:{page.attempts}', 'created_at': now_iso(),
                     'format': 'markdown', 'original_content': content}
         if isinstance(source.get('block_transcription'), dict):
             snapshot['block_transcription'] = source['block_transcription']
@@ -153,6 +188,9 @@ class TaskManager:
     def update_page_result(self, task_id: str, page_no: int, result: Dict[str, Any]) -> TaskRecord:
         task = self.get_task(task_id)
         page = self._get_page(task, page_no)
+        if task.source_identity:
+            result["source_identity"] = dict(task.source_identity)
+            result["input_image"] = dict(task.input_image)
         page.status = "COMPLETED"
         page.result = result
         page.error = None
@@ -301,6 +339,8 @@ class TaskManager:
             "source_ref": task.source_ref,
             "source_size_bytes": task.source_size_bytes,
             "source_sha1": task.source_sha1,
+            "source_identity": task.source_identity,
+            "input_image": task.input_image,
             "total_pages": task.total_pages,
             "planned_pages": task.planned_pages,
             "status": task.status,
