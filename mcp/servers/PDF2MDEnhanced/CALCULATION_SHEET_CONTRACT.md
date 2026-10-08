@@ -13,32 +13,29 @@ presence of one formula alone is insufficient. Invalid/foreign/ambiguous source
 quotes downgrade the classification to uncertain.
 
 The existing semantic call classifies tables. A validated `calculation_sheet`
-classification dispatches to `DynamicVLMClient.extract_calculation_sheet`, a separate
-image call with one object reference and source hash. That method has a single
-calculation-items schema (no metadata/classification schema). Its response is checked
-by `parse_calculation_sheet`, which never invokes pandas. Already source-validated
-inline proposals from compatible direct VLM responses need no extra extraction.
+classification dispatches current object-scoped OCR content to the shared text-only semantic stage.
+Source persistence precedes model organization. Human image transcription uses the selected engine
+and the existing source-first contract; its source is checked before `parse_calculation_sheet`.
+Already source-validated proposals need no additional extraction.
 
 An explicitly configured `vlm_config.table_analysis_max_model_calls` remains a
 shared per-page logical analysis budget (integers 0..8, zero disables analysis).
 An explicit physical cap also retains the fixed-budget behavior. Neither cap is
 silently expanded. Manual processing retains its existing budget contract.
 
-With neither cap configured, automatic calculation completion reserves one image
-transcription call per classified object and one semantic call per actual source
-batch. Classification retains its existing allowance. Each reservation adds at most
-two physical sends; SDK/outer retries remain disabled in calculation scope. No
-repair loop or speculative calls are allocated. This prevents an earlier object
-from consuming a later object's normal transcription/structuring allowance.
+With neither cap configured, automatic calculation completion reserves one semantic call per actual
+source batch. It reuses current object-scoped OCR content without an additional image transcription
+call. Explicit caller caps remain fixed. Sources are saved as `existing_ocr` artifacts before semantic
+work; empty content and failed source persistence remain unresolved, without image-model fallback.
 
-Automatic calculation sources are transcribed from reliable object crops, then
-saved before text-only structuring. Missing geometry, failed transcription or failed
-source persistence cannot silently fall back to successful OCR structuring. OCR
-may remain as an explicitly unresolved review draft. Source artifacts bind document
-hash, source-text hash, origin, image hash and crop bounds separately.
+Human calculation image requests default to configured GLM-OCR transcription. The existing review
+engine choice is carried in context as `transcription_engine=ocr|vlm`; only explicit `vlm` requests
+use VLM transcription. OCR performs one attempt within the shared physical budget, reports its own
+model-call count, and never falls back to VLM on error. Classification, when needed, remains a separate
+bounded existing call. Both choices preserve image identity and the existing source-first handoff.
 
-Task-backed asynchronous extraction hands off the existing worker before image
-transcription. Its deadline grows only with concrete reserved stage calls; polling
+Task-backed asynchronous extraction hands off the existing worker before semantic
+processing. Its deadline grows only with concrete reserved stage calls; polling
 never starts another worker. Ordinary pages retain their synchronous lifecycle.
 
 Dedicated extraction is at most min(provider max_tokens, 16384) output tokens.

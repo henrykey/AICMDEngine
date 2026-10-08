@@ -87,6 +87,7 @@ def result_for(item, calls=0, reason=None):
 
 
 RESPONSE_CODES = {
+    'calculation_ocr_unavailable', 'calculation_ocr_single_image_required',
     'calculation_identity_mismatch', 'calculation_source_missing', 'calculation_source_rewritten',
     'calculation_source_revision_mismatch', 'calculation_response_invalid', 'calculation_response_empty',
     'calculation_response_truncated', 'calculation_response_filtered', 'calculation_response_incomplete',
@@ -475,11 +476,12 @@ def title_continuation(identity, content, known):
     return _continuation({'status': 'proposed', 'predecessor': matches[0]['identity']}, identity, content, matches)
 
 
-def process_request(request, hint, mode, vlm, image_path=None, adjacent_images=None):
+def process_request(request, hint, mode, vlm, image_path=None, adjacent_images=None, transcribe=None):
     """Transcribe/classify, optionally review neighbors, then structure within one budget."""
     item = initial_item(request, hint, mode)
     calls = 0
     structured = False
+    ocr_calls = 0
     transcription_only = isinstance(request, dict) and request.get('stage') == 'transcription'
     def finish(reason=None):
         nonlocal calls, structured
@@ -498,6 +500,7 @@ def process_request(request, hint, mode, vlm, image_path=None, adjacent_images=N
                 'transcription': {'status': 'failed', 'reason': reason, 'logical_calls': calls},
                 'provider': getattr(vlm, 'provider', ''), 'model': getattr(vlm, 'model', '')}
         result = result_for(item, calls, reason)
+        result["model_calls"] = {"glm_ocr": ocr_calls, "vlm_ocr": calls - ocr_calls}
         if getattr(vlm, 'physical_request_limit', None) is not None:
             result['budget'].update(physical_requests=vlm.physical_requests,
                                      physical_request_limit=vlm.physical_request_limit, sdk_retries=0)
@@ -543,14 +546,19 @@ def process_request(request, hint, mode, vlm, image_path=None, adjacent_images=N
                                                          request.get('calculation_resume'), identity)
             return finish(reason)
         calls += 1
-        response = vlm.extract_calculation_sheet(image_path, target)
+        if transcribe is not None and mode != 'organize_existing' and hint != 'data_table':
+            ocr_calls += 1
+            response = transcribe(image_path, target)
+        else:
+            response = vlm.extract_calculation_sheet(image_path, target)
         if response_error(vlm):
             return finish(response_error(vlm))
         content = _read_response(item, response, identity, hint, mode, getattr(vlm, 'description_language', 'unknown'))
         if hint == 'auto':
             calls += repair_table_classification(vlm, image_path, item, content, identity['layout_id'],
                                                  calculation_budget(vlm) - calls)
-        item['calculation_source']['pipeline'] = {'transcription': {'status': 'complete', 'logical_calls': calls}}
+        item['calculation_source']['pipeline'] = {'transcription': {'status': 'complete',
+            'engine': 'ocr' if ocr_calls else 'vlm', 'logical_calls': 1}}
         title = response.get('table_title') or request.get('table_title')
         if isinstance(title, str) and title.strip() and len(title) <= 500:
             item['table_title'] = title.strip()

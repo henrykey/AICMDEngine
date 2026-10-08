@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ..stage_timing import timed_stage, provider_send
+
 import base64
 import json
 import logging
@@ -48,15 +50,18 @@ class OpenAICompatibleOcrClient:
         self.enabled = bool(cfg.get("enabled", False) and self.model and self.base_url)
         self._client = None
         if self.enabled and not self.use_layout_parsing:
-            from openai import OpenAI
+            from openai import OpenAI, DefaultHttpxClient
 
-            self._client = OpenAI(api_key=self.api_key, base_url=self.base_url, default_headers=self.extra_headers)
+            self._client = OpenAI(api_key=self.api_key, base_url=self.base_url, default_headers=self.extra_headers,
+                                  max_retries=0 if self.max_retries == 0 else 2,
+                                  http_client=DefaultHttpxClient(event_hooks={"request": [lambda request: provider_send()]}))
 
     @property
     def supports_number_ocr(self) -> bool:
         from urllib.parse import urlparse
         return self.enabled and bool(self.api_key) and urlparse(self.base_url).hostname == "open.bigmodel.cn"
 
+    @timed_stage("openai_compatible_ocr_client.extract_number_lines")
     def extract_number_lines(self, image_path: str) -> Dict[str, Any]:
         """One full-page request; this endpoint supplies label text/geometry, not LaTeX."""
         if not self.supports_number_ocr:
@@ -74,12 +79,14 @@ class OpenAICompatibleOcrClient:
             headers={"Authorization": f"Bearer {self.api_key}",
                      "Content-Type": f"multipart/form-data; boundary={boundary}"}, method="POST")
         # Deliberately no retries: missing numbers allow at most one additional request.
+        provider_send()
         with urllib.request.urlopen(request, timeout=self.timeout_sec) as response:
             data = json.loads(response.read())
         if not isinstance(data, dict) or data.get("status") != "succeeded":
             raise ValueError("number_ocr_failed")
         return data
 
+    @timed_stage("openai_compatible_ocr_client.extract_page")
     def extract_page(self, image_path: str, prompt: Optional[str] = None) -> OcrResult:
         self.ensure_enabled()
         if self.use_layout_parsing:
@@ -87,6 +94,7 @@ class OpenAICompatibleOcrClient:
         text = self._call_image_prompt(image_path, prompt or self._default_prompt())
         return normalize_text_response(text, self.source)
 
+    @timed_stage("openai_compatible_ocr_client.extract_table_html")
     def extract_table_html(self, image_path: str) -> str:
         """Read one already-cropped table; keep HTML without flattening or adding metadata."""
         self.ensure_enabled()
@@ -117,6 +125,7 @@ class OpenAICompatibleOcrClient:
             return ""
         return text
 
+    @timed_stage("openai_compatible_ocr_client.parse_layout")
     def parse_layout(
         self,
         image_path: str,
@@ -187,6 +196,7 @@ class OpenAICompatibleOcrClient:
             try:
                 t0 = time.time()
                 request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+                provider_send()
                 with urllib.request.urlopen(request, timeout=self.timeout_sec) as response:
                     raw = response.read().decode("utf-8")
                 elapsed = time.time() - t0

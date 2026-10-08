@@ -140,6 +140,7 @@ async def _process_task_page(
 ) -> str:
     loop = asyncio.get_event_loop()
     effective_routing_config = dict(routing_config or {})
+    effective_routing_config["__timing_task_id"] = task_id
     if ocr_config:
         effective_routing_config["ocr_config"] = ocr_config
     ocr_vlm_config = ((ocr_config or {}).get("vlm_ocr") or {}) if isinstance(ocr_config, dict) else {}

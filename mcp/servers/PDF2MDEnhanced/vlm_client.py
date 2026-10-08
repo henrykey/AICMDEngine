@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+from .stage_timing import timed_stage, provider_send
 from .calculation_sheet import classification_prompt, calculation_budget, PhysicalRequestBudgetExceeded
 
 from .semantic_language import normalize_language, validate_descriptions
@@ -187,10 +189,12 @@ class DynamicVLMClient:
     def _count_physical_request(self, request) -> None:
         # HTTPX invokes this before every send, including redirects and SDK retries.
         if not self._calculation_guard_active:
+            provider_send()
             return
         if self.physical_requests >= self.physical_request_limit:
             raise PhysicalRequestBudgetExceeded()
         self.physical_requests += 1
+        provider_send()
 
     def reserve_automatic_calculation_calls(self, count):
         """Reserve once for concrete object/source work; explicit caller caps stay fixed."""
@@ -233,6 +237,7 @@ class DynamicVLMClient:
                 raise PhysicalRequestBudgetExceeded() from None
             exc = exc.__cause__
 
+    @timed_stage("vlm_client.recognize_layout")
     def recognize_layout(self, image_path: str, table_context=None) -> Dict[str, Any]:
         prompt = (
             "Analyze page layout and return strict JSON with keys: "
@@ -264,6 +269,7 @@ class DynamicVLMClient:
             "confidence": "low",
         }
 
+    @timed_stage("vlm_client.full_page_markdown")
     def full_page_markdown(self, image_path: str) -> str:
         prompt = "Extract page content as clean markdown. Keep structure, formulas and tables where possible. Illustrations are replaced with placeholders described in text." + _description_language_instruction(self.description_language)
         # prompt = """
@@ -274,6 +280,7 @@ class DynamicVLMClient:
         #     """
         return self._call_image_prompt(image_path, prompt, max_tokens=self.max_tokens)
 
+    @timed_stage("vlm_client.full_page_dual_output")
     def full_page_dual_output(self, image_path: str) -> Dict[str, Any]:
         """
         One-call dual dataset extraction for FULL_VLM mode.
@@ -407,6 +414,7 @@ class DynamicVLMClient:
         )
         return effective
 
+    @timed_stage("vlm_client.extract_region_structured")
     def extract_region_structured(
         self, image_path: str, semantic_objects: Optional[list[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
@@ -457,6 +465,7 @@ class DynamicVLMClient:
             return data
         return {"formulas": [], "tables": [], "figures": []}
 
+    @timed_stage("vlm_client.classify_table")
     def classify_table(self, image_path, target):
         """Small classification response for one fixed source object; never extracts content."""
         prompt = (
@@ -517,6 +526,7 @@ class DynamicVLMClient:
         text = self._call_image_prompt(image_path, prompt, max_tokens=min(self.max_tokens, 16384), safe_errors=True)
         return self._extract_json(text) or {}
 
+    @timed_stage("vlm_client._staged_calculation")
     def _staged_calculation(self, image_path, target):
         stage = target['calculation_stage']
         if stage == 'semantic':
@@ -678,6 +688,7 @@ class DynamicVLMClient:
         text = call(*args, max_tokens=min(self.max_tokens, 16384), safe_errors=True)
         return self._extract_json(text) or {}
 
+    @timed_stage("vlm_client.describe_formulas_text")
     def describe_formulas_text(self, page_text: str, formulas: list[Dict[str, Any]]) -> Dict[str, Any]:
         """Explain existing OCR formulas with the same provider's text chat capability."""
         prompt = (
@@ -696,6 +707,7 @@ class DynamicVLMClient:
         response = self._call_text_prompt(prompt, max_tokens=self.max_tokens)
         return self._extract_json(response) or {"formulas": []}
 
+    @timed_stage("vlm_client.extract_layout_structured")
     def extract_layout_structured(self, image_path: str, layout_blocks: list[Dict[str, Any]]) -> Dict[str, Any]:
         bounded_blocks = []
         for block in layout_blocks:
@@ -769,6 +781,7 @@ class DynamicVLMClient:
             return self._extract_json(self._call_image_prompt(image_path, prompt, max_tokens=budget, safe_errors=True))
         return self._extract_json(self._call_text_prompt(prompt, max_tokens=budget, safe_errors=True))
 
+    @timed_stage("vlm_client.extract_object_structured")
     def extract_object_structured(
         self, image_path: str, block: Dict[str, Any], compact: bool = False,
     ) -> Dict[str, Any]:
@@ -851,6 +864,7 @@ class DynamicVLMClient:
             validate_descriptions(data, self.description_language)
         return data if isinstance(data, dict) else {}
 
+    @timed_stage("vlm_client.extract_table_html")
     def extract_table_html(
         self, image_path: str, block: Dict[str, Any], compact: bool = False,
     ) -> str:
@@ -902,6 +916,7 @@ class DynamicVLMClient:
         )
         return self._call_text_prompt(prompt, max_tokens=min(self.max_tokens, 4096))
 
+    @timed_stage("vlm_client._call_image_prompt")
     def _call_image_prompt(self, image_path: str, prompt: str, max_tokens: int, safe_errors: bool = False, json_object: bool = False, temperature: Optional[float] = None) -> str:
         self.ensure_enabled()
         paths = image_path if isinstance(image_path, list) else [image_path]
@@ -977,6 +992,7 @@ class DynamicVLMClient:
             raise TimeoutError("model_call_timeout") from None
         raise RuntimeError("model_call_failed" if safe_errors else f"VLM call failed: {last_err}")
 
+    @timed_stage("vlm_client._call_text_prompt")
     def _call_text_prompt(self, prompt: str, max_tokens: int, safe_errors: bool = False, json_object: bool = False, semantic_reasoning: bool = False, system_prompt: Optional[str] = None) -> str:
         self.ensure_enabled()
 

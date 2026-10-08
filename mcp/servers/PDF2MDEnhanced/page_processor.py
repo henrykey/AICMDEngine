@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .stage_timing import timed_stage, stage_identity
+
 from .calculation_sheet import (
     METADATA_KEYS, apply_calculation_sheet, source_context,
     table_content_quality, complete_calculation_batch, calculation_budget,
@@ -65,6 +67,7 @@ def _normalize_recovered_figure(candidate: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
+@timed_stage("page_processor.process_page")
 def process_page(
     source_path: str,
     page_no: int,
@@ -77,6 +80,7 @@ def process_page(
     table_placeholders: list[str] = []
     source_page_no = int(rc.get("source_page_no", 0) or 0)
     display_page_no = source_page_no if source_page_no > 0 else int(page_no)
+    stage_identity((routing_config or {}).get("__timing_task_id"), display_page_no)
 
     doc = fitz.open(source_path)
     if page_no < 1 or page_no > len(doc):
@@ -1040,6 +1044,7 @@ def _render_page_image(
     return out
 
 
+@timed_stage("page_processor._recover_unbound_table_regions")
 def _recover_unbound_table_regions(image_path, output_dir, outcome, vlm, enabled, limit, source_dpi):
     """Visually verify orphan captions, then reuse object recovery before replacing any members."""
     if not enabled or limit <= 0 or not callable(getattr(vlm, 'recognize_layout', None)):
@@ -1131,6 +1136,7 @@ def _recover_unbound_table_regions(image_path, output_dir, outcome, vlm, enabled
     return calls
 
 
+@timed_stage("page_processor._recover_layout_objects")
 def _recover_layout_objects(
     image_path: Path,
     output_dir: Path,
@@ -1313,6 +1319,7 @@ def _table_image_problem(table):
     return any(f.get("parent_relation", {}).get("status") != "resolved" for f in probe["figures"])
 
 
+@timed_stage("page_processor._recover_missing_table_images")
 def _recover_missing_table_images(image_path, output_dir, payloads, vlm, enabled, max_objects,
                                   source_dpi=150, previous=None, max_model_calls=None):
     """Schedule late image gaps through the existing bounded object recovery."""
@@ -1487,6 +1494,7 @@ def _crop_layout_block_image(
     output_dir: Path,
     padding_ratio: float = 0.02,
     source_dpi: float = 150,
+    max_dpi: Optional[int] = 150,
 ) -> tuple[Path, Dict[str, Any]]:
     source = fitz.Pixmap(str(image_path))
     bbox = block.get("bbox")
@@ -1524,11 +1532,12 @@ def _crop_layout_block_image(
         b"".join(bytes(row) for row in rows),
         source.alpha,
     )
-    scale = min(1.0, 150.0 / max(float(source_dpi), 1.0))
+    target_dpi = float(source_dpi) if max_dpi is None else min(float(max_dpi), float(source_dpi))
+    scale = min(1.0, target_dpi / max(float(source_dpi), 1.0))
     if scale < 1:
         crop = fitz.Pixmap(crop, max(1, math.floor(crop_width * scale)),
                           max(1, math.floor(crop_height * scale)))
-    dpi = max(1, min(150, int(source_dpi)))
+    dpi = max(1, int(target_dpi))
     crop.set_dpi(dpi, dpi)
     safe_layout_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(block.get("layout_id") or "object"))
     output_path = output_dir / f"layout-recovery-{safe_layout_id}.png"
@@ -2373,6 +2382,7 @@ def _merge_table_image_metadata(table: Dict[str, Any], candidate: Dict[str, Any]
                     target[key] = cell[key]
 
 
+@timed_stage("page_processor._enrich_upload_semantics")
 def _enrich_upload_semantics(
     vlm: DynamicVLMClient, image_path: str, structured: Dict[str, Any],
     payloads: Optional[Dict[str, Any]], enabled: bool,
@@ -3865,6 +3875,7 @@ def _attach_figure_assets(image_path, payloads, page_no, source_dpi=150):
             table["manualReviewRequired"] = True
 
 
+@timed_stage("page_processor._recover_cell_figure_semantics")
 def _recover_cell_figure_semantics(image_path, output_dir, payloads, vlm, enabled, limit, source_dpi):
     """Run late-created cell figures through the existing identity-bound object recovery."""
     figures = [figure for figure in payloads.get("figures", [])

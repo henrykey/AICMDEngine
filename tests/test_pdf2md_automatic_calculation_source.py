@@ -1,4 +1,4 @@
-"""Automatic calculation sources must come from the selected object's pixels."""
+"""Automatic calculations reuse scoped OCR without another image-model call."""
 import fitz
 import pytest
 
@@ -6,71 +6,44 @@ from tests.test_pdf2md_calculation_sheet import cs, framed_proposal
 
 
 @pytest.mark.parametrize('persistence_failure', [False, True])
-def test_automatic_calculation_transcribes_object_before_saving_and_structuring(tmp_path, persistence_failure):
-    page_path = tmp_path / 'page.png'
-    image = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 200, 200), False)
-    image.clear_with(255)
-    image.save(page_path)
+def test_automatic_ocr_is_saved_before_text_semantics(persistence_failure):
     events = []
     source = '# Calculation\n\n$Q=a+b$\n\nApply only when $a>0$.'
-    item = {'table_kind': 'calculation_sheet', 'table_kind_source': 'automatic',
-            'layout_id': 'lower-object', 'bbox': [0, 0.5, 1, 1], 'bbox_space': 'normalized_page'}
-
+    item = {'table_kind': 'calculation_sheet', 'table_kind_source': 'automatic'}
     class VLM:
-        table_analysis_max_model_calls = 4
-        last_call_info = {}
-
-        def extract_calculation_sheet(self, image_path, target):
-            if image_path is not None:
-                events.append('transcribe')
-                crop = fitz.Pixmap(str(image_path))
-                assert (crop.width, crop.height) == (200, 100)
-                assert target['calculation_stage'] == 'transcription'
-                assert target['object_ref'] == 'tables:1'
-                return {**target, 'source_text': source, 'table_title': 'Calculation'}
-            assert events == ['transcribe', 'save']
-            events.append('semantic')
+        table_analysis_max_model_calls = 2
+        def extract_calculation_sheet(self, image, target):
+            assert image is None
+            assert events == ['save']
             assert 'Q=a+b' in target['source_text']
-            assert 'WRONG_OCR' not in target['source_text']
+            events.append('semantic')
             return framed_proposal(target)
-
     def save(ref, selected, content):
         events.append('save')
-        assert events == ['transcribe', 'save']
-        assert ref == 'tables:1' and selected is item and content == source
-        assert selected['calculation_source']['origin'] == 'image_transcription'
+        assert content == source
+        assert selected['calculation_source']['origin'] == 'existing_ocr'
+        assert 'image_sha256' not in selected['calculation_source']
         if persistence_failure:
-            raise OSError('synthetic source storage failure')
-        return {'artifact_id': 'saved-image-source'}
-
-    cs.complete_calculation_batch(VLM(), str(page_path), [(item, '$WRONG_OCR$', 'tables:1')], 1,
-                                  source_store=save)
-    assert events == (['transcribe', 'save'] if persistence_failure else ['transcribe', 'save', 'semantic'])
-    assert item['table_kind_source'] == 'automatic'
-    assert item['calculation_source']['original_content'] == source
+            raise OSError('synthetic failure')
+        return {'artifact_id': 'saved-ocr'}
+    cs.complete_calculation_batch(VLM(), 'unused', [(item, source, 'tables:0')], 1, source_store=save)
+    assert events == (['save'] if persistence_failure else ['save', 'semantic'])
     if persistence_failure:
         assert item['calculation_source']['pipeline']['semantic']['reason'] == 'calculation_source_persistence_failed'
     else:
-        assert item['calculation_source']['artifact']['artifact_id'] == 'saved-image-source'
+        assert item['calculation_sheet']['coverage']['needs_review'] == 0
 
 
-@pytest.mark.parametrize('budget,bbox,expected', [
-    (0, [0, 0, 1, 1], 'table_analysis_budget_exhausted'),
-    (2, None, 'calculation_object_region_required'),
-    (2, [0, 0, 2, 1], 'calculation_object_region_required'),
-])
-def test_automatic_source_never_uses_whole_page_or_saves_ocr_on_precondition_failure(budget, bbox, expected):
+@pytest.mark.parametrize('content,budget,reason', [('', 2, 'calculation_source_missing'),
+    ('$q=x$', 0, 'table_analysis_budget_exhausted')])
+def test_empty_source_or_budget_never_triggers_image_fallback(content, budget, reason):
     class VLM:
         table_analysis_max_model_calls = budget
         def extract_calculation_sheet(self, *args):
-            pytest.fail('no image request is authorized by this object scope/budget')
-    item = {'table_kind': 'calculation_sheet', 'bbox': bbox, 'bbox_space': 'normalized_page'}
-    calls = cs.complete_calculation_batch(VLM(), 'unused', [(item, '$q=x$', 'tables:0')], 0,
-        source_store=lambda *args: pytest.fail('OCR fallback must not be saved as a new image source'))
-    assert calls == 0
-    assert item['calculation_source']['origin'] == 'existing_ocr'
-    assert item['calculation_sheet']['coverage']['structured'] == 0
-    assert {'reason': expected} in item['calculation_sheet']['unresolved']
+            pytest.fail('No model call allowed')
+    item = {'table_kind': 'calculation_sheet'}
+    assert cs.complete_calculation_batch(VLM(), 'unused', [(item, content, 'tables:0')], 0) == 0
+    assert {'reason': reason} in item['calculation_sheet']['unresolved']
 
 
 def test_ordinary_table_does_not_enter_calculation_image_source_path():
@@ -102,12 +75,11 @@ def test_default_automatic_budget_covers_each_object_and_actual_source_batches(t
     items = [{'table_kind': 'calculation_sheet', 'bbox': [0, y, 1, y + .5],
               'bbox_space': 'normalized_page'} for y in (0, .5)]
     count = cs.complete_calculation_batch(client, str(image_path),
-        [(item, '$wrong$', f'tables:{index}') for index, item in enumerate(items)], 1)
-    assert count == 6
-    assert calls == [(True, 'tables:0'), (False, 'tables:0'), (False, 'tables:0'),
-                     (True, 'tables:1'), (False, 'tables:1'), (False, 'tables:1')]
+        [(item, '\n\n'.join(f'$q_{{{i}}}=a+{i}$' for i in range(45)), f'tables:{index}') for index, item in enumerate(items)], 1)
+    assert count == 4
+    assert calls == [(False, 'tables:0'), (False, 'tables:0'), (False, 'tables:1'), (False, 'tables:1')]
     assert all(item['calculation_sheet']['coverage']['structured'] == 45 for item in items)
-    assert client.physical_request_limit == 16  # Shared classification allowance plus six bounded calls.
+    assert client.physical_request_limit == 12  # Shared classification allowance plus four semantic calls.
 
 
 @pytest.mark.parametrize('config', [

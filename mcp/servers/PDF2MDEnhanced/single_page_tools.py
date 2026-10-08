@@ -96,7 +96,7 @@ def extract_page_tables_direct(
             raise ValueError("calculation processing requires JSON output and no query enhancement")
         return _serialize_result(_process_calculation_request(
             context or {}, table_kind_hint, processing_mode, describe, vlm_config or _vlm_ocr_config(ocr_config),
-            description_language, file_path, file_data, file_url, page_no, input_type, routing_config,
+            description_language, file_path, file_data, file_url, page_no, input_type, routing_config, ocr_config,
         ), output_format)
     if query_enhancement is not None:
         from .table_query import enhance_table
@@ -125,7 +125,7 @@ def extract_page_tables_direct(
 
 
 def _process_calculation_request(context, hint, mode, describe, vlm_config, language,
-                                 file_path, file_data, file_url, page_no, input_type, routing_config):
+                                 file_path, file_data, file_url, page_no, input_type, routing_config, ocr_config=None):
     from .calculation_processing import initial_item, process_request, result_for, validate_request
     request = context.get("calculation_request")
     item = initial_item(request, hint, mode)
@@ -141,6 +141,29 @@ def _process_calculation_request(context, hint, mode, describe, vlm_config, lang
     except Exception as exc:
         return result_for(item, reason='invalid_physical_model_budget' if isinstance(exc, ValueError)
                           and str(exc) == 'invalid_physical_model_budget' else "calculation_provider_unavailable")
+    engine = context.get('transcription_engine', 'ocr')
+    if engine not in ('ocr', 'vlm'):
+        return result_for(item, reason='calculation_transcription_engine_invalid')
+    def transcribe(image, target):
+        # One bounded OCR request; no automatic VLM fallback on failure.
+        cfg = dict((ocr_config or {}).get('glm_ocr') or {})
+        cfg.update(max_retries=0)
+        ocr = OpenAICompatibleOcrClient(cfg, source='glm_ocr')
+        if not ocr.enabled:
+            raise ValueError('calculation_ocr_unavailable')
+        if isinstance(image, list):
+            raise ValueError('calculation_ocr_single_image_required')
+        with vlm.calculation_scope():
+            from .calculation_sheet import PhysicalRequestBudgetExceeded
+            if vlm.physical_requests >= vlm.physical_request_limit:
+                raise PhysicalRequestBudgetExceeded()
+            vlm.physical_requests += 1
+            result = ocr.extract_page(image)
+        text = result.markdown or result.page_text
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError('calculation_transcription_empty')
+        vlm.last_call_info = {}
+        return {**target, 'source_text': text}
     if calculation_budget(vlm) == 0:
         return result_for(item, reason="table_analysis_budget_exhausted")
     if getattr(vlm, 'physical_request_limit', None) == 0:
@@ -164,12 +187,11 @@ def _process_calculation_request(context, hint, mode, describe, vlm_config, lang
                     if (ctx.page_no != request['identity']['page_no'] or ctx.input_type != 'pdf'
                             or hashlib.sha256(Path(ctx.source_path).read_bytes()).hexdigest() != request['identity']['source_sha256']):
                         return result_for(item, reason="calculation_identity_mismatch")
-                    with fitz.open(ctx.image_path) as image_doc:
-                        page = image_doc[0]; rect = page.rect
-                        clip = fitz.Rect(bbox[0]*rect.width, bbox[1]*rect.height, bbox[2]*rect.width, bbox[3]*rect.height)
-                        selected = Path(directory) / 'selected.png'
-                        page.get_pixmap(clip=clip).save(selected)
-                        ctx.image_path = str(selected)
+                    from .page_processor import _crop_layout_block_image
+                    selected, _ = _crop_layout_block_image(
+                        Path(ctx.image_path), {"bbox": bbox}, Path(directory),
+                        padding_ratio=0, source_dpi=ctx.render_dpi, max_dpi=None)
+                    ctx.image_path = str(selected)
                 images = []
                 for index, obj in enumerate(request.get('adjacent_objects', [])):
                     data = obj.get('image_data')
@@ -190,8 +212,8 @@ def _process_calculation_request(context, hint, mode, describe, vlm_config, lang
                     path = Path(directory) / f'adjacent-{index}.image'
                     path.write_bytes(decoded)
                     images.append(str(path))
-                result = process_request(request, hint, mode, vlm, ctx.image_path,
-                                         images if all(images) else None)
+                result = process_request(request, hint, mode, vlm, ctx.image_path, images if all(images) else None,
+                    transcribe=transcribe if engine == 'ocr' else None)
                 result['items'][0].setdefault('calculation_source', {}).update(
                     image_sha256=hashlib.sha256(Path(ctx.image_path).read_bytes()).hexdigest(),
                     image_scope='object_crop', original_bbox=bbox if not cropped else request.get('image_bbox'),

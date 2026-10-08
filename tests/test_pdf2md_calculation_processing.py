@@ -175,7 +175,7 @@ def test_image_rpc_does_not_scan_neighbors_and_retains_image_hash(monkeypatch, t
     monkeypatch.setattr(sp, '_extract_tables', lambda *a, **k: pytest.fail('whole page scan'))
     out = json.loads(sp.extract_page_tables_direct(file_data=base64.b64encode(image_path.read_bytes()).decode(),
         input_type='image', table_kind_hint='calculation_sheet', processing_mode='reextract',
-        context={'object_crop': True, 'calculation_request': req}))
+        context={'object_crop': True, 'calculation_request': req, 'transcription_engine': 'vlm'}))
     assert out['status'] == 'needs_review'
     assert len(out['calculation_source']['image_sha256']) == 64
     assert 'items' not in out and 'tables' not in out
@@ -219,7 +219,7 @@ def test_ordinary_formula_lookup_stays_on_grid_path(monkeypatch):
     vlm = Provider(response(req['identity'], text, 'data_table'))
     monkeypatch.setattr(sp, 'DynamicVLMClient', lambda *_: vlm)
     out = json.loads(sp.extract_page_tables_direct(processing_mode='organize_existing', table_kind_hint='data_table',
-                    context={'calculation_request': req}))
+                    context={'calculation_request': req, 'transcription_engine': 'vlm'}))
     assert out['table_kind'] == 'data_table'
     assert out['normalized_rows'] == [['A', 'F=pA']]
     assert 'calculation_sheet' not in out
@@ -252,7 +252,7 @@ def test_invalid_adjacent_image_is_rejected_before_model(monkeypatch, tmp_path):
     vlm = Provider(); monkeypatch.setattr(sp, 'DynamicVLMClient', lambda *_: vlm)
     out = json.loads(sp.extract_page_tables_direct(file_path=str(img), input_type='image',
         table_kind_hint='calculation_sheet', processing_mode='reextract',
-        context={'object_crop': True, 'calculation_request': req}))
+        context={'object_crop': True, 'calculation_request': req, 'transcription_engine': 'vlm'}))
     assert out['reason'] == 'adjacent_image_invalid'
     assert not vlm.calls
 
@@ -283,7 +283,7 @@ def test_full_pdf_hash_mismatch_fails_before_model(monkeypatch, tmp_path):
     req = request(); req['identity']['page_no'] = 1; req['bbox'] = [0, 0, 1, 1]
     vlm = Provider(); monkeypatch.setattr(sp, 'DynamicVLMClient', lambda *_: vlm)
     out = json.loads(sp.extract_page_tables_direct(file_path=str(path), page_no=1,
-        table_kind_hint='calculation_sheet', processing_mode='reextract', context={'calculation_request': req}))
+        table_kind_hint='calculation_sheet', processing_mode='reextract', context={'calculation_request': req, 'transcription_engine': 'vlm'}))
     assert out['reason'] == 'calculation_identity_mismatch'
     assert not vlm.calls
 
@@ -842,7 +842,7 @@ def test_generic_pipeline_real_wire_separates_current_image_and_text_with_physic
     monkeypatch.setattr(openai, 'DefaultHttpxClient', http_client)
     try:
         out = json.loads(sp.extract_page_tables_direct(file_data=PNG_DATA, input_type='image',
-            context={'object_crop':True,'calculation_request':req}, table_kind_hint='calculation_sheet',
+            context={'object_crop':True,'calculation_request':req,'transcription_engine':'vlm'}, table_kind_hint='calculation_sheet',
             processing_mode='reextract', vlm_config={'model':'synthetic','api_key':'synthetic',
                 'base_url':'https://synthetic.invalid'}))
         assert out['status'] == 'needs_review'
@@ -899,10 +899,10 @@ def test_generic_pipeline_batch_failure_isolated_from_next_object(tmp_path):
               'calculation_sheet':{'validation_status':'unresolved'}} for _ in range(2)]
     vlm = Mixed()
     count = cs.complete_calculation_batch(vlm, str(path), [(items[i], f'Value {i}.', f'tables:{i}') for i in range(2)], 1)
-    assert count == 3
+    assert count == 2
     assert items[0]['calculation_sheet']['coverage']['structured'] == 0
     assert items[1]['calculation_sheet']['coverage']['structured'] == 1
-    assert [call[0] is None for call in vlm.calls] == [False, False, True]
+    assert all(call[0] is None for call in vlm.calls)
 
 @pytest.mark.parametrize('marker', ["(Cont'd)", '(Continued)', '(Continue)', '（续）', '续表'])
 def test_title_continuation_uses_scoped_existing_predecessor(marker):
@@ -1473,7 +1473,7 @@ def test_review_text_rpc_checkpoints_after_one_batch_and_resumes_only_unfinished
         client = BatchProvider()
         monkeypatch.setattr(sp, 'DynamicVLMClient', lambda *_: client)
         out = json.loads(sp.extract_page_tables_direct(table_kind_hint='calculation_sheet',
-            processing_mode='organize_existing', context={'calculation_request': req}))
+            processing_mode='organize_existing', context={'calculation_request': req, 'transcription_engine': 'vlm'}))
         assert len(client.calls) == 1
         seen.extend(u['id'] for s in client.calls[0]['source_sections'] for u in s['items'])
         sheet = out['calculation_sheet']
@@ -1738,3 +1738,58 @@ def test_inline_symbol_does_not_hide_a_unique_math_definition(text, expected_lat
     assert entry['content'] == ctx['source_sections'][0]['items'][0]['text']
     assert entry['latex'] == expected_latex
     assert any(x['reason'] == 'formula_needs_completion' for x in sheet['unresolved']) == missing
+
+
+@pytest.mark.parametrize('dpi', [150, 300])
+def test_calculation_crop_preserves_rendered_pixel_resolution(monkeypatch, tmp_path, dpi):
+    import hashlib
+    path = tmp_path / 'source.pdf'
+    with fitz.open() as doc:
+        doc.new_page(width=144, height=144)
+        doc.save(path)
+    req = request()
+    req['identity'].update(page_no=1, source_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+    req['bbox'] = [0, 0, .5, .5]
+    req['stage'] = 'transcription'
+    captured = []
+    class Recording(Provider):
+        def extract_calculation_sheet(self, image, target):
+            pix = fitz.Pixmap(image)
+            captured.append((pix.width, pix.height))
+            return {**target, 'source_text': '$x=1$'}
+    monkeypatch.setattr(sp, 'DynamicVLMClient', lambda *_: Recording())
+    sp.extract_page_tables_direct(file_path=str(path), page_no=1, input_type='pdf',
+        table_kind_hint='calculation_sheet', processing_mode='reextract',
+        routing_config={'render_dpi': dpi}, context={'calculation_request': req, 'transcription_engine': 'vlm'})
+    assert captured == [(dpi, dpi)]
+
+
+@pytest.mark.parametrize('available', [True, False])
+def test_manual_default_ocr_has_no_vlm_transcription_fallback(monkeypatch, available):
+    from tests.test_pdf2md_enhanced_single_page_tools import PNG_DATA
+    from types import SimpleNamespace
+    client = DynamicVLMClient(None)
+    monkeypatch.setattr(sp, 'DynamicVLMClient', lambda *_: client)
+    monkeypatch.setattr(client, 'extract_calculation_sheet', lambda *_: pytest.fail('OCR must not invoke VLM transcription'))
+    calls = []
+    class OCR:
+        enabled = available
+        def __init__(self, config, **kwargs):
+            assert config['max_retries'] == 0
+        def extract_page(self, image):
+            calls.append(image)
+            return SimpleNamespace(markdown='# Relation\n$x=1$', page_text='')
+    monkeypatch.setattr(sp, 'OpenAICompatibleOcrClient', OCR)
+    req = request(); req['stage'] = 'transcription'
+    out = json.loads(sp.extract_page_tables_direct(file_data=PNG_DATA, input_type='image',
+        table_kind_hint='calculation_sheet', processing_mode='reextract',
+        context={'object_crop': True, 'calculation_request': req}))
+    assert out['model_calls']['vlm_ocr'] == 0
+    if available:
+        assert len(calls) == 1
+        assert out['budget']['physical_requests'] == 1
+        assert out['calculation_source']['pipeline']['transcription']['engine'] == 'ocr'
+        assert out['calculation_source']['original_content'] == '# Relation\n$x=1$'
+    else:
+        assert not calls
+        assert out['reason'] == 'calculation_ocr_unavailable'

@@ -142,7 +142,7 @@ def framed_proposal(target):
         'unresolved': [], 'image_discrepancies': []}
 
 
-def test_upload_transcribes_image_for_framed_semantics_and_survives_normalization(calculation_image):
+def test_upload_reuses_ocr_for_framed_semantics_and_survives_normalization(calculation_image):
     calls = []
     class VLM:
         table_analysis_max_model_calls = 3
@@ -157,8 +157,8 @@ def test_upload_transcribes_image_for_framed_semantics_and_survives_normalizatio
             return framed_proposal(target)
     item = {**CALCULATION_REGION, 'markdown': HTML, 'layout_id':'p1-t1'}
     payloads = {'tables': [item]}
-    assert pp._enrich_upload_semantics(VLM(), calculation_image, {}, payloads, True) == 3
-    assert len(calls) == 3
+    assert pp._enrich_upload_semantics(VLM(), calculation_image, {}, payloads, True) == 2
+    assert len(calls) == 2
     assert item['table_kind'] == 'calculation_sheet'
     normalized = pp._normalize_structured(payloads)
     out = pp._build_output_elements('', normalized, 'full_glm_ocr')['tables'][0]
@@ -206,7 +206,7 @@ def test_single_page_glm_classifies_before_any_grid_call(monkeypatch, calculatio
     out = json.loads(sp.extract_page_tables_direct(file_data=base64.b64encode(Path(calculation_image).read_bytes()).decode(), input_type='image',
         ocr_config={'glm_ocr': {'enabled':True, 'model':'stub', 'api_key':'stub', 'base_url':'http://stub'}},
         vlm_config={'model':'stub', 'api_key':'stub', 'base_url':'http://stub'}))
-    assert out['model_calls'] == {'glm_ocr':1, 'vlm_ocr':3}
+    assert out['model_calls'] == {'glm_ocr':1, 'vlm_ocr':2}
     assert out['table_kind'] == 'calculation_sheet'
     assert out['columns'] == [] and out['normalized_rows'] == []
     assert out['tableRowsContent'] == ''
@@ -343,8 +343,8 @@ def test_two_stage_upload_has_shared_budget(budget, expected_calls, calculation_
     assert len(events)==expected_calls
     if budget==2:
         assert events==['classify','extract']
-        assert payload['tables'][0]['calculation_source']['origin']=='image_transcription'
-        assert payload['tables'][0]['calculation_sheet']['coverage']['structured']==0
+        assert payload['tables'][0]['calculation_source']['origin']=='existing_ocr'
+        assert payload['tables'][0]['calculation_sheet']['coverage']['structured']>0
     elif budget==1:
         assert {'reason':'table_analysis_budget_exhausted'} in payload['tables'][0]['calculation_sheet']['unresolved']
 
@@ -655,7 +655,7 @@ def test_upload_saves_source_before_semantics_and_never_structures_unsaved_sourc
                 assert events == ['classify']
                 events.append('transcribe')
                 return {**target, 'source_text': HTML}
-            assert events == ['classify', 'transcribe', 'save']
+            assert events == ['classify', 'save']
             events.append('semantic')
             assert image_path is None
             return framed_proposal(target)
@@ -667,7 +667,7 @@ def test_upload_saves_source_before_semantics_and_never_structures_unsaved_sourc
         return {'artifact_id': 'saved-source', 'task_id': 'task', 'page_no': 1}
     item = {**CALCULATION_REGION, 'markdown': HTML, 'layout_id': 'region-a'}
     pp._enrich_upload_semantics(VLM(), calculation_image, {}, {'tables': [item]}, True, source_store=save)
-    assert events == (['classify', 'transcribe', 'save'] if persistence_failure else ['classify', 'transcribe', 'save', 'semantic'])
+    assert events == (['classify', 'save'] if persistence_failure else ['classify', 'save', 'semantic'])
     assert item['calculation_source']['original_content'] == HTML
     if persistence_failure:
         assert item['calculation_source']['pipeline']['semantic']['reason'] == 'calculation_source_persistence_failed'
@@ -697,10 +697,8 @@ def test_upload_task_wires_durable_source_before_semantic_model(monkeypatch, tmp
             assert len(paths) == 1
             snapshot = json.loads(paths[0].read_text())
             assert snapshot['original_content'] == HTML
-            assert snapshot['origin'] == 'image_transcription'
-            assert len(snapshot['image_sha256']) == 64
-            assert snapshot['image_scope'] == 'object_crop'
-            assert snapshot['original_bbox'] == CALCULATION_REGION['bbox']
+            assert snapshot['origin'] == 'existing_ocr'
+            assert 'image_sha256' not in snapshot
             return framed_proposal(target)
     def process(source, page, policy, vlm, routing, previous):
         payload = {'tables': [{**CALCULATION_REGION, 'markdown': HTML, 'layout_id': 'region-a'}]}
