@@ -46,9 +46,9 @@ RUN if find /opt/wheelhouse -type f ! -name '.gitkeep' | grep -q .; then \
 
 # 3. 只复制运行所需源码，避免把构建缓存、wheelhouse、任务产物打进镜像
 RUN mkdir -p /app/PDF2MDEnhanced
-COPY __init__.py __main__.py calculation_input.py calculation_sheet.py http_transport.py layout_ledger.py models.py semantic_language.py object_semantics.py page_processor.py server.py single_page_tools.py source_resolver.py table_query.py task_manager.py vlm_client.py /app/PDF2MDEnhanced/
+COPY __init__.py __main__.py calculation_input.py calculation_sheet.py http_transport.py layout_ledger.py models.py semantic_language.py object_semantics.py page_processor.py server.py single_page_tools.py source_resolver.py stage_timing.py thinking_policy.py table_query.py task_manager.py vlm_client.py /app/PDF2MDEnhanced/
 COPY ocr_clients/ /app/PDF2MDEnhanced/ocr_clients/
-COPY calculation_processing.py /app/PDF2MDEnhanced/
+COPY calculation_processing.py provider-thinking.v1.json /app/PDF2MDEnhanced/
 
 # 4. 创建数据目录
 RUN mkdir -p /app/data/input /app/data/output /app/data/tasks

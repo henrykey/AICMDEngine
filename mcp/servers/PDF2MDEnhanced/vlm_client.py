@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .thinking_policy import thinking_parameters
 from .stage_timing import timed_stage, provider_send
 from .calculation_sheet import classification_prompt, calculation_budget, PhysicalRequestBudgetExceeded
 
@@ -140,6 +141,7 @@ class DynamicVLMClient:
         self.context_window_safety_margin = int(cfg.get("context_window_safety_margin", 0))
         self.temperature = float(0.1 if cfg.get("temperature") is None else cfg["temperature"])
         self.extra_headers = cfg.get("extra_headers") or {}
+        self.thinking_parameters = thinking_parameters(self.base_url, self.model, cfg.get("thinking_mode"))
         self.description_language = str(cfg.get("description_language") or "unknown")
         self._runtime_max_tokens_cap: Optional[int] = None
         self.last_dual_output_budget: Dict[str, Any] = {}
@@ -1001,17 +1003,9 @@ class DynamicVLMClient:
             try:
                 t0 = time.time()
                 call_max_tokens = self._apply_runtime_max_tokens_cap(max_tokens)
-                semantic_options = {}
-                if (semantic_reasoning and call_max_tokens >= 2
-                        and self.model.lower().startswith(('qwen3-vl-flash', 'qwen3-vl-plus'))
-                        and urlsplit(self.base_url).hostname in {
-                            'dashscope.aliyuncs.com', 'dashscope-intl.aliyuncs.com', 'dashscope-us.aliyuncs.com'}):
-                    semantic_options['extra_body'] = {
-                        'enable_thinking': True, 'thinking_budget': min(4096, call_max_tokens // 2)}
                 content, mode, finish_reason = self._chat_completion_with_stream_fallback(
                     **({"safe_errors": True} if safe_errors else {}),
                     **({'response_format': {'type': 'json_object'}} if json_object else {}),
-                    **semantic_options,
                     model=self.model,
                     messages=([{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}]
                               if system_prompt else [{"role": "user", "content": [{"type": "text", "text": prompt}]}]),
@@ -1063,6 +1057,8 @@ class DynamicVLMClient:
         Automatically falls back to non-stream mode for providers/gateways
         that do not support stream responses.
         """
+        if self.thinking_parameters:
+            kwargs["extra_body"] = {**(kwargs.get("extra_body") or {}), **self.thinking_parameters}
         stream_err = None
         try:
             stream_resp = self._client.chat.completions.create(stream=True, **kwargs)

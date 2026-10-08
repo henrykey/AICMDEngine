@@ -7,7 +7,7 @@ from typing import List, Dict, Any, Optional
 import logging
 
 from src.llm.provider_manager import ProviderCallError
-from src.llm.thinking import normalize_thinking_mode
+from src.llm.thinking import normalize_thinking_mode, thinking_parameters
 from src.llm.config_loader import LLMConfig
 from src.llm.async_capability_detector import AsyncCapabilityDetector
 from src.core.config import settings
@@ -80,6 +80,17 @@ async def get_provider(name: str, manager=Depends(get_provider_manager)):
         raise HTTPException(status_code=500, detail="Provider operation failed")
 
 
+def _validate_thinking_update(data, manager, name):
+    existing = manager.get_provider(name) if name else None
+    base_url = data.get("base_url", getattr(existing, "base_url", ""))
+    model = data.get("model", getattr(existing, "model", ""))
+    mode = data.get("thinking_mode", getattr(existing, "thinking_mode", "default"))
+    try:
+        thinking_parameters(base_url, model, mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
 @router.post("/providers")
 async def create_provider(
     provider: Dict[str, Any],
@@ -95,6 +106,8 @@ async def create_provider(
         name = provider.get("name")
         if not name:
             raise HTTPException(status_code=400, detail="Provider name is required")
+
+        _validate_thinking_update(provider, manager, name)
 
         # Check if provider already exists
         existing_providers = manager.get_providers()
@@ -242,6 +255,8 @@ async def update_provider(
         # Check if provider exists
         if name not in manager.get_providers():
             raise HTTPException(status_code=404, detail=f"Provider {name} not found")
+
+        _validate_thinking_update(provider_data, manager, name)
 
         # Update in MongoDB
         if manager.db_client:

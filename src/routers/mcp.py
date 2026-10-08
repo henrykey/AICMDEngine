@@ -101,6 +101,7 @@ def _build_vlm_config_from_provider(request: Request, provider_name: str) -> Opt
         "max_tokens": provider.max_tokens,
         "context_window": getattr(provider, "context_window", 4096),
         "dual_output_max_tokens": getattr(provider, "dual_output_max_tokens", 4096),
+        "thinking_mode": getattr(provider, "thinking_mode", "default"),
     }
 
 

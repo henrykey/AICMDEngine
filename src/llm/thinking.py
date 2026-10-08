@@ -1,45 +1,38 @@
-"""Provider thinking defaults, matching Membership Admin UI's Chat Completions mapping."""
+"""Evaluate provider-thinking.v1.json. No network calls or provider credentials."""
+import json
 import re
+from pathlib import Path
 from urllib.parse import urlparse
+
+POLICY = json.loads(Path(__file__).with_name('provider-thinking.v1.json').read_text())
 
 
 def normalize_thinking_mode(mode):
+    # Preserve legacy values on load; validation rejects them before save/send.
     if mode is None:
-        return "default"
+        return 'default'
     if not isinstance(mode, str):
-        raise ValueError("Thinking must be a preset or an effort name")
-    value = mode.strip().lower() or "default"
-    if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", value):
-        raise ValueError("Thinking must start with a letter and use up to 32 letters, digits, _ or -")
+        raise ValueError('Thinking must be default, low, high or disabled')
+    value = mode.strip().lower() or 'default'
+    if not re.fullmatch(r'[a-z][a-z0-9_-]{0,31}', value):
+        raise ValueError('Thinking must be default, low, high or disabled')
     return value
+
+
+def thinking_capabilities(base_url, model):
+    host = (urlparse(base_url or '').hostname or '').lower()
+    model = (model or '').strip().lower()
+    for rule in POLICY['rules']:
+        if any(host == h or (h.startswith('*.') and host.endswith(h[1:]) and host != h[2:]) for h in rule['hosts']) and re.fullmatch(rule['models'], model):
+            return {'version': POLICY['version'], 'modes': ['default', *POLICY['profiles'][rule['profile']]], 'note': rule['note'], 'rule': rule}
+    return {'version': POLICY['version'], 'modes': ['default'], 'note': 'Unverified endpoint/model: only default is available.', 'rule': None}
 
 
 def thinking_parameters(base_url, model, mode):
     mode = normalize_thinking_mode(mode)
-    if mode == "default":
+    capability = thinking_capabilities(base_url, model)
+    if mode not in capability['modes']:
+        raise ValueError(f"Unsupported Thinking '{mode}'. Supported: {', '.join(capability['modes'])}. {capability['note']}")
+    if mode == 'default':
         return {}
-    host = (urlparse(base_url).hostname or "").lower()
-    model = (model or "").lower()
-    disabled = mode in {"disabled", "none"}
-    preset = mode == "enabled" or disabled
-    kimi = host in {"api.moonshot.cn", "api.moonshot.ai", "api.kimi.com", "api.kimi.ai"}
-    glm = host in {"api.z.ai", "open.bigmodel.cn"}
-    if (kimi and model.startswith("kimi-k3")) or (glm and model.startswith("glm-5.3")):
-        if disabled:
-            raise ValueError("This model requires thinking and cannot disable it")
-        if mode == "enabled":
-            return {}
-        if mode not in {"low", "high", "max"}:
-            raise ValueError("This model supports thinking effort low, high or max")
-        return {"reasoning_effort": mode}
-    if host == "api.deepseek.com" or kimi or glm:
-        params = {"thinking": {"type": "disabled" if disabled else "enabled"}}
-        if not preset:
-            params["reasoning_effort"] = mode
-        return params
-    if host == "dashscope.aliyuncs.com" or host.endswith(".aliyuncs.com") or host == "maas.qwencloudapi.com":
-        params = {"enable_thinking": not disabled}
-        if not preset:
-            params["reasoning_effort"] = mode
-        return params
-    return {"reasoning_effort": "none" if disabled else "medium" if mode == "enabled" else mode}
+    return json.loads(json.dumps(POLICY['profiles'][capability['rule']['profile']][mode]))

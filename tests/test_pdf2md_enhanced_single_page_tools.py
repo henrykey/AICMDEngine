@@ -410,6 +410,7 @@ def test_vlm_stream_response_preserves_finish_reason():
             return iter([Chunk()])
 
     client = DynamicVLMClient.__new__(DynamicVLMClient)
+    client.thinking_parameters = {}
     client._client = types.SimpleNamespace(chat=types.SimpleNamespace(completions=Completions()))
 
     content, mode, finish_reason = client._chat_completion_with_stream_fallback(model="fixture", messages=[])

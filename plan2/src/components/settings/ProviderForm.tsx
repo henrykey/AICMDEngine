@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { thinkingCapability, thinkingModes } from '../../services/thinkingPolicy';
 
 interface LLMProvider {
   _id?: string;
@@ -68,6 +69,8 @@ const ProviderForm = ({ provider, onSave, onCancel }: ProviderFormProps) => {
     setFormData(provider ? { ...provider, thinking_mode: provider.thinking_mode ?? 'default' } : DEFAULT_PROVIDER);
   }, [provider]);
 
+  const thinking = thinkingCapability(formData.base_url, formData.model);
+
   const validateForm = (): boolean => {
     const newErrors: Record<string, string> = {};
 
@@ -77,8 +80,8 @@ const ProviderForm = ({ provider, onSave, onCancel }: ProviderFormProps) => {
     if (!formData.api_key_ref.trim()) newErrors.api_key_ref = 'API key reference is required';
     if (formData.temperature < 0 || formData.temperature > 2)
       newErrors.temperature = 'Temperature must be between 0 and 2';
-    if (!/^[a-z][a-z0-9_-]{0,31}$/.test((formData.thinking_mode || '').trim().toLowerCase() || 'default'))
-      newErrors.thinking_mode = 'Use up to 32 letters, digits, _ or -, starting with a letter';
+    if (!thinking.modes.includes(formData.thinking_mode || 'default'))
+      newErrors.thinking_mode = `Unsupported Thinking setting. ${thinking.note}`;
     if (formData.max_tokens < 1) newErrors.max_tokens = 'Max tokens must be at least 1';
     if ((formData.context_window || 0) < 1) newErrors.context_window = 'Context window must be at least 1';
     if ((formData.dual_output_max_tokens || 0) < 512)
@@ -247,16 +250,16 @@ const ProviderForm = ({ provider, onSave, onCancel }: ProviderFormProps) => {
 
           <div>
             <label htmlFor="provider-thinking" className="block text-sm font-medium text-slate-700 mb-1">Thinking</label>
-            <input id="provider-thinking" name="thinking_mode" list="thinking-presets"
-              value={formData.thinking_mode || ''} onChange={handleChange}
-              placeholder="default / enabled / disabled / low..."
-              className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
-            <datalist id="thinking-presets">
-              <option value="default">Default</option>
-              <option value="enabled">On</option>
-              <option value="disabled">Off</option>
-            </datalist>
-            <p className="text-xs text-slate-500 mt-1">Select a preset or type an effort such as low. Empty/default omits parameters. OpenAI/Ollama On uses medium. Support depends on the model; unsupported values may error or use its default.</p>
+            <select id="provider-thinking" name="thinking_mode"
+              value={formData.thinking_mode || 'default'} onChange={handleChange}
+              className="w-full px-3 py-2 border border-slate-300 rounded-lg">
+              {!thinkingModes.some(mode => mode === formData.thinking_mode) && formData.thinking_mode &&
+                <option value={formData.thinking_mode} disabled>{formData.thinking_mode} (unsupported stored value)</option>}
+              {thinkingModes.map(mode => <option key={mode} value={mode} disabled={!thinking.modes.includes(mode)}>
+                {mode === 'disabled' ? '关闭 / Off' : mode}
+              </option>)}
+            </select>
+            <p className="text-xs text-slate-500 mt-1">default uses the model default. {thinking.note}</p>
             {errors.thinking_mode && <p className="text-red-600 text-sm mt-1">{errors.thinking_mode}</p>}
           </div>
 

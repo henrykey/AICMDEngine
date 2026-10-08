@@ -1049,7 +1049,7 @@ def test_transcribed_caption_resolves_predecessor_marker_without_model_guess(cap
     ('other-model', 'https://dashscope.aliyuncs.com/compatible-mode/v1', False),
     ('qwen3-vl-flash', 'https://provider.invalid/v1', False),
 ])
-def test_semantic_reasoning_is_scoped_to_supported_calculation_text_calls(monkeypatch, model, base, supported):
+def test_default_semantic_calls_do_not_override_provider_thinking(monkeypatch, model, base, supported):
     client = DynamicVLMClient(None); client.model = model; client.base_url = base
     monkeypatch.setattr(client, 'ensure_enabled', lambda: None)
     calls = []
@@ -1058,10 +1058,7 @@ def test_semantic_reasoning_is_scoped_to_supported_calculation_text_calls(monkey
     client._call_text_prompt('Ordinary text', 2000)
     client._staged_calculation(None, {'calculation_stage': 'semantic', 'source_sections': []})
     assert 'extra_body' not in calls[0]
-    if supported:
-        assert calls[1]['extra_body'] == {'enable_thinking': True, 'thinking_budget': 2048}
-    else:
-        assert 'extra_body' not in calls[1]
+    assert 'extra_body' not in calls[1]
 
 
 @pytest.mark.parametrize('temperature', [1.0, 0.7, 0.0])

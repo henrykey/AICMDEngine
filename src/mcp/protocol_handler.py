@@ -462,6 +462,7 @@ class MCPProtocolHandler:
             "max_tokens": provider.max_tokens,
             "context_window": getattr(provider, "context_window", 4096),
             "dual_output_max_tokens": getattr(provider, "dual_output_max_tokens", 4096),
+            "thinking_mode": getattr(provider, "thinking_mode", "default"),
         }
 
     async def _resolve_mcp_llm_provider(self, mcp_name: str, context: Dict[str, Any]) -> Optional[str]:
