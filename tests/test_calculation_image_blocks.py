@@ -163,3 +163,118 @@ def test_ocr_budget_counts_real_http_redirects_before_sending(tmp_path, limit, m
         assert ocr.request_guard is None
     finally:
         server.shutdown(); server.server_close(); thread.join()
+
+
+def test_two_columns_partition_without_losing_margins():
+    regions = [{'bbox':[.1,.1,.9,.2]}, {'bbox':[.1,.4,.45,.8]}, {'bbox':[.55,.4,.9,.8]}]
+    boxes = b.calculation_block_boxes(regions, [0,0,1,1])
+    assert len(boxes) == 3
+    assert sum((x[2]-x[0])*(x[3]-x[1]) for x in boxes) == pytest.approx(1)
+    assert boxes[1][2] == boxes[2][0]
+
+
+def test_declared_thousand_coordinates_normalized():
+    response = {'coordinate_space':'normalized_1000', 'object_bbox':[100,100,900,900],
+                'sections':[{'bbox':[100,100,900,300]}, {'bbox':[100,400,900,900]}]}
+    box, sections = b.normalize_calculation_regions(response, (600,800))
+    assert box == [.1,.1,.9,.9]
+    assert sections[0]['bbox'] == [.1,.1,.9,.3]
+    response['coordinate_space'] = 'unknown'
+    with pytest.raises(ValueError): b.normalize_calculation_regions(response, (600,800))
+
+
+def test_outer_boundary_detects_cut_formula_but_not_thin_rule(tmp_path):
+    image = Image.new('RGB', (600,800), 'white')
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((100,390,180,410), fill='black')
+    assert b.boundary_intersects_content(image, [0,0,1,.5])
+    image = Image.new('RGB', (600,800), 'white')
+    ImageDraw.Draw(image).line((0,400,600,400), fill='black', width=2)
+    assert not b.boundary_intersects_content(image, [0,0,1,.5])
+
+
+def test_clipped_ocr_box_relocated_on_original_image_before_vlm_transcription(tmp_path):
+    path=tmp_path/'clipped.png'
+    image=Image.new('RGB',(600,800),'white')
+    ImageDraw.Draw(image).rectangle((100,390,180,410),fill='black');image.save(path)
+    calls=[]
+    class Vlm:
+        enabled=True
+        def reserve_automatic_calculation_calls(self,n): pass
+        def calculation_sections(self,image_path, target_bbox=None):
+            assert image_path == str(path)
+            assert target_bbox == [0,0,1,.5]
+            return {'coordinate_space':'normalized_1000','object_bbox':[0,0,1000,750],
+                    'sections':[{'bbox':[100,50,900,200]}, {'bbox':[100,450,900,700]}]}
+        def transcribe_calculation_block(self,crop):
+            calls.append(Image.open(crop).size)
+            return '$S_{bi}$' if len(calls)==1 else '$S_{bo}$'
+    text,manifest=b.transcribe_calculation_blocks(str(path),[0,0,1,.5],object(),tmp_path/'out',vlm=Vlm())
+    assert text == '$S_{bi}$\n\n$S_{bo}$'
+    assert manifest['effective_bbox'] == [0,0,1,.75]
+    assert manifest['engine'] == 'vlm_blocks'
+    assert manifest['layout_reason'] == 'object_boundary_intersects_content'
+
+
+@pytest.mark.parametrize('space,box', [('normalized',[.1,.1,.9,.9]), ('pixels',[60,80,540,720])])
+def test_explicit_coordinate_units(space,box):
+    result,_=b.normalize_calculation_regions({'coordinate_space':space,'object_bbox':box,'sections':[]},(600,800))
+    assert result == [.1,.1,.9,.9]
+
+
+def test_vlm_truncation_is_not_accepted_as_complete(monkeypatch):
+    from tests.test_pdf2md_calculation_processing import DynamicVLMClient
+    client=DynamicVLMClient(None)
+    def incomplete(*args,**kwargs):
+        client.last_call_info={'truncated':True}
+        return '$x='
+    monkeypatch.setattr(client,'_call_image_prompt',incomplete)
+    with pytest.raises(ValueError,match='block_response_truncated'):
+        client.transcribe_calculation_block('unused.png')
+    with pytest.raises(ValueError,match='section_response_truncated'):
+        client.calculation_sections('unused.png',[0,0,1,1])
+
+
+def test_good_ocr_layout_is_used_without_vlm_layout_call(tmp_path):
+    path=image_fixture(tmp_path)
+    class Vlm:
+        enabled=True
+        def reserve_automatic_calculation_calls(self,n): pass
+        def calculation_sections(self,*args,**kwargs):
+            raise AssertionError('reliable OCR layout must be reused')
+        def transcribe_calculation_block(self,path):return '$x=1$'
+    layout=[{'type':'formula','bbox':[.1,.15,.8,.28]}, {'type':'formula','bbox':[.1,.44,.8,.89]}]
+    text,manifest=b.transcribe_calculation_blocks(str(path),[.05,.05,.95,.95],object(),tmp_path/'out',layout=layout,vlm=Vlm())
+    assert manifest['status']=='complete' and manifest['layout_source']=='ocr'
+    assert manifest['vlm_calls']==2 and manifest['layout_calls']==0
+
+
+def test_vlm_block_failure_preserves_partial_evidence_and_falls_back(tmp_path):
+    path=image_fixture(tmp_path)
+    class Vlm:
+        enabled=True
+        calls=0
+        def reserve_automatic_calculation_calls(self,n): pass
+        def transcribe_calculation_block(self,path):
+            self.calls+=1
+            if self.calls==2:raise TimeoutError()
+            return '$x=1$'
+    layout=[{'type':'formula','bbox':[.1,.15,.8,.28]}, {'type':'formula','bbox':[.1,.44,.8,.89]}]
+    text,manifest=b.transcribe_calculation_blocks(str(path),[.05,.05,.95,.95],object(),tmp_path/'out',layout=layout,vlm=Vlm())
+    assert text is None and manifest['reason']=='block_transcription_failed'
+    assert manifest['blocks'][0]['text']=='$x=1$'
+    assert manifest['blocks'][1]['error_type']=='TimeoutError'
+
+
+
+def test_vlm_block_preserves_markdown_and_latex_without_json_escaping(monkeypatch):
+    from tests.test_pdf2md_calculation_processing import DynamicVLMClient
+    client=DynamicVLMClient(None)
+    monkeypatch.setattr(client,'_call_image_prompt',lambda *a,**k:'```markdown\nChecks\n\n$S_{bo}$\n```')
+    assert client.transcribe_calculation_block('unused.png') == 'Checks\n\n$S_{bo}$'
+
+
+
+def test_touching_regions_are_not_overlapping():
+    regions=[{'bbox':[0,0,1,.5]}, {'bbox':[0,.5,1,1]}]
+    assert b.calculation_block_boxes(regions,[0,0,1,1]) == [[0,0,1,.5],[0,.5,1,1]]

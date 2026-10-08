@@ -2,6 +2,7 @@ fastmcp==3.4.7
 mcp==1.29.0
 openai
 pymupdf
+Pillow==11.3.0
 python-dotenv
 boto3
 

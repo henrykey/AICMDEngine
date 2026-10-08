@@ -619,7 +619,9 @@ def extract_calculation_items(vlm, image_path, item, content, object_ref, availa
     if block_manifest is not None:
         source['block_transcription'] = block_manifest
         if block_manifest['status'] == 'complete':
-            source['origin'] = 'block_ocr'
+            source['origin'] = 'block_vlm' if block_manifest.get('engine') == 'vlm_blocks' else 'block_ocr'
+            if block_manifest.get('effective_bbox') is not None:
+                item['bbox'] = list(block_manifest['effective_bbox'])
 
     calls = 0
     reason = None if isinstance(content, str) and content.strip() else 'calculation_source_missing'
@@ -628,7 +630,8 @@ def extract_calculation_items(vlm, image_path, item, content, object_ref, availa
         'engine': 'existing_ocr', 'logical_calls': 0}}
     if block_manifest is not None:
         source['pipeline']['transcription'] = {k: block_manifest[k] for k in ('status', 'reason', 'logical_calls')}
-        source['pipeline']['transcription']['engine'] = 'glm_ocr_blocks'
+        source['pipeline']['transcription']['engine'] = block_manifest.get('engine', 'glm_ocr_blocks')
+        source['pipeline']['transcription']['logical_calls'] += block_manifest.get('vlm_calls', 0)
     if not reason and source_store is not None:
         try:
             source['artifact'] = source_store(object_ref, item, content)

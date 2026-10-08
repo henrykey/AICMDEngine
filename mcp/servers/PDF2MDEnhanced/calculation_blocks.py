@@ -9,21 +9,69 @@ def _valid(box):
             and 0 <= box[0] < box[2] <= 1 and 0 <= box[1] < box[3] <= 1)
 
 
+def normalize_calculation_regions(response, image_size):
+    """Use declared units; never guess a coordinate scale from its magnitude."""
+    space = response.get('coordinate_space', 'normalized')
+    scales = {'normalized': (1, 1), 'normalized_1000': (1000, 1000), 'pixels': image_size}
+    if space not in scales:
+        raise ValueError('unknown_coordinate_space')
+    sx, sy = scales[space]
+    def convert(box):
+        if not isinstance(box, list) or len(box) != 4 or any(type(x) not in (int, float) for x in box):
+            raise ValueError('invalid_section_geometry')
+        result = [box[0]/sx, box[1]/sy, box[2]/sx, box[3]/sy]
+        if not _valid(result):
+            raise ValueError('invalid_section_geometry')
+        return result
+    return convert(response['object_bbox']), [{'bbox': convert(r['bbox'])} for r in response['sections']]
+
+
 def calculation_block_boxes(regions, bbox):
-    """Keep every pixel of the object, including headings, conditions and notes."""
+    """Partition the complete object into reading-order rectangles, retaining columns."""
     if not _valid(bbox) or not isinstance(regions, list) or not 2 <= len(regions) <= 16:
         return []
-    boxes = [region.get('bbox') if isinstance(region, dict) else None for region in regions]
-    if any(not _valid(box) or box[0] < bbox[0] or box[1] < bbox[1]
-           or box[2] > bbox[2] or box[3] > bbox[3] for box in boxes):
+    boxes = [r.get('bbox') if isinstance(r, dict) else None for r in regions]
+    if any(not _valid(b) or b[0] < bbox[0] or b[1] < bbox[1]
+           or b[2] > bbox[2] or b[3] > bbox[3] for b in boxes):
         return []
-    boxes.sort(key=lambda box: box[1])
-    # Side-by-side or overlapping sections cannot safely become full-width bands.
-    if any(a[3] >= b[1] for a, b in zip(boxes, boxes[1:])):
+    def partition(items, area):
+        if len(items) == 1:
+            return [area]
+        # Prefer top-to-bottom groups; split columns only inside a shared row band.
+        for axis in (1, 0):
+            ordered = sorted(items, key=lambda b: b[axis])
+            end = ordered[0][axis+2]
+            for i in range(1, len(ordered)):
+                if end <= ordered[i][axis]:
+                    cut = (end + ordered[i][axis])/2
+                    first, second = list(area), list(area)
+                    first[axis+2], second[axis] = cut, cut
+                    left, right = partition(ordered[:i], first), partition(ordered[i:], second)
+                    return left + right if left and right else []
+                end = max(end, ordered[i][axis+2])
         return []
-    cuts = [(a[3] + b[1]) / 2 for a, b in zip(boxes, boxes[1:])]
-    boundaries = [bbox[1], *cuts, bbox[3]]
-    return [[bbox[0], a, bbox[2], b] for a, b in zip(boundaries, boundaries[1:])]
+    return partition(boxes, list(bbox))
+
+
+def boundary_intersects_content(image, bbox):
+    """Detect ink crossing crop edges; thin separator rules alone are not glyphs."""
+    from PIL import ImageChops
+    gray = image.convert('L')
+    x0, y0, x1, y1 = [round(v*s) for v,s in zip(bbox, (image.width,image.height,image.width,image.height))]
+    def crossing(axis, cut, start, end):
+        limit = image.height if axis == 1 else image.width
+        if cut <= 3 or cut >= limit-3:
+            return False
+        if axis == 1:
+            a, b = (start,cut-3,end,cut-2), (start,cut+2,end,cut+3)
+        else:
+            a, b = (cut-3,start,cut-2,end), (cut+2,start,cut+3,end)
+        first = gray.crop(a).point(lambda p: 255 if p < 200 else 0)
+        second = gray.crop(b).point(lambda p: 255 if p < 200 else 0)
+        dark = ImageChops.multiply(first, second).histogram()[255]
+        return dark > max(2, (end-start)*.01)
+    return (crossing(1,y0,x0,x1) or crossing(1,y1,x0,x1)
+            or crossing(0,x0,y0,y1) or crossing(0,x1,y0,y1))
 
 
 def _formula_sections(layout, bbox):
@@ -85,53 +133,78 @@ def transcribe_calculation_blocks(image_path, bbox, ocr, directory, dpi=300, lay
         return None, manifest
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    boxes = calculation_block_boxes(_formula_sections(layout or [], bbox), bbox)
-    if not boxes:
-        # Parse the actual object image, not a whole-table PDF bounding box.
+    try:
+        with Image.open(image_path) as source:
+            image = source.convert('L')
+    except Exception:
+        manifest['reason'] = 'object_crop_failed'
+        return None, manifest
+    manifest['original_bbox'] = list(bbox)
+    effective = list(bbox)
+    clipped = boundary_intersects_content(image, effective)
+    boxes = [] if clipped else calculation_block_boxes(_formula_sections(layout or [], bbox), bbox)
+    manifest['layout_reason'] = 'object_boundary_intersects_content' if clipped else 'no_reliable_section_boundaries'
+    if not boxes and not clipped:
         try:
             crop, _ = _crop_layout_block_image(Path(image_path), {'bbox': bbox}, directory,
                                                padding_ratio=0, source_dpi=dpi, max_dpi=None)
         except Exception:
             manifest['reason'] = 'object_crop_failed'
             return None, manifest
-        regions = []
         if getattr(ocr, 'use_layout_parsing', False) and callable(getattr(ocr, 'parse_layout', None)):
             try:
                 manifest['logical_calls'] += 1
                 manifest['layout_calls'] += 1
                 raw = ocr.parse_layout(str(crop))
-                with Image.open(crop) as image:
-                    outcome = build_layout_outcome(raw, 1, *image.size)
-                regions = _formula_sections(outcome['layout'], [0, 0, 1, 1])
-            except Exception:
-                regions = []
-        if not calculation_block_boxes(regions, [0, 0, 1, 1]) and vlm is not None and vlm.enabled:
-            try:
-                manifest['vlm_calls'] += 1
-                regions = vlm.calculation_sections(str(crop)).get('sections', [])
-            except Exception:
-                regions = []
-        object_boxes = calculation_block_boxes(regions, [0, 0, 1, 1])
-        boxes = [[bbox[0], bbox[1] + box[1]*(bbox[3]-bbox[1]),
-                  bbox[2], bbox[1] + box[3]*(bbox[3]-bbox[1])] for box in object_boxes]
+                with Image.open(crop) as cropped:
+                    outcome = build_layout_outcome(raw, 1, *cropped.size)
+                local = calculation_block_boxes(_formula_sections(outcome['layout'], [0,0,1,1]), [0,0,1,1])
+                boxes = [[bbox[0]+b[0]*(bbox[2]-bbox[0]), bbox[1]+b[1]*(bbox[3]-bbox[1]),
+                          bbox[0]+b[2]*(bbox[2]-bbox[0]), bbox[1]+b[3]*(bbox[3]-bbox[1])] for b in local]
+            except Exception as exc:
+                manifest['layout_error'] = type(exc).__name__
+    if boxes and any(boundary_intersects_content(image, b) for b in boxes):
+        boxes = []
+        manifest['layout_reason'] = 'block_boundary_intersects_content'
+    if not boxes and vlm is not None and vlm.enabled:
+        try:
+            vlm.reserve_automatic_calculation_calls(1)
+            manifest['vlm_calls'] += 1
+            # Full-image context lets VLM recover content beyond a clipped OCR box.
+            result = vlm.calculation_sections(str(image_path), target_bbox=bbox)
+            proposed, regions = normalize_calculation_regions(result, image.size)
+            intersection = max(0,min(bbox[2],proposed[2])-max(bbox[0],proposed[0])) * max(0,min(bbox[3],proposed[3])-max(bbox[1],proposed[1]))
+            area = lambda b: (b[2]-b[0])*(b[3]-b[1])
+            if intersection / area(bbox) < .8 or area(proposed) > 2*area(bbox):
+                raise ValueError('section_target_mismatch')
+            effective = [min(bbox[0],proposed[0]),min(bbox[1],proposed[1]),max(bbox[2],proposed[2]),max(bbox[3],proposed[3])]
+            for item in layout or []:
+                other = item.get('bbox')
+                if item.get('type') == 'table' and _valid(other) and other != bbox:
+                    if max(effective[0],other[0]) < min(effective[2],other[2]) and max(effective[1],other[1]) < min(effective[3],other[3]):
+                        raise ValueError('section_target_overlap')
+            boxes = calculation_block_boxes(regions, effective)
+            manifest['layout_source'] = 'vlm'
+        except Exception as exc:
+            manifest['layout_error'] = type(exc).__name__
+            known = {'section_response_truncated', 'section_response_invalid', 'unknown_coordinate_space',
+                     'invalid_section_geometry', 'section_target_mismatch', 'section_target_overlap'}
+            manifest['reason'] = str(exc) if type(exc) is ValueError and str(exc) in known else 'section_detection_failed'
+            return None, manifest
+    else:
+        manifest['layout_source'] = 'ocr'
     if not boxes:
+        if clipped:
+            manifest['reason'] = 'object_boundary_intersects_content'
+        elif manifest['layout_reason'] == 'block_boundary_intersects_content':
+            manifest['reason'] = 'block_boundary_intersects_content'
         return None, manifest
-    # A missed layout box must not authorize cutting through visible formula ink.
-    try:
-        with Image.open(image_path) as image:
-            gray = image.convert('L')
-            left, right = math.floor(bbox[0]*image.width), math.ceil(bbox[2]*image.width)
-            for box in boxes[:-1]:
-                cut = round(box[3]*image.height)
-                strip = gray.crop((left, max(0, cut-1), right, min(image.height, cut+2)))
-                for y in range(strip.height):
-                    dark = sum(count for shade, count in enumerate(strip.crop((0,y,strip.width,y+1)).histogram()) if shade < 200)
-                    if dark > max(2, strip.width*.01):
-                        manifest['reason'] = 'block_boundary_intersects_content'
-                        return None, manifest
-    except Exception:
-        manifest['reason'] = 'image_validation_failed'
+    manifest['effective_bbox'] = effective
+    if any(boundary_intersects_content(image, box) for box in boxes):
+        manifest['reason'] = 'block_boundary_intersects_content'
         return None, manifest
+    use_vlm = vlm is not None and vlm.enabled
+    manifest['engine'] = 'vlm_blocks' if use_vlm else 'glm_ocr_blocks'
     chunks = []
     for index, box in enumerate(boxes):
         block = {'id': f'b{index+1}', 'bbox': box, 'bbox_space': 'normalized_page', 'status': 'pending'}
@@ -141,15 +214,20 @@ def transcribe_calculation_blocks(image_path, bbox, ocr, directory, dpi=300, lay
             block_dir.mkdir(parents=True, exist_ok=True)
             crop, _ = _crop_layout_block_image(Path(image_path), {'bbox': box}, block_dir,
                                                padding_ratio=0, source_dpi=dpi, max_dpi=None)
-            manifest['logical_calls'] += 1
-            result = ocr.extract_page(str(crop))
-            text = result.markdown or result.page_text
+            if use_vlm:
+                vlm.reserve_automatic_calculation_calls(1)
+                manifest['vlm_calls'] += 1
+                text = vlm.transcribe_calculation_block(str(crop))
+            else:
+                manifest['logical_calls'] += 1
+                result = ocr.extract_page(str(crop))
+                text = result.markdown or result.page_text
             if not isinstance(text, str) or not text.strip():
                 raise ValueError('empty_block')
             block.update(status='complete', text=text)
             chunks.append(text)
-        except Exception:
-            block['status'] = 'failed'
+        except Exception as exc:
+            block.update(status='failed', error_type=type(exc).__name__)
             manifest.update(status='fallback', reason='block_transcription_failed')
             return None, manifest
     manifest.update(status='complete', reason=None)

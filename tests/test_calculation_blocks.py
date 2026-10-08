@@ -1,16 +1,19 @@
 import importlib
+import pytest
 from tests.test_pdf2md_calculation_processing import cp
 
 
-def test_block_source_persisted_before_structuring(monkeypatch):
+@pytest.mark.parametrize('engine,origin', [('glm_ocr_blocks','block_ocr'), ('vlm_blocks','block_vlm')])
+def test_block_source_persisted_before_structuring(monkeypatch,engine,origin):
     mod=importlib.import_module(cp.__package__+'.calculation_sheet')
     events=[]
     class Provider:
         automatic_calculation_budget=False
         def transcribe_calculation_blocks(self,item):
-            events.append('ocr');return '$a=b$',{'status':'complete','reason':None,'logical_calls':2,'blocks':[]}
+            events.append('ocr');return '$a=b$',{'status':'complete','reason':None,'logical_calls':2,'blocks':[],'engine':engine,'effective_bbox':[0,0,1,1]}
     def store(ref,item,content):
-        assert content=='$a=b$' and item['calculation_source']['origin']=='block_ocr'
+        assert content=='$a=b$' and item['calculation_source']['origin']==origin
+        assert item['bbox']==[0,0,1,1]
         events.append('persist');return {'id':'saved'}
     def structure(vlm,item,content,*args,**kwargs):
         assert item['calculation_source']['artifact']=={'id':'saved'}
