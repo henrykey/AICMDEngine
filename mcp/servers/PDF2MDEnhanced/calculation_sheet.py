@@ -605,12 +605,26 @@ def extract_calculation_items(vlm, image_path, item, content, object_ref, availa
     from .calculation_processing import structure_calculation_source
 
     source = item.setdefault('calculation_source', {})
+    block_manifest = None
+    transcribe = getattr(vlm, 'transcribe_calculation_blocks', None)
+    if callable(transcribe):
+        replacement, block_manifest = transcribe(item)
+        if replacement is not None:
+            content = replacement
     source.update(origin='existing_ocr', original_content=content)
+    if block_manifest is not None:
+        source['block_transcription'] = block_manifest
+        if block_manifest['status'] == 'complete':
+            source['origin'] = 'block_ocr'
+
     calls = 0
     reason = None if isinstance(content, str) and content.strip() else 'calculation_source_missing'
     source['pipeline'] = {'transcription': {
         'status': 'reused' if not reason else 'failed',
         'engine': 'existing_ocr', 'logical_calls': 0}}
+    if block_manifest is not None:
+        source['pipeline']['transcription'] = {k: block_manifest[k] for k in ('status', 'reason', 'logical_calls')}
+        source['pipeline']['transcription']['engine'] = 'glm_ocr_blocks'
     if not reason and source_store is not None:
         try:
             source['artifact'] = source_store(object_ref, item, content)

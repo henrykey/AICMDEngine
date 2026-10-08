@@ -113,10 +113,15 @@ class TaskManager:
         identity = {'task_id': task_id, 'page_no': page_no, 'object_ref': object_ref,
                     'layout_id': layout_id, 'source_sha256': source_hash, 'content_sha256': content_hash,
                     'origin': origin, **image_evidence}
+        if isinstance(source.get('block_transcription'), dict):
+            identity['block_transcription_sha256'] = hashlib.sha256(
+                json.dumps(source['block_transcription'], sort_keys=True).encode()).hexdigest()
         artifact_id = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
         snapshot = {**identity, 'artifact_id': artifact_id,
                     'run_id': f'{task_id}:{page_no}:{page.attempts}', 'created_at': now_iso(),
                     'format': 'markdown', 'original_content': content}
+        if isinstance(source.get('block_transcription'), dict):
+            snapshot['block_transcription'] = source['block_transcription']
         directory = self._task_dir(task_id) / 'calculation_sources'
         directory.mkdir(mode=0o700, exist_ok=True)
         destination = directory / (artifact_id + '.json')

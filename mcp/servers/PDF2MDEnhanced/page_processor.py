@@ -142,6 +142,17 @@ def process_page(
         glm_ocr_config = dict(rc.get("glm_ocr") or {})
         glm_ocr_config["description_language"] = description_language
         glm_ocr = OpenAICompatibleOcrClient(glm_ocr_config, source="glm_ocr")
+        if rc['calculation_transcription_mode'] == 'blocks' and not rc['render_rotate_deg']:
+            from .calculation_blocks import transcribe_calculation_blocks
+            block_ocr = OpenAICompatibleOcrClient({**glm_ocr_config, 'max_retries': 0}, source='glm_ocr')
+            def transcribe_calculation(item):
+                nonlocal glm_calls
+                result, manifest = transcribe_calculation_blocks(page, str(image_path),
+                    item.get('bbox') if item.get('bbox_space') == 'normalized_page' else None,
+                    block_ocr, Path(work_dir)/'calculation_blocks', rc['render_dpi'])
+                glm_calls += manifest['logical_calls']
+                return result, manifest
+            vlm.transcribe_calculation_blocks = transcribe_calculation
         layout_enabled = bool(rc.get("layout_ledger_enabled", True))
         layout_driven = False
         layout_outcome = None
@@ -501,6 +512,11 @@ def process_page(
     semantic_objects = []
     for collection in ("tables", "formulas", "figures"):
         for index, item in enumerate(output_elements.get(collection) or []):
+            if (collection == 'tables' and item.get('table_kind') == 'calculation_sheet'
+                    and item.get('calculation_source', {}).get('pipeline', {}).get('validation', {}).get('status') == 'needs_review'):
+                semantic_objects.append({'collection': collection, 'index': index,
+                    'layout_id': item.get('layout_id'), 'missing_fields': ['calculation_required_content'],
+                    'semantic_status': 'needs_review'})
             if item.get("missing_fields"):
                 issue = {"collection": collection, "index": index,
                          "missing_fields": list(item["missing_fields"]),
@@ -619,7 +635,11 @@ def _routing_defaults(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     glm_ocr = ocr_config.get("glm_ocr") if isinstance(ocr_config.get("glm_ocr"), dict) else {}
     vlm_ocr = ocr_config.get("vlm_ocr") if isinstance(ocr_config.get("vlm_ocr"), dict) else {}
     routing = c.get("routing") if isinstance(c.get("routing"), dict) else {}
+    mode = c.get('calculation_transcription_mode', 'whole')
+    if mode not in ('whole', 'blocks'):
+        raise ValueError('invalid_calculation_transcription_mode')
     return {
+        "calculation_transcription_mode": mode,
         "text_chars_min": int(c.get("text_chars_min", 80)),
         "image_area_ratio_full_vlm": float(c.get("image_area_ratio_full_vlm", 0.55)),
         "noise_ratio_full_vlm": float(c.get("noise_ratio_full_vlm", 0.30)),

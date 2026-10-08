@@ -162,6 +162,45 @@ def source_batches(sections, context_size=0):
     return batches
 
 
+def complete_optional_formula_semantics(vlm, sheet):
+    """Optional enrichment never modifies source/structure or required sheet quality."""
+    describe = getattr(vlm, 'describe_calculation_formula', None)
+    if not callable(describe):
+        return 0
+    from .semantic_language import valid_description, description_mismatch
+    entries = [(section, entry) for section in sheet.get('sections', [])
+               for entry in section.get('items', [])
+               if entry.get('kind') in ('formula', 'branch', 'check') and entry.get('latex')
+               and not entry.get('semantic_desc')]
+    if getattr(vlm, 'optional_formula_budget', False):
+        # One physical send per optional item; never expand an explicit caller cap.
+        with vlm.calculation_scope():
+            vlm.physical_request_limit += len(entries)
+    calls = 0
+    for section, entry in entries:
+        entry['semantic_status'] = 'optional_missing'
+        if (getattr(vlm, 'physical_request_limit', None) is not None
+                and vlm.physical_requests >= vlm.physical_request_limit):
+            entry['semantic_status'] = 'optional_budget_exhausted'
+            continue
+        try:
+            calls += 1
+            description = valid_description(describe(entry, {'section_title': section.get('title', ''),
+                                                            'sheet_description': sheet.get('semantic_desc', '')}))
+            if description and description != entry['latex'] and not description_mismatch(
+                    description, getattr(vlm, 'description_language', 'unknown')):
+                entry['semantic_desc'] = description
+                entry['semantic_status'] = 'model_proposed'
+        except TimeoutError:
+            entry['semantic_status'] = 'optional_timeout'
+        except PhysicalRequestBudgetExceeded:
+            entry['semantic_status'] = 'optional_budget_exhausted'
+        except Exception as exc:
+            entry['semantic_status'] = ('optional_timeout' if type(exc).__name__ == 'APITimeoutError'
+                                        else 'optional_failed')
+    return calls
+
+
 def structure_calculation_source(vlm, item, content, target, available_calls, resume=None, identity=None, automatic=False):
     """Common text-only semantic stage for saved content and existing OCR."""
     source = item.setdefault('calculation_source', {})
@@ -361,6 +400,14 @@ def structure_calculation_source(vlm, item, content, target, available_calls, re
                             'logical_calls': calls, 'batch_count': len(batches),
                             'source_revision': ctx['source_revision'], 'identity': deepcopy(identity), 'batches': progress}
     pipeline['validation'] = {'status': 'complete' if complete else 'needs_review', **sheet['coverage']}
+    if callable(getattr(vlm, 'describe_calculation_formula', None)):
+        optional_calls = complete_optional_formula_semantics(vlm, sheet)
+        calls += optional_calls
+        pipeline['optional_formula_semantics'] = {
+            'logical_calls': optional_calls, 'timeout_sec': getattr(vlm, 'formula_semantic_timeout_sec', 15),
+            'required': False}
+        from .calculation_sheet import _render
+        sheet['render_markdown'] = _render(sheet['sections'], ctx['description_language'])
     if getattr(vlm, 'physical_request_limit', None) is not None:
         pipeline['physical_requests'] = vlm.physical_requests
         pipeline['physical_request_limit'] = vlm.physical_request_limit

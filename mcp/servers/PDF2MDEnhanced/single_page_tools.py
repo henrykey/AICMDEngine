@@ -144,7 +144,14 @@ def _process_calculation_request(context, hint, mode, describe, vlm_config, lang
     engine = context.get('transcription_engine', 'ocr')
     if engine not in ('ocr', 'vlm'):
         return result_for(item, reason='calculation_transcription_engine_invalid')
+    block_mode = context.get('calculation_transcription_mode',
+                             (routing_config or {}).get('calculation_transcription_mode', 'whole'))
+    if block_mode not in ('whole', 'blocks'):
+        return result_for(item, reason='invalid_calculation_transcription_mode')
+    block_source = None
+    block_manifest = None
     def transcribe(image, target):
+        nonlocal block_manifest
         # One bounded OCR request; no automatic VLM fallback on failure.
         cfg = dict((ocr_config or {}).get('glm_ocr') or {})
         cfg.update(max_retries=0)
@@ -153,6 +160,30 @@ def _process_calculation_request(context, hint, mode, describe, vlm_config, lang
             raise ValueError('calculation_ocr_unavailable')
         if isinstance(image, list):
             raise ValueError('calculation_ocr_single_image_required')
+        if block_mode == 'blocks':
+            block_manifest = {'mode': 'blocks', 'status': 'fallback',
+                              'reason': 'original_pdf_geometry_unavailable', 'blocks': [], 'logical_calls': 0}
+            if block_source is not None:
+                from .calculation_blocks import calculation_block_boxes, transcribe_calculation_blocks
+                original_path, original_image, original_page, original_bbox, original_dpi, directory = block_source
+                with fitz.open(original_path) as original:
+                    selected_page = original[original_page-1]
+                    boxes = calculation_block_boxes(selected_page, original_bbox)
+                    with vlm.calculation_scope():
+                        if getattr(vlm, 'optional_formula_budget', False):
+                            vlm.physical_request_limit += len(boxes)
+                        class CountedOcr:
+                            def extract_page(self, path):
+                                from .calculation_sheet import PhysicalRequestBudgetExceeded
+                                if vlm.physical_requests >= vlm.physical_request_limit:
+                                    raise PhysicalRequestBudgetExceeded()
+                                vlm.physical_requests += 1
+                                return ocr.extract_page(path)
+                        text, block_manifest = transcribe_calculation_blocks(selected_page, original_image,
+                            original_bbox, CountedOcr(), directory, original_dpi)
+                if text is not None:
+                    vlm.last_call_info = {}
+                    return {**target, 'source_text': text}
         with vlm.calculation_scope():
             from .calculation_sheet import PhysicalRequestBudgetExceeded
             if vlm.physical_requests >= vlm.physical_request_limit:
@@ -187,6 +218,8 @@ def _process_calculation_request(context, hint, mode, describe, vlm_config, lang
                     if (ctx.page_no != request['identity']['page_no'] or ctx.input_type != 'pdf'
                             or hashlib.sha256(Path(ctx.source_path).read_bytes()).hexdigest() != request['identity']['source_sha256']):
                         return result_for(item, reason="calculation_identity_mismatch")
+                    if not int(_routing_defaults(routing_config).get('render_rotate_deg', 0)):
+                        block_source = (ctx.source_path, ctx.image_path, ctx.page_no, bbox, ctx.render_dpi, directory)
                     from .page_processor import _crop_layout_block_image
                     selected, _ = _crop_layout_block_image(
                         Path(ctx.image_path), {"bbox": bbox}, Path(directory),
@@ -225,6 +258,13 @@ def _process_calculation_request(context, hint, mode, describe, vlm_config, lang
             except Exception:
                 return result_for(item, reason="source_image_unavailable")
     table = result['items'][0]
+    if block_manifest is not None:
+        table.setdefault('calculation_source', {})['block_transcription'] = block_manifest
+        count = block_manifest['logical_calls'] + (0 if block_manifest['status'] == 'complete' else 1)
+        previous_count = result.get('model_calls', {}).get('glm_ocr', 0)
+        result.setdefault('model_calls', {})['glm_ocr'] = count
+        result.setdefault('budget', {})['logical_calls'] = result.get('budget', {}).get('logical_calls', 0) + count - previous_count
+        table['calculation_source'].setdefault('pipeline', {}).setdefault('transcription', {})['logical_calls'] = count
     if table.get('table_kind') == 'data_table' and table.get('markdown') and result['status'] != 'failed':
         table.update(_normalize_table_contract(table['markdown'], 'structured_json'))
         table.pop('lookup_status', None)
