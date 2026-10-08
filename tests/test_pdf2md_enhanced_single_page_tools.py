@@ -101,7 +101,8 @@ def test_default_single_page_image_reaches_provider_with_matching_mime(
                 assert image.convert('RGB').getpixel((0, 0)) == (32, 64, 96)
         if format_name in {'PNG', 'JPEG', 'WEBP'}:
             assert payload == original_bytes
-        return json.dumps({'tables': [{'markdown': '| A | B |\n| --- | --- |\n| 1 | 2 |'}]}), 'stub', 'stop'
+        return json.dumps({'tables': [{'markdown': '| A | B |\n| --- | --- |\n| 1 | 2 |',
+                                     'table_kind': 'data_table', 'classification_evidence': ['1']}]}), 'stub', 'stop'
 
     monkeypatch.setattr(single_page_tools, '_prepare_context', record_context)
     monkeypatch.setattr(single_page_tools, 'DynamicVLMClient', client_factory)

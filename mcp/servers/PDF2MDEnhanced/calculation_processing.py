@@ -5,7 +5,7 @@ import re
 
 from .calculation_sheet import (
     apply_calculation_sheet, calculation_budget, parse_calculation_sheet, source_context,
-    PhysicalRequestBudgetExceeded, calculation_source_sections,
+    PhysicalRequestBudgetExceeded, calculation_source_sections, repair_table_classification,
 )
 
 
@@ -547,6 +547,9 @@ def process_request(request, hint, mode, vlm, image_path=None, adjacent_images=N
         if response_error(vlm):
             return finish(response_error(vlm))
         content = _read_response(item, response, identity, hint, mode, getattr(vlm, 'description_language', 'unknown'))
+        if hint == 'auto':
+            calls += repair_table_classification(vlm, image_path, item, content, identity['layout_id'],
+                                                 calculation_budget(vlm) - calls)
         item['calculation_source']['pipeline'] = {'transcription': {'status': 'complete', 'logical_calls': calls}}
         title = response.get('table_title') or request.get('table_title')
         if isinstance(title, str) and title.strip() and len(title) <= 500:

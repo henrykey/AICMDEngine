@@ -714,3 +714,92 @@ def test_upload_task_wires_durable_source_before_semantic_model(monkeypatch, tmp
     assert item['calculation_source']['artifact']['task_id'] == started.task_id
     assert item['calculation_source']['pipeline']['semantic']['status'] == 'complete'
     assert manager.get_task(started.task_id).pages[1].result['elements']['tables'][0] == item
+
+
+@pytest.mark.parametrize('kind', ['data_table', 'calculation_sheet'])
+def test_missing_evidence_is_response_failure_and_recovers_once(kind):
+    item = {'markdown': HTML, 'columns': ['A'], 'normalized_rows': [['1']]}
+    cs.apply_calculation_sheet(item, {'table_kind': kind}, HTML)
+    assert item['table_classification']['status'] == 'response_invalid'
+    class VLM:
+        table_analysis_max_model_calls = 2
+        last_call_info = {}
+        calls = 0
+        def classify_table(self, image, target):
+            self.calls += 1
+            assert target['source_text'] == cs.source_context(HTML)['text']
+            assert target['object_ref'] == 'tables:0'
+            return {'table_kind': kind, 'classification_evidence': ['Force $F=pA$ N']}
+    vlm = VLM()
+    assert cs.repair_table_classification(vlm, 'page.png', item, HTML, 'tables:0', 1) == 1
+    assert item['table_kind'] == kind
+    assert item['table_classification']['status'] == 'model_proposed'
+    if kind == 'data_table':
+        assert item['columns'] == ['A'] and item['normalized_rows'] == [['1']]
+    assert cs.repair_table_classification(vlm, 'page.png', item, HTML, 'tables:0', 1) == 0
+    assert vlm.calls == 1
+
+
+def test_classification_repair_preserves_proposal_budget_and_manual_decision():
+    item = {}
+    cs.apply_calculation_sheet(item, {'table_kind': 'data_table'}, HTML)
+    class VLM:
+        last_call_info = {}
+        calls = 0
+        def classify_table(self, *_):
+            self.calls += 1
+            return {'table_kind': 'data_table'}
+    vlm = VLM()
+    assert cs.repair_table_classification(vlm, 'page.png', item, HTML, 'one', 0) == 0
+    assert item['table_classification']['repair_reason'] == 'table_analysis_budget_exhausted'
+    assert cs.repair_table_classification(vlm, 'page.png', item, HTML, 'one', 1) == 1
+    assert item['table_kind'] == 'uncertain'
+    assert item['table_classification']['proposed_kind'] == 'data_table'
+    assert cs.repair_table_classification(vlm, 'page.png', item, HTML, 'one', 1) == 0
+    manual = {'table_kind': 'calculation_sheet', 'table_kind_source': 'manual'}
+    assert cs.repair_table_classification(vlm, 'page.png', manual, HTML, 'two', 1) == 0
+    assert vlm.calls == 1
+
+
+def test_semantically_uncertain_classification_is_not_format_retry():
+    item = {}
+    cs.apply_calculation_sheet(item, {'table_kind': 'uncertain', 'classification_evidence': ['Force $F=pA$ N']}, HTML)
+    assert item['table_classification']['status'] == 'unresolved'
+    assert cs.repair_table_classification(object(), 'page.png', item, HTML, 'one', 1) == 0
+
+
+def test_classification_repair_shares_budget_without_cross_object_results():
+    objects = []
+    for ref, source in [('first', 'axis A value 1'), ('second', 'axis B value 2')]:
+        item = {}
+        cs.apply_calculation_sheet(item, {'table_kind': 'data_table'}, source)
+        objects.append((item, source, ref))
+    class VLM:
+        table_analysis_max_model_calls = 2
+        last_call_info = {}
+        calls = []
+        def classify_table(self, image, target):
+            self.calls.append(target['object_ref'])
+            return {'table_kind': 'data_table', 'classification_evidence': [target['source_text']]}
+    vlm = VLM()
+    assert cs.complete_calculation_batch(vlm, 'page.png', objects, 1) == 1
+    assert vlm.calls == ['first']
+    assert objects[0][0]['table_kind'] == 'data_table'
+    assert objects[1][0]['table_kind'] == 'uncertain'
+    assert objects[1][0]['table_classification']['repair_reason'] == 'table_analysis_budget_exhausted'
+
+
+@pytest.mark.parametrize('response', [
+    {'object_ref': 'other', 'table_kind': 'data_table', 'classification_evidence': ['Force $F=pA$ N']},
+    {'table_kind': 'data_table', 'classification_evidence': ['foreign evidence']},
+])
+def test_repair_never_accepts_other_object_or_unbound_evidence(response):
+    item = {}
+    cs.apply_calculation_sheet(item, {'table_kind': 'data_table'}, HTML)
+    class VLM:
+        last_call_info = {}
+        def classify_table(self, *_):
+            return response
+    assert cs.repair_table_classification(VLM(), 'page.png', item, HTML, 'this', 1) == 1
+    assert item['table_kind'] == 'uncertain'
+    assert item['table_classification']['status'] == 'response_invalid'

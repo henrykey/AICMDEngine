@@ -1691,6 +1691,38 @@ def test_saved_source_heading_replaces_stale_title_and_continuation(content, tit
     assert out['calculation_sheet']['coverage']['needs_review'] == 0
 
 
+def test_dedicated_classifier_has_small_json_contract_and_one_object(monkeypatch):
+    client = DynamicVLMClient(None)
+    captured = []
+    def call(image, prompt, **kwargs):
+        captured.append((image, prompt, kwargs))
+        return '{"table_kind":"data_table","classification_evidence":["axis coefficient"]}'
+    monkeypatch.setattr(client, '_call_image_prompt', call)
+    result = client.classify_table('synthetic.png', {'object_ref': 'table-one', 'source_text': 'axis coefficient'})
+    assert result['table_kind'] == 'data_table'
+    assert len(captured) == 1
+    assert captured[0][2]['max_tokens'] == 1024
+    assert captured[0][2]['json_object'] is True
+    assert 'table-one' in captured[0][1]
+    assert 'Do not transcribe' in captured[0][1]
+
+
+def test_auto_object_recovers_missing_evidence_before_source_first_handoff():
+    req = request(); req['stage'] = 'transcription'
+    first = response(req['identity']); first.pop('classification_evidence')
+    class RepairProvider(Provider):
+        def classify_table(self, image, target):
+            self.calls.append((image, target))
+            return {'table_kind': 'calculation_sheet', 'classification_evidence': [target['source_text']]}
+    provider = RepairProvider(first)
+    out = cp.process_request(req, 'auto', 'auto', provider, 'one.png')
+    assert out['table_kind'] == 'calculation_sheet'
+    assert out['table_classification']['repair_attempts'] == 1
+    assert out['budget']['logical_calls'] == 2
+    assert out['calculation_source']['pipeline']['semantic']['reason'] == 'source_persistence_required'
+    assert len(provider.calls) == 2
+
+
 @pytest.mark.parametrize('text,expected_latex,missing', [
     ('## Symbols\n$q=$ flow rate at $L$.', 'q=', False),
     ('## Relations\n$q=r$ and $a=b$.', '', True),

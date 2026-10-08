@@ -146,6 +146,11 @@ def classification_prompt(include_items=True):
         'A continuation containing only symbols or acceptance criteria can belong to a calculation sheet. '
         'Return continuation_required=true when the image has a continuation marker or type needs adjacent context. '
         'Fixed-axis formula lookup tables remain data_table even if the title says calculation. '
+        'Normative requirements, applicability rules, material categories and prescribed temperature/time '
+        'records remain data_table when their columns organize requirements or lookup values. '
+        'Conditional prose, units, limits and cross-references alone do not establish a calculation process. '
+        'Use calculation_sheet only when the object organizes parameterized mathematical evaluation '
+        'or is a clearly identified continuation of that process. '
     )
     classification = (
         " Classify each table from the IMAGE as table_kind=data_table|calculation_sheet|mixed|uncertain. "
@@ -245,17 +250,20 @@ def apply_calculation_sheet(item, candidate, content, description_language="unkn
         kind = 'uncertain'
     item['table_kind'] = kind
     item['table_kind_source'] = 'automatic'
-    item['table_classification'] = {'kind': kind, 'status': 'unresolved' if kind == 'uncertain' else 'model_proposed',
+    item['table_classification'] = {'kind': kind, 'status': 'response_invalid' if reason else ('unresolved' if kind == 'uncertain' else 'model_proposed'),
                                     'evidence': deepcopy(evidence) if kind != 'uncertain' else [],
                                     'proposed_kind': candidate.get('table_kind') if isinstance(candidate.get('table_kind'), str) and len(candidate['table_kind']) <= 32 else None,
                                     'source_sha256': ctx.get('sha256')}
     if reason or kind == 'uncertain':
         item['table_classification']['reason'] = reason or 'classification_model_uncertain'
-    if candidate.get('continuation_required') is True or kind == 'uncertain':
+    if candidate.get('continuation_required') is True or (kind == 'uncertain' and not reason):
         item['continuation'] = {'status': 'pending', 'reason': 'adjacent_context_required'}
     if kind == 'data_table':
         return
-    item.update(lookup_status='unavailable', lookup_sections=[], manualReviewRequired=True, degraded=True)
+    item.update(lookup_status='unavailable', manualReviewRequired=True, degraded=True)
+    if kind == 'uncertain':
+        return
+    item['lookup_sections'] = []
     for key in ('contained_formulas', 'contained_formula_sources', 'contained_formula_quality'):
         item.pop(key, None)
     for key in ('columns', 'normalized_rows', 'source_cells', 'cell_status'):
@@ -541,6 +549,48 @@ def classification_failed(item, reason, content=None):
     item.pop('content_format', None)
 
 
+def repair_table_classification(vlm, image_path, item, content, object_ref, available_calls):
+    """One object-only format repair, charged to the existing shared call budget."""
+    classification = item.get('table_classification', {})
+    if (item.get('table_kind_source') == 'manual'
+            or classification.get('status') not in ('response_invalid', 'not_run')
+            or classification.get('repair_attempts', 0)):
+        return 0
+    if available_calls <= 0:
+        classification['repair_reason'] = 'table_analysis_budget_exhausted'
+        return 0
+    if not callable(getattr(vlm, 'classify_table', None)):
+        return 0
+    ctx = source_context(content)
+    if ctx['status'] != 'available':
+        return 0
+    target = {'object_ref': object_ref, 'source_sha256': ctx['sha256'], 'source_text': ctx['text']}
+    for key in ('bbox', 'bbox_space', 'layout_id'):
+        if item.get(key) is not None:
+            target[key] = item[key]
+    try:
+        candidate = vlm.classify_table(image_path, target)
+        if (not isinstance(candidate, dict)
+                or any(key in candidate and candidate[key] != target[key]
+                       for key in ('object_ref', 'source_sha256'))):
+            raise ValueError('classification_response_invalid')
+        if getattr(vlm, 'last_call_info', {}).get('finish_reason') in ('length', 'content_filter', 'tool_calls'):
+            raise ValueError('table_classification_response_incomplete')
+        # Missing kind is a failed response, not a successful legacy default.
+        apply_calculation_sheet(item, {**candidate, 'table_kind': candidate.get('table_kind')}, content)
+        if not item['table_classification'].get('proposed_kind'):
+            item['table_classification']['proposed_kind'] = classification.get('proposed_kind')
+        if item['table_kind'] == 'data_table':
+            for key in ('manualReviewRequired', 'degraded', 'lookup_status'):
+                item.pop(key, None)
+    except Exception:
+        # Preserve the previous proposal and exact diagnostic when repair fails.
+        item['table_classification'] = classification
+        classification['repair_reason'] = 'classification_response_invalid'
+    item['table_classification']['repair_attempts'] = 1
+    return 1
+
+
 def table_content_quality(items):
     reviews = [{'index': i, 'layout_id': item.get('layout_id'), 'table_kind': item['table_kind'],
                 'status': 'needs_review',
@@ -647,6 +697,8 @@ def complete_calculation_batch(vlm, image_path, targets, used_calls, source_stor
     """Share one analysis budget across all tables, including the classification call."""
     additional = 0
     for item, content, object_ref in targets:
+        additional += repair_table_classification(vlm, image_path, item, content, object_ref,
+                                                  calculation_budget(vlm) - used_calls - additional)
         if not needs_calculation_call(item):
             continue
         available = calculation_budget(vlm) - used_calls - additional
