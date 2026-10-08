@@ -879,22 +879,30 @@ def test_generic_pipeline_heading_only_source_is_retained_for_review():
     assert out['calculation_source']['pipeline']['semantic']['status'] == 'partial'
 
 
-def test_generic_pipeline_batch_failure_isolated_from_next_object():
-    from tests.test_pdf2md_calculation_sheet import cs, framed_proposal
+def test_generic_pipeline_batch_failure_isolated_from_next_object(tmp_path):
+    import fitz
+    from tests.test_pdf2md_calculation_sheet import cs, framed_proposal, CALCULATION_REGION
+    path = tmp_path / 'page.png'
+    image = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 200, 200), False)
+    image.clear_with(255)
+    image.save(path)
     class Mixed(Provider):
-        table_analysis_max_model_calls = 3
+        table_analysis_max_model_calls = 4
         def extract_calculation_sheet(self, image, target):
             self.calls.append((image, target))
             if target['object_ref'] == 'tables:0':
                 raise TimeoutError()
+            if image is not None:
+                return {**target, 'source_text': 'Value 1.'}
             return framed_proposal(target)
-    items = [{'table_kind':'calculation_sheet','calculation_sheet':{'validation_status':'unresolved'}} for _ in range(2)]
+    items = [{**CALCULATION_REGION, 'table_kind':'calculation_sheet',
+              'calculation_sheet':{'validation_status':'unresolved'}} for _ in range(2)]
     vlm = Mixed()
-    count = cs.complete_calculation_batch(vlm, 'unused.png', [(items[i], f'Value {i}.', f'tables:{i}') for i in range(2)], 1)
-    assert count == 2
+    count = cs.complete_calculation_batch(vlm, str(path), [(items[i], f'Value {i}.', f'tables:{i}') for i in range(2)], 1)
+    assert count == 3
     assert items[0]['calculation_sheet']['coverage']['structured'] == 0
     assert items[1]['calculation_sheet']['coverage']['structured'] == 1
-    assert all(call[0] is None for call in vlm.calls)
+    assert [call[0] is None for call in vlm.calls] == [False, False, True]
 
 @pytest.mark.parametrize('marker', ["(Cont'd)", '(Continued)', '(Continue)', '（续）', '续表'])
 def test_title_continuation_uses_scoped_existing_predecessor(marker):
@@ -1054,6 +1062,24 @@ def test_semantic_reasoning_is_scoped_to_supported_calculation_text_calls(monkey
         assert calls[1]['extra_body'] == {'enable_thinking': True, 'thinking_budget': 2048}
     else:
         assert 'extra_body' not in calls[1]
+
+
+@pytest.mark.parametrize('temperature', [1.0, 0.7, 0.0])
+def test_calculation_semantics_respects_provider_temperature(monkeypatch, temperature):
+    client = DynamicVLMClient({'temperature': temperature})
+    monkeypatch.setattr(client, 'ensure_enabled', lambda: None)
+    calls = []
+    def provider(**kwargs):
+        calls.append(kwargs)
+        if kwargs['messages'][0]['role'] == 'system' and kwargs['temperature'] != temperature:
+            raise ValueError('provider_rejects_overridden_temperature')
+        return '{}', 'stream', 'stop'
+    monkeypatch.setattr(client, '_chat_completion_with_stream_fallback', provider)
+    client._staged_calculation(None, {'calculation_stage': 'semantic', 'source_sections': []})
+    client._call_text_prompt('Ordinary text', 100)
+    assert calls[0]['temperature'] == temperature
+    assert calls[1]['temperature'] == min(temperature, 0.1)
+    assert client.temperature == temperature
 
 
 @pytest.mark.parametrize('language,expected', [('en', 'English'), ('zh', 'Chinese')])
@@ -1663,3 +1689,20 @@ def test_saved_source_heading_replaces_stale_title_and_continuation(content, tit
     assert 'predecessor' not in out['continuation']
     assert len(provider.calls) == 1
     assert out['calculation_sheet']['coverage']['needs_review'] == 0
+
+
+@pytest.mark.parametrize('text,expected_latex,missing', [
+    ('## Symbols\n$q=$ flow rate at $L$.', 'q=', False),
+    ('## Relations\n$q=r$ and $a=b$.', '', True),
+])
+def test_inline_symbol_does_not_hide_a_unique_math_definition(text, expected_latex, missing):
+    ctx = cp.source_context(text)
+    ctx['source_sections'] = cp.calculation_source_sections(ctx['text'])
+    raw = {'sections': [{'title': ctx['source_sections'][0]['title'], 'items': [
+        {'source_item_id': 's1-i1', 'kind': 'note'}]}],
+        'semantic_desc': 'Source definitions.', 'unresolved': [], 'image_discrepancies': []}
+    sheet = cp.parse_calculation_sheet(raw, ctx, {})
+    entry = sheet['sections'][0]['items'][0]
+    assert entry['content'] == ctx['source_sections'][0]['items'][0]['text']
+    assert entry['latex'] == expected_latex
+    assert any(x['reason'] == 'formula_needs_completion' for x in sheet['unresolved']) == missing

@@ -161,7 +161,7 @@ def source_batches(sections, context_size=0):
     return batches
 
 
-def structure_calculation_source(vlm, item, content, target, available_calls, resume=None, identity=None):
+def structure_calculation_source(vlm, item, content, target, available_calls, resume=None, identity=None, automatic=False):
     """Common text-only semantic stage for saved content and existing OCR."""
     source = item.setdefault('calculation_source', {})
     original_content = content
@@ -215,6 +215,9 @@ def structure_calculation_source(vlm, item, content, target, available_calls, re
                 for section in ctx['source_sections']]
     batches = source_batches([section for section in eligible if section['items'] or not invalid_units],
                              sum(len(u['text']) for u in ctx['document_preamble']))
+    if automatic:
+        available_calls = len(batches)
+        vlm.reserve_automatic_calculation_calls(available_calls)
     if invalid_units:
         pipeline['framing'].update(status='needs_review', reason='calculation_source_math_invalid',
                                    invalid_units=len(invalid_units))
@@ -240,6 +243,9 @@ def structure_calculation_source(vlm, item, content, target, available_calls, re
                 if not isinstance(saved.get('result'), dict):
                     return 0, 'calculation_resume_mismatch'
                 previous[expected['id']] = saved['result']
+    planned_calls = min(available_calls, sum(p['id'] not in previous for p in progress))
+    if planned_calls > 0 and callable(getattr(vlm, 'calculation_work_started', None)):
+        vlm.calculation_work_started(planned_calls)
     calls = 0
     for batch, checkpoint in zip(batches, progress):
         cached = previous.get(checkpoint['id'])

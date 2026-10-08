@@ -230,9 +230,13 @@ def parse_framed_calculation(raw, ctx, item, parse):
                 formulas = math_content(unit['text'])
                 if not formulas and entry.get('latex_source_index') is None:
                     entry.pop('latex_source_index', None)
+                equation_indices = [i for i, value in enumerate(formulas)
+                                    if re.search(r'[=<>]|\\(?:le|ge|lt|gt|neq)\b', value)]
+                default_selection = (0 if len(formulas) == 1 else
+                                     equation_indices[0] if len(equation_indices) == 1 else None)
                 if ('latex_source_index' in entry or
-                        (len(formulas) == 1 and len(candidate['keys']) == 1 and not entry.get('latex'))):
-                    selection = entry.pop('latex_source_index', 0)
+                        (default_selection is not None and len(candidate['keys']) == 1 and not entry.get('latex'))):
+                    selection = entry.pop('latex_source_index', default_selection)
                     if (type(selection) is not int or len(candidate['keys']) != 1
                             or not 0 <= selection < len(formulas)
                             or entry.get('latex') not in (None, '', formulas[selection])):

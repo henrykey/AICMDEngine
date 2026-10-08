@@ -550,14 +550,82 @@ def table_content_quality(items):
     return {'complete': not reviews, 'objects': reviews}
 
 
-def extract_calculation_items(vlm, image_path, item, content, object_ref, available_calls=1):
-    """Reuse reliable OCR through the same semantic stage as manual organization."""
-    from .calculation_processing import structure_calculation_source
+def extract_calculation_items(vlm, image_path, item, content, object_ref, available_calls=1, source_store=None):
+    """Transcribe the selected image, persist it, then reuse text-only structuring."""
+    import hashlib
+    import tempfile
+    from pathlib import Path
+    from .calculation_processing import (
+        RESPONSE_CODES, response_error, transcription_text, structure_calculation_source,
+    )
+    from .layout_ledger import reliable_normalized_bbox
+    from .page_processor import _crop_layout_block_image
+
+    source = item.setdefault('calculation_source', {})
+    source['origin'] = 'existing_ocr'
+    calls = 0
+    reason = None
+    if available_calls <= 0:
+        reason = 'table_analysis_budget_exhausted'
+    elif not callable(getattr(vlm, 'extract_calculation_sheet', None)):
+        reason = 'calculation_provider_unavailable'
+    elif not reliable_normalized_bbox(item):
+        reason = 'calculation_object_region_required'
+    else:
+        try:
+            with tempfile.TemporaryDirectory(prefix='pdf2md_calculation_') as directory:
+                crop, _ = _crop_layout_block_image(Path(image_path), item, Path(directory), padding_ratio=0)
+                image_hash = hashlib.sha256(crop.read_bytes()).hexdigest()
+                target = {'object_ref': object_ref, 'source_sha256': image_hash,
+                          'calculation_stage': 'transcription'}
+                if callable(getattr(vlm, 'calculation_work_started', None)):
+                    vlm.calculation_work_started(1)
+                calls += 1
+                response = vlm.extract_calculation_sheet(str(crop), target)
+                if response_error(vlm):
+                    raise ValueError(response_error(vlm))
+                if (not isinstance(response, dict) or response.get('object_ref') != object_ref
+                        or response.get('source_sha256') != image_hash):
+                    raise ValueError('calculation_identity_mismatch')
+                content = transcription_text(response)
+                source.update(origin='image_transcription', image_transcription=content,
+                              original_content=content, image_sha256=image_hash,
+                              image_scope='object_crop', original_bbox=item['bbox'])
+                title = response.get('table_title')
+                if isinstance(title, str) and title.strip() and len(title) <= 500:
+                    source['table_title'] = title.strip()
+                    item['table_title'] = item['tableTitle'] = title.strip()
+                source['pipeline'] = {'transcription': {'status': 'complete', 'logical_calls': calls}}
+        except PhysicalRequestBudgetExceeded:
+            reason = 'table_analysis_physical_budget_exhausted'
+        except TimeoutError:
+            reason = 'calculation_provider_timeout'
+        except Exception as exc:
+            reason = str(exc) if isinstance(exc, ValueError) and str(exc) in RESPONSE_CODES else 'calculation_provider_failed'
+        if reason:
+            source['pipeline'] = {'transcription': {'status': 'failed', 'reason': reason, 'logical_calls': calls}}
+    if not reason and source_store is not None:
+        try:
+            source['artifact'] = source_store(object_ref, item, content)
+        except Exception:
+            reason = 'calculation_source_persistence_failed'
     ctx = source_context(content)
     target = {'object_ref': object_ref, 'source_sha256': ctx.get('sha256')}
-    item.setdefault('calculation_source', {})['origin'] = 'existing_ocr'
-    calls, reason = structure_calculation_source(vlm, item, content, target, available_calls)
-    if reason and 'calculation_sheet' in item:
+    extra, stage_reason = structure_calculation_source(
+        vlm, item, content, target, 0 if reason else available_calls - calls,
+        automatic=not reason and getattr(vlm, 'automatic_calculation_budget', False))
+    calls += extra
+    if reason:
+        sheet = item['calculation_sheet']
+        sheet['validation_status'] = 'unresolved'
+        sheet['unresolved'] = [issue for issue in sheet['unresolved']
+                               if issue.get('reason') != 'table_analysis_budget_exhausted']
+        sheet['unresolved'].append({'reason': reason})
+        semantic = source['pipeline'].setdefault('semantic', {})
+        semantic.update(status='partial', reason=reason)
+        for batch in semantic.get('batches', []):
+            batch['reason'] = reason
+    elif stage_reason and 'calculation_sheet' in item:
         item['calculation_sheet']['validation_status'] = 'unresolved'
     if item.get('semantic_desc'):
         item['description'] = item['semantic_desc']
@@ -581,29 +649,11 @@ def complete_calculation_batch(vlm, image_path, targets, used_calls, source_stor
     for item, content, object_ref in targets:
         if not needs_calculation_call(item):
             continue
-        if source_store is not None:
-            try:
-                artifact = source_store(object_ref, item, content)
-                item.setdefault('calculation_source', {})['artifact'] = artifact
-            except Exception:
-                extract_calculation_items(vlm, image_path, item, content, object_ref, 0)
-                sheet = item.get('calculation_sheet')
-                if sheet is not None:
-                    sheet['unresolved'] = [issue for issue in sheet['unresolved']
-                                           if issue.get('reason') != 'table_analysis_budget_exhausted']
-                    sheet['unresolved'].append({'reason': 'calculation_source_persistence_failed'})
-                semantic = item['calculation_source']['pipeline'].setdefault('semantic', {})
-                semantic.update(status='partial', reason='calculation_source_persistence_failed')
-                for batch in semantic.get('batches', []):
-                    batch['reason'] = 'calculation_source_persistence_failed'
-                continue
-        if used_calls + additional >= calculation_budget(vlm):
-            extract_calculation_items(vlm, image_path, item, content, object_ref, 0)
-            item['calculation_sheet']['unresolved'] = [{'reason': 'table_analysis_budget_exhausted'}]
-        elif not callable(getattr(vlm, 'extract_calculation_sheet', None)):
-            extract_calculation_items(vlm, image_path, item, content, object_ref, 0)
-            item['calculation_sheet']['unresolved'] = [{'reason': 'calculation_provider_unavailable'}]
-        else:
-            additional += extract_calculation_items(vlm, image_path, item, content, object_ref,
-                                                     calculation_budget(vlm) - used_calls - additional)
+        available = calculation_budget(vlm) - used_calls - additional
+        if getattr(vlm, 'automatic_calculation_budget', False):
+            vlm.reserve_automatic_calculation_calls(1)
+            available = 1
+        additional += extract_calculation_items(vlm, image_path, item, content, object_ref,
+                                                 available,
+                                                 source_store=source_store)
     return additional

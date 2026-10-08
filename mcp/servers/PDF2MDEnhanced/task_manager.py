@@ -106,10 +106,15 @@ class TaskManager:
         with open(task.source_path, 'rb') as source:
             source_hash = hashlib.file_digest(source, 'sha256').hexdigest()
         content_hash = hashlib.sha256(content.encode()).hexdigest()
+        source = item.get('calculation_source', {})
+        origin = source.get('origin', 'existing_ocr')
+        image_evidence = {key: source[key] for key in ('image_sha256', 'image_scope', 'original_bbox')
+                          if key in source} if origin == 'image_transcription' else {}
         identity = {'task_id': task_id, 'page_no': page_no, 'object_ref': object_ref,
-                    'layout_id': layout_id, 'source_sha256': source_hash, 'content_sha256': content_hash}
+                    'layout_id': layout_id, 'source_sha256': source_hash, 'content_sha256': content_hash,
+                    'origin': origin, **image_evidence}
         artifact_id = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
-        snapshot = {**identity, 'artifact_id': artifact_id, 'origin': 'existing_ocr',
+        snapshot = {**identity, 'artifact_id': artifact_id,
                     'run_id': f'{task_id}:{page_no}:{page.attempts}', 'created_at': now_iso(),
                     'format': 'markdown', 'original_content': content}
         directory = self._task_dir(task_id) / 'calculation_sources'

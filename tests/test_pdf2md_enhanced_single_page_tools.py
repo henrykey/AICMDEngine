@@ -2554,7 +2554,8 @@ def test_review_title_image_recovery_and_failure_are_bounded(monkeypatch):
 
 
 @pytest.mark.parametrize('calculation', [True, False])
-def test_calculation_page_handoff_keeps_one_worker_and_ordinary_sync(monkeypatch, calculation):
+@pytest.mark.parametrize('before_transcription', [True, False])
+def test_calculation_page_handoff_keeps_one_worker_and_ordinary_sync(monkeypatch, calculation, before_transcription):
     import threading
     release = threading.Event()
     entered = threading.Event()
@@ -2573,13 +2574,16 @@ def test_calculation_page_handoff_keeps_one_worker_and_ordinary_sync(monkeypatch
     def process(*args):
         entered.set()
         if calculation:
-            args[4]['__calculation_source_store']('tables:0', {}, '$x=1$')
+            if before_transcription:
+                args[4]['__calculation_work_started'](2)
+            else:
+                args[4]['__calculation_source_store']('tables:0', {}, '$x=1$')
         release.wait(1)
         return {'page_no': 1, 'render': {'markdown': 'kept'}}
     monkeypatch.setattr(server, 'process_page', process)
     fn = getattr(server.process_task_page, 'fn', server.process_task_page)
     async def run():
-        args = dict(task_id='async-calculation-test-' + str(calculation), page_no=1,
+        args = dict(task_id='async-calculation-test-' + str(calculation) + str(before_transcription), page_no=1,
                     routing_config={'calculation_async': True})
         pending = asyncio.create_task(fn(**args))
         try:

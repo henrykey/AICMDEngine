@@ -1251,7 +1251,7 @@ def _table_item(
     raw_text = source_text or str(markdown or "").strip()
     raw_candidate = raw_item.raw if raw_item and isinstance(raw_item.raw, dict) else {}
     typed = ({k: raw_candidate[k] for k in ("layout_id", "bbox", "bbox_space") if k in raw_candidate}
-             if "table_kind" in raw_candidate else {})
+             if defer_grid or "table_kind" in raw_candidate else {})
     apply_calculation_sheet(typed, raw_candidate, raw_text)
     skip_grid = defer_grid or typed.get("table_kind", "data_table") != "data_table"
     normalized = _normalize_table_contract("" if skip_grid else raw_text, table_rows_format)

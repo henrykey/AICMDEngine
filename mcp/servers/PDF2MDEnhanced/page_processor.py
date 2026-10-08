@@ -122,6 +122,7 @@ def process_page(
         effective_vlm_config = dict(vlm_config or rc.get("vlm_ocr") or {})
         effective_vlm_config["description_language"] = description_language
         vlm = DynamicVLMClient(effective_vlm_config)
+        vlm.calculation_work_started = (routing_config or {}).get("__calculation_work_started")
         logger.info(
             "process_page vlm_client: enabled=%s provider=%s model=%s base_url=%s timeout=%s max_retries=%s",
             vlm.enabled,
@@ -173,6 +174,10 @@ def process_page(
                         fallback_height,
                     )
                     layout_driven = layout_outcome["layout_status"] == "EXTRACTED"
+                    if layout_driven:
+                        vlm_calls += _recover_unbound_table_regions(image_path, Path(work_dir), layout_outcome,
+                            vlm, bool(rc.get("vlm_ocr_enabled") and vlm.enabled),
+                            rc["layout_recovery_max_objects"], rc["render_dpi"])
                     pending_blocks = recovery_blocks(layout_outcome)
                     if layout_driven and pending_blocks:
                         recovery_glm_calls, recovery_vlm_calls, recovery_diagnostics = _recover_layout_objects(
@@ -411,6 +416,12 @@ def process_page(
             _attach_figure_assets(image_path, {"tables": tables, "figures": cell_figures},
                                   display_page_no, source_dpi=rc["render_dpi"])
 
+        if rc.get("figure_semantic_description_required"):
+            figure_payloads = layout_outcome["payloads"] if layout_driven else {"tables": tables, "figures": cell_figures}
+            remaining = max(0, rc["layout_recovery_max_objects"] - image_recovery.get("attempted", 0))
+            vlm_calls += _recover_cell_figure_semantics(image_path, Path(work_dir), figure_payloads,
+                vlm, bool(rc.get("vlm_ocr_enabled") and vlm.enabled), remaining, rc["render_dpi"])
+
     doc.close()
 
     markdown = _rebuild_render_tables_from_structured(markdown, structured)
@@ -580,6 +591,7 @@ def process_page(
                 "source_page_index": layout_outcome.get("source_page_index"),
                 "layout": layout_outcome.get("layout") or [],
                 "reconciliation": reconciliation,
+                "missing_table_recovery": layout_outcome.get("missing_table_recovery"),
                 "layout_recovery": layout_outcome.get("recovery") or {
                     "contract": "object-crop-content-v1",
                     "pending": 0,
@@ -1026,6 +1038,97 @@ def _render_page_image(
         mat = fitz.Matrix(dpi / 72.0, dpi / 72.0).prerotate(int(rotate_deg))
         page.get_pixmap(matrix=mat).save(str(out))
     return out
+
+
+def _recover_unbound_table_regions(image_path, output_dir, outcome, vlm, enabled, limit, source_dpi):
+    """Visually verify orphan captions, then reuse object recovery before replacing any members."""
+    if not enabled or limit <= 0 or not callable(getattr(vlm, 'recognize_layout', None)):
+        return 0
+    layout = outcome.get("layout", [])
+    def caption(block):
+        text = _figure_plain_text(block.get("content"))
+        return block.get("type") == "text" and re.match(r"^(?:Table\s+[A-Za-z0-9]|表\s*[A-Za-z0-9０-９])", text, re.I)
+    candidates = []
+    for index, block in enumerate(layout):
+        if not caption(block) or not reliable_normalized_bbox(block):
+            continue
+        bound = False
+        for following in layout[index + 1:]:
+            if following.get("type") == "table":
+                b, t = block["bbox"], following.get("bbox", [])
+                bound = len(t) == 4 and b[3] <= t[1] and min(b[2], t[2]) > max(b[0], t[0])
+                break
+            if following.get("type") != "text" or caption(following):
+                break
+        if not bound:
+            candidates.append(block)
+    if not candidates:
+        return 0
+    candidates = candidates[:limit]
+    context = {"candidates": [{"layout_id": b["layout_id"], "bbox": b["bbox"],
+                              "caption": _figure_plain_text(b.get("content"))[:500]} for b in candidates],
+               "blocks": [{k: b.get(k) for k in ("layout_id", "type", "bbox")} for b in layout]}
+    diagnostics = outcome.setdefault("missing_table_recovery", {"objects": []})
+    calls = 1
+    if callable(getattr(vlm, 'calculation_work_started', None)):
+        vlm.calculation_work_started(1)
+    try:
+        response = vlm.recognize_layout(str(image_path), table_context=context)
+        regions = response.get("missing_tables") if isinstance(response, dict) else None
+        if not isinstance(regions, list) or len(regions) > len(candidates):
+            diagnostics['reason'] = 'invalid_region_response'
+            return calls
+    except Exception:
+        diagnostics['reason'] = 'region_provider_failed'
+        return calls
+    by_id = {b['layout_id']: b for b in candidates}
+    used = set()
+    for region in regions:
+        if not isinstance(region, dict):
+            continue
+        anchor = region.get('caption_layout_id')
+        bbox = region.get('bbox')
+        members = region.get('member_layout_ids')
+        valid = (isinstance(anchor, str) and anchor in by_id and anchor not in used
+                 and reliable_normalized_bbox({'bbox': bbox, 'bbox_space': 'normalized_page'})
+                 and isinstance(members, list) and all(isinstance(x, str) for x in members)
+                 and len(set(members)) == len(members) and anchor in members)
+        if not valid:
+            diagnostics['objects'].append({'reason': 'invalid_region_identity'})
+            continue
+        overlaps = []
+        for block in outcome['layout']:
+            b = block.get('bbox', [])
+            if len(b) != 4 or min(b[2], bbox[2]) <= max(b[0], bbox[0]) or min(b[3], bbox[3]) <= max(b[1], bbox[1]):
+                continue
+            overlaps.append(block)
+        if (set(members) != {b['layout_id'] for b in overlaps}
+                or any(b.get('type') not in ('text', 'formula') or not
+                    (bbox[0] <= b['bbox'][0] and bbox[1] <= b['bbox'][1]
+                     and bbox[2] >= b['bbox'][2] and bbox[3] >= b['bbox'][3]) for b in overlaps)
+                or any(caption(b) and b['layout_id'] != anchor for b in overlaps)):
+            diagnostics['objects'].append({'caption_layout_id': anchor, 'reason': 'region_overlap_or_members_mismatch'})
+            continue
+        entry = {**by_id[anchor], 'layout_id': anchor + '-table-region', 'type': 'table',
+                 'bbox': bbox, 'status': 'FAILED', 'content': '', 'absorbed_layout_ids': members,
+                 'title': _figure_plain_text(by_id[anchor].get('content')).splitlines()[0]}
+        temporary = {'layout': [entry], 'payloads': {'tables': [], 'formulas': [], 'figures': []}}
+        if callable(getattr(vlm, 'calculation_work_started', None)):
+            vlm.calculation_work_started(2)
+        _, extra, detail = _recover_layout_objects(image_path, output_dir, temporary, [entry], vlm,
+            True, 1, padding_ratio=0, source_dpi=source_dpi, max_model_calls=2)
+        calls += extra
+        diagnostics['objects'].extend(detail['objects'])
+        if entry['status'] != 'EXTRACTED':
+            continue
+        used.add(anchor)
+        outcome['layout'] = sorted([b for b in outcome['layout'] if b['layout_id'] not in members] + [entry],
+                                  key=lambda b: b['reading_order'])
+        for collection, values in outcome['payloads'].items():
+            if isinstance(values, list):
+                outcome['payloads'][collection] = [v for v in values if v.get('layout_id') not in members]
+        outcome['payloads']['tables'].extend(temporary['payloads']['tables'])
+    return calls
 
 
 def _recover_layout_objects(
@@ -3760,6 +3863,41 @@ def _attach_figure_assets(image_path, payloads, page_no, source_dpi=150):
         if failures:
             table.setdefault("image_unresolved", []).extend({"reason": reason} for reason in dict.fromkeys(failures))
             table["manualReviewRequired"] = True
+
+
+def _recover_cell_figure_semantics(image_path, output_dir, payloads, vlm, enabled, limit, source_dpi):
+    """Run late-created cell figures through the existing identity-bound object recovery."""
+    figures = [figure for figure in payloads.get("figures", [])
+               if figure.get("cell_image_source") and not _figure_plain_text(figure.get("description"))
+               and reliable_normalized_bbox(figure)]
+    if not figures:
+        return 0
+    blocks = [{**figure, "type": "figure", "status": "FAILED", "reading_order": index}
+              for index, figure in enumerate(figures)]
+    outcome = {"layout": blocks, "payloads": {"figures": [dict(figure) for figure in figures]}}
+    if enabled and limit > 0 and callable(getattr(vlm, 'calculation_work_started', None)):
+        vlm.calculation_work_started(2 * min(len(figures), limit))
+    _, calls, diagnostics = _recover_layout_objects(image_path, output_dir, outcome, blocks, vlm,
+        enabled, limit, padding_ratio=0, source_dpi=source_dpi, max_model_calls=2 * limit)
+    recovered = {figure["layout_id"]: figure for figure in outcome["payloads"]["figures"]}
+    for figure, diagnostic in zip(figures, diagnostics["objects"]):
+        figure["semantic_recovery"] = diagnostic
+        candidate = recovered[figure["layout_id"]]
+        if diagnostic["outcome"] == "recovered":
+            for key in ("description", "caption", "source", "semantic_reason"):
+                if key in candidate:
+                    figure[key] = candidate[key]
+            figure.pop("content_status", None)
+            figure["semantic_status"] = "complete"
+            figure["missing_fields"] = []
+        else:
+            parent = figure["cell_image_source"]["table_layout_id"]
+            for table in payloads.get("tables", []):
+                if table.get("layout_id") == parent:
+                    table.setdefault("image_unresolved", []).append({
+                        "reason": "missing_cell_image_semantics", "layout_id": figure["layout_id"]})
+                    table["manualReviewRequired"] = True
+    return calls
 
 
 def _attach_cell_image_figures(payloads, page_no):

@@ -124,7 +124,7 @@ async def process_task_page(
             _calculation_page_operations.pop(key, None)
         return operation.result()
     return json.dumps({"task_id": task_id, "page_no": page_no, "status": "processing",
-                       "reason": "calculation_source_saved", "poll_after_ms": 1000})
+                       "reason": "calculation_processing_started", "poll_after_ms": 1000})
 
 
 async def _process_task_page(
@@ -157,30 +157,46 @@ async def _process_task_page(
         effective_routing_config["description_language"] = effective_description_language
         # Internal context for page processor policy decisions.
         effective_routing_config["__task_total_pages"] = len(task.planned_pages)
+        reservations = asyncio.Queue()
+        reserved_calls = 0
+        def reserve_work(calls):
+            nonlocal reserved_calls
+            if calculation_started is not None and type(calls) is int and calls > 0:
+                reserved_calls += calls
+                loop.call_soon_threadsafe(reservations.put_nowait, calls)
+                loop.call_soon_threadsafe(calculation_started.set)
         def save_source(ref, item, content):
             artifact = manager.save_calculation_source(task_id, page_no, ref, item, content)
-            if calculation_started is not None:
-                loop.call_soon_threadsafe(calculation_started.set)
+            if not reserved_calls:
+                calls = (effective_vlm_config or {}).get('table_analysis_max_model_calls', 2)
+                reserve_work(calls if type(calls) is int and 1 <= calls <= 8 else 1)
             return artifact
         effective_routing_config["__calculation_source_store"] = save_source
+        effective_routing_config["__calculation_work_started"] = reserve_work
         work = loop.run_in_executor(None, process_page, task.source_path, page_no, policy,
                                     effective_vlm_config, effective_routing_config, prev_context)
         if calculation_started is None:
             result = await asyncio.wait_for(work, timeout=page_timeout_sec)
         else:
-            notification = asyncio.create_task(calculation_started.wait())
-            try:
-                done, _ = await asyncio.wait((work, notification), timeout=page_timeout_sec,
-                                             return_when=asyncio.FIRST_COMPLETED)
-                if not done:
-                    raise asyncio.TimeoutError()
-                # Only a persisted calculation source enables bounded background semantics.
-                calls = (effective_vlm_config or {}).get('table_analysis_max_model_calls', 2)
-                calls = calls if type(calls) is int and 1 <= calls <= 8 else 1
-                work_timeout_sec = page_timeout_sec * calls
-                result = await asyncio.wait_for(work, timeout=work_timeout_sec)
-            finally:
-                notification.cancel()
+            # Each concrete transcription/semantic batch reserves one bounded request window.
+            # The page is already durably EXTRACTING before any reservation is accepted.
+            deadline = loop.time() + page_timeout_sec
+            while True:
+                reservation = asyncio.create_task(reservations.get())
+                try:
+                    done, _ = await asyncio.wait((work, reservation),
+                        timeout=max(0, deadline - loop.time()), return_when=asyncio.FIRST_COMPLETED)
+                    if work in done:
+                        result = work.result()
+                        break
+                    if reservation in done:
+                        allowance = page_timeout_sec * reservation.result()
+                        deadline += allowance
+                        work_timeout_sec += allowance
+                    else:
+                        raise asyncio.TimeoutError()
+                finally:
+                    reservation.cancel()
         await loop.run_in_executor(None, manager.update_page_result, task_id, page_no, result)
         res = {
             "task_id": task_id,

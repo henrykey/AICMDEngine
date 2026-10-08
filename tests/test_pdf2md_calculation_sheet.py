@@ -11,6 +11,19 @@ cs = importlib.import_module(sp.__package__ + '.calculation_sheet')
 HTML = '<table><tr><td rowspan="14">Inputs</td><td>Pressure p MPa</td></tr><tr><td>Calculation</td><td>Force $F=pA$ N</td></tr><tr><td>Check</td><td>When p&gt;0, F&lt;10</td></tr></table>'
 
 
+@pytest.fixture
+def calculation_image(tmp_path):
+    import fitz
+    path = tmp_path / 'calculation.png'
+    image = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 200, 200), False)
+    image.clear_with(255)
+    image.save(path)
+    return str(path)
+
+
+CALCULATION_REGION = {'bbox': [0, 0, 1, 1], 'bbox_space': 'normalized_page'}
+
+
 @pytest.mark.parametrize('patch,reason', [
     ({'table_kind': 'invalid'}, 'classification_kind_invalid'),
     ({'classification_evidence': []}, 'classification_evidence_missing'),
@@ -129,26 +142,29 @@ def framed_proposal(target):
         'unresolved': [], 'image_discrepancies': []}
 
 
-def test_upload_reuses_existing_ocr_for_framed_semantics_and_survives_normalization():
+def test_upload_transcribes_image_for_framed_semantics_and_survives_normalization(calculation_image):
     calls = []
     class VLM:
+        table_analysis_max_model_calls = 3
         def extract_region_structured(self, image_path, semantic_objects):
             calls.append(semantic_objects)
             assert 'calculation_source' in semantic_objects[0]
             return {'tables': [{'object_ref': 'tables:0', **proposal()}]}
         def extract_calculation_sheet(self, image_path, target):
-            assert image_path is None
             calls.append(target)
+            if image_path is not None:
+                return {**target, 'source_text': HTML}
             return framed_proposal(target)
-    item = {'markdown': HTML, 'layout_id':'p1-t1'}
+    item = {**CALCULATION_REGION, 'markdown': HTML, 'layout_id':'p1-t1'}
     payloads = {'tables': [item]}
-    assert pp._enrich_upload_semantics(VLM(), 'unused.png', {}, payloads, True) == 2
-    assert len(calls) == 2
+    assert pp._enrich_upload_semantics(VLM(), calculation_image, {}, payloads, True) == 3
+    assert len(calls) == 3
     assert item['table_kind'] == 'calculation_sheet'
     normalized = pp._normalize_structured(payloads)
     out = pp._build_output_elements('', normalized, 'full_glm_ocr')['tables'][0]
     assert out['calculation_sheet']['validation_status'] == 'source_validated'
     assert out['calculation_source']['pipeline']['semantic']['status'] == 'complete'
+
 
 
 def test_metadata_merge_single_page_and_query_guard():
@@ -176,18 +192,21 @@ def test_direct_vlm_normalization_keeps_validated_not_raw_proposal():
     assert out['calculation_sheet']['quality_status'] == 'needs_review'
 
 
-def test_single_page_glm_classifies_before_any_grid_call(monkeypatch):
+def test_single_page_glm_classifies_before_any_grid_call(monkeypatch, calculation_image):
     from tests.test_pdf2md_enhanced_single_page_tools import (
         _patch_clients, FakeGLMOcrClient, FakeVLMClient, OcrResult, OcrElement, PNG_DATA)
+    import base64
+    from pathlib import Path
     _patch_clients(monkeypatch)
-    FakeGLMOcrClient.result = OcrResult(tables=[OcrElement(kind='table', source='glm_ocr', markdown=HTML)])
+    FakeGLMOcrClient.result = OcrResult(tables=[OcrElement(kind='table', source='glm_ocr', markdown=HTML, raw=dict(CALCULATION_REGION))])
     monkeypatch.setattr(FakeVLMClient, 'result_text', json.dumps({'tables':[{'index':0, **proposal()}]}))
-    monkeypatch.setattr(FakeVLMClient, 'extract_calculation_sheet', lambda self, path, target: framed_proposal(target) if path is None else pytest.fail('OCR must be reused'), raising=False)
+    monkeypatch.setattr(FakeVLMClient, 'extract_calculation_sheet', lambda self, path, target: framed_proposal(target) if path is None else {**target, 'source_text': HTML}, raising=False)
+    monkeypatch.setattr(FakeVLMClient, 'table_analysis_max_model_calls', 3, raising=False)
     monkeypatch.setattr(sp, '_html_table_to_grid', lambda *_: pytest.fail('classification must precede grid'))
-    out = json.loads(sp.extract_page_tables_direct(file_data=PNG_DATA, input_type='image',
+    out = json.loads(sp.extract_page_tables_direct(file_data=base64.b64encode(Path(calculation_image).read_bytes()).decode(), input_type='image',
         ocr_config={'glm_ocr': {'enabled':True, 'model':'stub', 'api_key':'stub', 'base_url':'http://stub'}},
         vlm_config={'model':'stub', 'api_key':'stub', 'base_url':'http://stub'}))
-    assert out['model_calls'] == {'glm_ocr':1, 'vlm_ocr':2}
+    assert out['model_calls'] == {'glm_ocr':1, 'vlm_ocr':3}
     assert out['table_kind'] == 'calculation_sheet'
     assert out['columns'] == [] and out['normalized_rows'] == []
     assert out['tableRowsContent'] == ''
@@ -305,7 +324,7 @@ def test_item_geometry_distinct_from_table_geometry():
 
 
 @pytest.mark.parametrize('budget,expected_calls', [(0,0),(1,1),(2,2)])
-def test_two_stage_upload_has_shared_budget(budget, expected_calls):
+def test_two_stage_upload_has_shared_budget(budget, expected_calls, calculation_image):
     events=[]
     class VLM:
         table_analysis_max_model_calls=budget
@@ -315,19 +334,23 @@ def test_two_stage_upload_has_shared_budget(budget, expected_calls):
             return {'tables':[{'object_ref':'tables:0',**p}]}
         def extract_calculation_sheet(self,path,target):
             events.append('extract')
+            if path is not None:
+                return {**target, 'source_text': HTML}
             assert target['source_sections']
             return framed_proposal(target)
-    payload={'tables':[{'markdown':HTML}]}
-    assert pp._enrich_upload_semantics(VLM(),'unused',{},payload,True)==expected_calls
+    payload={'tables':[{**CALCULATION_REGION, 'markdown':HTML}]}
+    assert pp._enrich_upload_semantics(VLM(),calculation_image,{},payload,True)==expected_calls
     assert len(events)==expected_calls
     if budget==2:
         assert events==['classify','extract']
-        assert payload['tables'][0]['calculation_sheet']['validation_status']=='source_validated'
+        assert payload['tables'][0]['calculation_source']['origin']=='image_transcription'
+        assert payload['tables'][0]['calculation_sheet']['coverage']['structured']==0
     elif budget==1:
-        assert payload['tables'][0]['calculation_sheet']['unresolved']==[{'reason':'table_analysis_budget_exhausted'}]
+        assert {'reason':'table_analysis_budget_exhausted'} in payload['tables'][0]['calculation_sheet']['unresolved']
 
 
-def test_two_tables_do_not_each_receive_a_fresh_budget():
+
+def test_two_tables_do_not_each_receive_a_fresh_budget(calculation_image):
     events=[]
     class VLM:
         table_analysis_max_model_calls=2
@@ -336,26 +359,28 @@ def test_two_tables_do_not_each_receive_a_fresh_budget():
             return {'tables':[{'object_ref':t['object_ref'],**p} for t in semantic_objects]}
         def extract_calculation_sheet(self,path,target):
             events.append(target['object_ref'])
-            return {**target, **proposal()['calculation_sheet']}
-    payload={'tables':[{'markdown':HTML},{'markdown':HTML}]}
-    assert pp._enrich_upload_semantics(VLM(),'unused',{},payload,True)==2
+            return {**target, 'source_text': HTML}
+    payload={'tables':[{**CALCULATION_REGION, 'markdown':HTML},{**CALCULATION_REGION, 'markdown':HTML}]}
+    assert pp._enrich_upload_semantics(VLM(),calculation_image,{},payload,True)==2
     assert events==['tables:0']
-    assert payload['tables'][1]['calculation_sheet']['unresolved']==[{'reason':'table_analysis_budget_exhausted'}]
+    assert {'reason':'table_analysis_budget_exhausted'} in payload['tables'][1]['calculation_sheet']['unresolved']
+
 
 
 @pytest.mark.parametrize('mode,reason', [('wrong_id','calculation_identity_mismatch'),('truncated','calculation_response_truncated'),('failure','calculation_provider_failed')])
-def test_dedicated_parser_checks_identity_and_provider_failure(mode,reason):
+def test_dedicated_parser_checks_identity_and_provider_failure(mode,reason, calculation_image):
     class VLM:
         last_call_info={'finish_reason':'length' if mode=='truncated' else 'stop'}
         def extract_calculation_sheet(self,path,target):
             if mode=='failure':raise RuntimeError('private provider details')
             return {'object_ref':'wrong' if mode=='wrong_id' else target['object_ref'],
                     'source_sha256':target['source_sha256'],**proposal()['calculation_sheet']}
-    item={};cs.extract_calculation_items(VLM(),'unused',item,HTML,'tables:0')
+    item=dict(CALCULATION_REGION);cs.extract_calculation_items(VLM(),calculation_image,item,HTML,'tables:0')
     assert {'reason':reason} in item['calculation_sheet']['unresolved']
     assert item['calculation_sheet']['coverage']['represented'] > 0
     assert item['calculation_sheet']['coverage']['structured'] == 0
     assert 'private' not in json.dumps(item)
+
 
 
 def test_dedicated_prompt_has_one_schema_and_no_metadata_only_instruction(monkeypatch):
@@ -618,14 +643,19 @@ def test_source_first_bad_auxiliary_field_keeps_formula_and_valid_conditions():
 
 
 @pytest.mark.parametrize('persistence_failure', [False, True])
-def test_upload_saves_source_before_semantics_and_never_structures_unsaved_source(persistence_failure):
+def test_upload_saves_source_before_semantics_and_never_structures_unsaved_source(persistence_failure, calculation_image):
     events = []
     class VLM:
+        table_analysis_max_model_calls = 3
         def extract_region_structured(self, image_path, semantic_objects):
             events.append('classify')
             return {'tables': [{'object_ref': 'tables:0', **proposal()}]}
         def extract_calculation_sheet(self, image_path, target):
-            assert events == ['classify', 'save']
+            if image_path is not None:
+                assert events == ['classify']
+                events.append('transcribe')
+                return {**target, 'source_text': HTML}
+            assert events == ['classify', 'transcribe', 'save']
             events.append('semantic')
             assert image_path is None
             return framed_proposal(target)
@@ -635,9 +665,9 @@ def test_upload_saves_source_before_semantics_and_never_structures_unsaved_sourc
         if persistence_failure:
             raise OSError('synthetic disk failure')
         return {'artifact_id': 'saved-source', 'task_id': 'task', 'page_no': 1}
-    item = {'markdown': HTML, 'layout_id': 'region-a'}
-    pp._enrich_upload_semantics(VLM(), 'unused.png', {}, {'tables': [item]}, True, source_store=save)
-    assert events == (['classify', 'save'] if persistence_failure else ['classify', 'save', 'semantic'])
+    item = {**CALCULATION_REGION, 'markdown': HTML, 'layout_id': 'region-a'}
+    pp._enrich_upload_semantics(VLM(), calculation_image, {}, {'tables': [item]}, True, source_store=save)
+    assert events == (['classify', 'transcribe', 'save'] if persistence_failure else ['classify', 'transcribe', 'save', 'semantic'])
     assert item['calculation_source']['original_content'] == HTML
     if persistence_failure:
         assert item['calculation_source']['pipeline']['semantic']['reason'] == 'calculation_source_persistence_failed'
@@ -646,7 +676,8 @@ def test_upload_saves_source_before_semantics_and_never_structures_unsaved_sourc
         assert item['calculation_source']['artifact']['artifact_id'] == 'saved-source'
 
 
-def test_upload_task_wires_durable_source_before_semantic_model(monkeypatch, tmp_path):
+
+def test_upload_task_wires_durable_source_before_semantic_model(monkeypatch, tmp_path, calculation_image):
     import asyncio
     import fitz
     from tests.test_pdf2md_enhanced_single_page_tools import server
@@ -656,16 +687,24 @@ def test_upload_task_wires_durable_source_before_semantic_model(monkeypatch, tmp
     manager = server.TaskManager(str(tmp_path / 'output'))
     monkeypatch.setattr(server, 'manager', manager)
     class VLM:
+        table_analysis_max_model_calls = 3
         def extract_region_structured(self, image_path, semantic_objects):
             return {'tables': [{'object_ref': 'tables:0', **proposal()}]}
         def extract_calculation_sheet(self, image_path, target):
+            if image_path is not None:
+                return {**target, 'source_text': HTML}
             paths = list((tmp_path / 'output').glob('tasks/*/calculation_sources/*.json'))
             assert len(paths) == 1
-            assert json.loads(paths[0].read_text())['original_content'] == HTML
+            snapshot = json.loads(paths[0].read_text())
+            assert snapshot['original_content'] == HTML
+            assert snapshot['origin'] == 'image_transcription'
+            assert len(snapshot['image_sha256']) == 64
+            assert snapshot['image_scope'] == 'object_crop'
+            assert snapshot['original_bbox'] == CALCULATION_REGION['bbox']
             return framed_proposal(target)
     def process(source, page, policy, vlm, routing, previous):
-        payload = {'tables': [{'markdown': HTML, 'layout_id': 'region-a'}]}
-        pp._enrich_upload_semantics(VLM(), 'unused.png', {}, payload, True,
+        payload = {'tables': [{**CALCULATION_REGION, 'markdown': HTML, 'layout_id': 'region-a'}]}
+        pp._enrich_upload_semantics(VLM(), calculation_image, {}, payload, True,
                                     source_store=routing['__calculation_source_store'])
         return {'elements': payload}
     monkeypatch.setattr(server, 'process_page', process)

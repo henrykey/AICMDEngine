@@ -19,14 +19,27 @@ calculation-items schema (no metadata/classification schema). Its response is ch
 by `parse_calculation_sheet`, which never invokes pandas. Already source-validated
 inline proposals from compatible direct VLM responses need no extra extraction.
 
-`vlm_config.table_analysis_max_model_calls` is a shared per-page **logical** analysis
-budget, including classification and dedicated calls for all tables. Default 2 means
-one classification plus one dedicated extraction; zero disables the table semantic
-analysis, invalid values fail closed, and supported values are integers 0..8.
-Subsequent calculation tables remain unresolved when that shared budget is spent.
-Existing provider transport retries/fallbacks remain transport behavior; this logical
-budget must not be described as a physical HTTP-request cap. The private live probe
-used a separate hard physical-call cap and disabled SDK retries.
+An explicitly configured `vlm_config.table_analysis_max_model_calls` remains a
+shared per-page logical analysis budget (integers 0..8, zero disables analysis).
+An explicit physical cap also retains the fixed-budget behavior. Neither cap is
+silently expanded. Manual processing retains its existing budget contract.
+
+With neither cap configured, automatic calculation completion reserves one image
+transcription call per classified object and one semantic call per actual source
+batch. Classification retains its existing allowance. Each reservation adds at most
+two physical sends; SDK/outer retries remain disabled in calculation scope. No
+repair loop or speculative calls are allocated. This prevents an earlier object
+from consuming a later object's normal transcription/structuring allowance.
+
+Automatic calculation sources are transcribed from reliable object crops, then
+saved before text-only structuring. Missing geometry, failed transcription or failed
+source persistence cannot silently fall back to successful OCR structuring. OCR
+may remain as an explicitly unresolved review draft. Source artifacts bind document
+hash, source-text hash, origin, image hash and crop bounds separately.
+
+Task-backed asynchronous extraction hands off the existing worker before image
+transcription. Its deadline grows only with concrete reserved stage calls; polling
+never starts another worker. Ordinary pages retain their synchronous lifecycle.
 
 Dedicated extraction is at most min(provider max_tokens, 16384) output tokens.
 Single-page metadata has the same cap, replacing its former 2048 cap. No formula
@@ -37,7 +50,7 @@ Integrated entry points:
 
 - Full GLM upload: existing identity-bound table VLM semantic pass and dedicated calculation call, before output
   pandas/formula processing. Prior generated context is excluded from classification
-  input; OCR content remains authoritative.
+  input; OCR supports classification, while object-image transcription supplies the calculation source.
 - Single-page GLM extraction with descriptions enabled: defer grid normalization
   until the existing metadata call classifies the table. Data tables then use the
   existing normalization; calculation/mixed/uncertain objects retain original text.

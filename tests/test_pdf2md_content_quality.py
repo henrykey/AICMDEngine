@@ -379,3 +379,10 @@ def test_export_rounding_on_landscape_page(tmp_path, bbox, expected):
     decoded = fitz.Pixmap(base64.b64decode(asset['data'].split(',', 1)[1]))
     assert asset['pixel_bbox'] == expected
     assert (decoded.width, decoded.height) == (expected[2] - expected[0], expected[3] - expected[1])
+
+
+@pytest.mark.parametrize('number', ['1.5', '4.12.2', '0.25', '-2.75'])
+def test_description_filler_cleanup_preserves_decimal_and_section_numbers(number):
+    meaningful = f'The specified value is {number}.'
+    assert pp._valid_description(meaningful + ' Contains 5 rows. Applies to the stated case.') == (
+        meaningful + ' Applies to the stated case.')

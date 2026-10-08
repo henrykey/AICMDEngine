@@ -21,7 +21,8 @@ def geometry(block):
 
 
 @pytest.mark.parametrize("layout_enabled", [True, False])
-def test_actual_page_flow_recovers_images_after_successful_table_ocr(tmp_path, monkeypatch, layout_enabled):
+@pytest.mark.parametrize("figure_semantics", [True, False])
+def test_actual_page_flow_recovers_images_after_successful_table_ocr(tmp_path, monkeypatch, layout_enabled, figure_semantics):
     path = tmp_path / 'page.pdf'
     doc = fitz.open()
     page = doc.new_page(width=100, height=100)
@@ -42,18 +43,24 @@ def test_actual_page_flow_recovers_images_after_successful_table_ocr(tmp_path, m
         def extract_object_structured(self, path, block, compact=False):
             calls.append(block)
             self.last_object_call_info = {'json_status': 'object', 'finish_reason': 'stop'}
+            if block["type"] == "figure":
+                return {"layout_id": block["layout_id"], "type": "figure", "status": "EXTRACTED",
+                        "complete": True, "description": "A red rectangular component occupies the center of the diagram."}
             return geometry(block)
     monkeypatch.setattr(pp, 'OpenAICompatibleOcrClient', OCR)
     monkeypatch.setattr(pp, 'DynamicVLMClient', VLM)
     result = pp.process_page(str(path), 1, 'auto', {'provider': 'fixture'},
         {'source_page_no': 7, 'render_dpi': 150, 'render_cleanup_with_llm': False,
-         'layout_ledger_enabled': layout_enabled, 'figure_semantic_description_required': False,
+         'layout_ledger_enabled': layout_enabled, 'figure_semantic_description_required': figure_semantics,
          'ocr_config': {'glm_ocr': {'enabled': True}}}, None)
-    assert len(calls) == 1
+    assert len(calls) == (2 if figure_semantics else 1)
     table = result['elements']['tables'][0]
     assert table['markdown'] == HTML
     assert not table.get('image_unresolved')
     image = result['elements']['figures'][0]
+    if figure_semantics:
+        assert image['description'] == 'A red rectangular component occupies the center of the diagram.'
+        assert image.get('content_status') != 'geometry_only'
     assert image['parent_relation']['cell_source'] == 'r0c0'
     assert image['image_asset']['page_no'] == 7
     pix = fitz.Pixmap(base64.b64decode(image['image_asset']['data'].split(',')[1]))
@@ -277,3 +284,26 @@ def test_partial_recovery_adds_image_without_replacing_existing(source_image, tm
     assert table['source_cells'][0]['image_regions'][0] == old_image
     assert len(table['source_cells'][0]['image_regions']) == 2
     assert not table['image_unresolved']
+
+
+@pytest.mark.parametrize('mode,limit,expected_calls', [('foreign', 2, 1), ('budget', 0, 0), ('disabled', 2, 0)])
+def test_cell_figure_semantic_failure_keeps_asset_identity_and_parent_review(source_image, tmp_path, mode, limit, expected_calls):
+    figure = {'layout_id': 't:r0c0:image:a', 'bbox': [.2, .2, .8, .8], 'bbox_space': 'normalized_page',
+              'cell_image_source': {'table_layout_id': 't', 'cell_source': 'r0c0'},
+              'parent_relation': {'status': 'resolved', 'table_layout_id': 't', 'cell_source': 'r0c0'},
+              'content_status': 'geometry_only', 'description': '', 'image_asset': {'sha256': 'unchanged'}}
+    before = copy.deepcopy(figure)
+    payloads = {'figures': [figure], 'tables': [{'layout_id': 't', 'markdown': HTML}]}
+    class VLM:
+        def extract_object_structured(self, path, block, compact=False):
+            assert mode == 'foreign'
+            return {'layout_id': 'another-object', 'type': 'figure', 'status': 'EXTRACTED',
+                    'complete': True, 'description': 'Unrelated component description.'}
+    assert pp._recover_cell_figure_semantics(source_image, tmp_path, payloads, VLM(),
+                                            mode != 'disabled', limit, 150) == expected_calls
+    assert figure['description'] == '' and figure['content_status'] == 'geometry_only'
+    for key in ('layout_id', 'bbox', 'parent_relation', 'cell_image_source', 'image_asset'):
+        assert figure[key] == before[key]
+    assert payloads['tables'][0]['markdown'] == HTML
+    assert payloads['tables'][0]['manualReviewRequired'] is True
+    assert payloads['tables'][0]['image_unresolved'][0]['reason'] == 'missing_cell_image_semantics'

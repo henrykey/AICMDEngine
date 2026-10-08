@@ -72,6 +72,6 @@ def valid_description(value, name: str = "") -> str:
         if compact(description) == compact(name) or number_only(remainder):
             return ""
     # Strip known non-semantic filler, retaining substantive sentences if supplied.
-    parts = re.split(r"(?<=[。.!！;；])\s*|\n+", description)
+    parts = re.split(r"(?<=[。!！;；])\s*|(?<=\.)(?!\d)\s*|\n+", description)
     invalid = r"包含\s*\d+\s*行|contains?\s+\d+\s+rows|语义(?:说明)?缺失|变量说明见原文|请?结合上下文解释|see the source document|refer to (?:the )?(?:source|context)|semantic (?:description )?(?:missing|unavailable)"
     return " ".join(part for part in parts if part.strip() and not re.search(invalid, part, re.I)).strip()
