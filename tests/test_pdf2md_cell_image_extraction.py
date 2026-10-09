@@ -14,7 +14,7 @@ def cell():
                                'bbox_space': 'normalized_page'}]}
 
 
-def test_semantic_pass_to_existing_asset_pipeline(tmp_path):
+def test_source_geometry_reaches_existing_asset_pipeline(tmp_path):
     import fitz
     path = tmp_path / 'page.png'
     pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 100, 100), False)
@@ -23,13 +23,8 @@ def test_semantic_pass_to_existing_asset_pipeline(tmp_path):
     table = {'layout_id': 'p7-t', 'bbox': [0, 0, 1, 1], 'bbox_space': 'normalized_page',
              'markdown': '<table><tr><td>Original</td></tr></table>'}
     original = table['markdown']
-    class VLM:
-        def extract_region_structured(self, image_path, semantic_objects=None):
-            return {'tables': [{'object_ref': 'tables:0', 'contains_images': True,
-                                'source_cells': [cell()], 'title': 'Types',
-                                'description': 'Equipment configurations.'}]}
+    table.update(contains_images=True, source_cells=[cell()])
     payloads = {'tables': [table], 'figures': []}
-    assert pp._enrich_upload_semantics(VLM(), str(path), {}, payloads, True) == 1
     pp._attach_figure_assets(path, payloads, 7)
     assert len(payloads['figures']) == 1
     assert payloads['figures'][0]['image_asset']['status'] == 'available'

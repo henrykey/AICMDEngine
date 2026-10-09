@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from .calculation_sheet import (
-    METADATA_KEYS, apply_calculation_sheet, classification_prompt,
-    source_context, table_content_quality, complete_calculation_batch, calculation_budget,
-    classification_failed, calculation_transcription_quality,
+    METADATA_KEYS,
+    table_content_quality, calculation_budget,
+    calculation_transcription_quality,
 )
 
 from .semantic_language import detect_description_language, normalize_language, validate_descriptions
@@ -136,8 +136,12 @@ def _process_calculation_request(context, hint, mode, describe, vlm_config, lang
     if not describe:
         return result_for(item, reason="classification_not_run")
     try:
-        vlm = DynamicVLMClient({**(vlm_config or {}), "description_language": language,
-                                "_calculation_processing": "transcription" if request.get("stage") == "transcription" else mode})
+        operation_config = {**(vlm_config or {}), "description_language": language,
+                            "_calculation_processing": "transcription" if request.get("stage") == "transcription" else mode}
+        if request.get("stage") == "transcription":
+            operation_config.update(max_retries=0, table_analysis_max_model_calls=1,
+                                    table_analysis_max_physical_requests=1)
+        vlm = DynamicVLMClient(operation_config)
     except Exception as exc:
         return result_for(item, reason='invalid_physical_model_budget' if isinstance(exc, ValueError)
                           and str(exc) == 'invalid_physical_model_budget' else "calculation_provider_unavailable")
@@ -148,17 +152,18 @@ def _process_calculation_request(context, hint, mode, describe, vlm_config, lang
                              (routing_config or {}).get('calculation_transcription_mode', 'whole'))
     if block_mode not in ('whole', 'blocks'):
         return result_for(item, reason='invalid_calculation_transcription_mode')
+    if block_mode == 'blocks' and (not isinstance(request.get('blocks'), list) or len(request['blocks']) != 1):
+        return result_for(item, reason='single_explicit_block_required')
     block_manifest = None
     source_quality = {}
     whole_ocr_calls = 0
-    quality_calls = 0
     def transcribe(image, target):
-        nonlocal block_manifest, source_quality, whole_ocr_calls, quality_calls
+        nonlocal block_manifest, source_quality, whole_ocr_calls
         # One bounded OCR request; no automatic VLM fallback on failure.
         cfg = dict((ocr_config or {}).get('glm_ocr') or {})
         cfg.update(max_retries=0)
         ocr = OpenAICompatibleOcrClient(cfg, source='glm_ocr')
-        if not ocr.enabled:
+        if engine == 'ocr' and not ocr.enabled:
             raise ValueError('calculation_ocr_unavailable')
         if isinstance(image, list):
             raise ValueError('calculation_ocr_single_image_required')
@@ -168,6 +173,7 @@ def _process_calculation_request(context, hint, mode, describe, vlm_config, lang
             with vlm.calculation_scope():
                 replacement, block_manifest = transcribe_calculation_blocks(image, [0, 0, 1, 1],
                     BudgetedCalculationOcr(ocr, vlm), Path(image).parent / 'calculation_blocks', vlm=vlm,
+                    blocks=request.get('blocks'), engine=engine,
                     review_evidence=source_quality.get('evidence'))
             # The caller supplies an object crop, not a full page.
             for block in block_manifest['blocks']:
@@ -178,6 +184,7 @@ def _process_calculation_request(context, hint, mode, describe, vlm_config, lang
             if text is not None:
                 vlm.last_call_info = {}
                 return {**target, 'source_text': text}
+            raise ValueError(block_manifest['reason'])
         from .calculation_blocks import BudgetedCalculationOcr
         with vlm.calculation_scope():
             whole_ocr_calls += 1
@@ -186,30 +193,6 @@ def _process_calculation_request(context, hint, mode, describe, vlm_config, lang
         if not isinstance(text, str) or not text.strip():
             raise ValueError('calculation_transcription_empty')
         source_quality = calculation_transcription_quality(text)
-        if block_manifest is None and not source_quality and vlm.enabled:
-            from .calculation_sheet import source_context
-            source_quality = {'status': 'uncertain', 'evidence': ['content_review_unavailable']}
-            try:
-                vlm.reserve_automatic_calculation_calls(1)
-                quality_calls += 1
-                reviewed = vlm.extract_region_structured(image, semantic_objects=[{
-                    'object_ref': 'tables:0', 'type': 'table', 'markdown': text,
-                    'bbox': [0, 0, 1, 1], 'bbox_space': 'normalized_object',
-                    'calculation_source': source_context(text, evidence=True)}])
-                candidates = [entry for entry in reviewed.get('tables', [])
-                              if isinstance(entry, dict) and entry.get('object_ref') == 'tables:0']
-                quality = candidates[0].get('transcription_quality') if len(candidates) == 1 else None
-                if (isinstance(quality, dict) and quality.get('status') in
-                        ('reliable', 'uncertain', 'missing', 'truncated', 'misaligned', 'incomplete')
-                        and isinstance(quality.get('evidence'), list)):
-                    source_quality = calculation_transcription_quality(text, quality)
-            except Exception:
-                # A failed quality review must not discard usable OCR source.
-                pass
-        if block_manifest is None and source_quality.get('status') in ('missing', 'truncated', 'misaligned', 'incomplete'):
-            replacement = recover_blocks()
-            if replacement is not None:
-                text = replacement
         vlm.last_call_info = {}
         return {**target, 'source_text': text}
     if calculation_budget(vlm) == 0:
@@ -261,7 +244,7 @@ def _process_calculation_request(context, hint, mode, describe, vlm_config, lang
                     path.write_bytes(decoded)
                     images.append(str(path))
                 result = process_request(request, hint, mode, vlm, ctx.image_path, images if all(images) else None,
-                    transcribe=transcribe if engine == 'ocr' else None)
+                    transcribe=transcribe if engine == 'ocr' or block_mode == 'blocks' else None)
                 result['items'][0].setdefault('calculation_source', {}).update(
                     image_sha256=hashlib.sha256(Path(ctx.image_path).read_bytes()).hexdigest(),
                     image_scope='object_crop', original_bbox=bbox if not cropped else request.get('image_bbox'),
@@ -275,18 +258,19 @@ def _process_calculation_request(context, hint, mode, describe, vlm_config, lang
     table = result['items'][0]
     if source_quality:
         table.setdefault('calculation_source', {})['transcription_quality'] = source_quality
-    if block_manifest is not None or quality_calls:
+    if block_manifest is not None:
         source = table.setdefault('calculation_source', {})
         if block_manifest is not None:
             source['block_transcription'] = block_manifest
             source['layout_status'] = 'logical_reordered' if block_manifest['status'] == 'complete' else 'needs_review'
         ocr_count = whole_ocr_calls + (block_manifest or {}).get('logical_calls', 0)
-        vlm_count = quality_calls + (block_manifest or {}).get('vlm_calls', 0)
+        vlm_count = (block_manifest or {}).get('vlm_calls', 0)
         previous_count = result.get('model_calls', {}).get('glm_ocr', 0)
         result.setdefault('model_calls', {})['glm_ocr'] = ocr_count
         result['model_calls']['vlm_ocr'] = result['model_calls'].get('vlm_ocr', 0) + vlm_count
         result.setdefault('budget', {})['logical_calls'] = result.get('budget', {}).get('logical_calls', 0) + ocr_count + vlm_count - previous_count
         source.setdefault('pipeline', {}).setdefault('transcription', {})['logical_calls'] = ocr_count + vlm_count
+        source['pipeline']['transcription']['engine'] = engine
     if table.get('table_kind') == 'data_table' and table.get('markdown') and result['status'] != 'failed':
         table.update(_normalize_table_contract(table['markdown'], 'structured_json'))
         table.pop('lookup_status', None)
@@ -676,7 +660,14 @@ def _analyze_single_page_layout(
             routing_config=routing_config,
         )
         rc = _routing_defaults(_merge_routing_ocr_config(routing_config, ocr_config))
-        glm = OpenAICompatibleOcrClient(rc.get("glm_ocr") or {}, source="glm_ocr")
+        glm = OpenAICompatibleOcrClient({**(rc.get("glm_ocr") or {}), "max_retries": 0}, source="glm_ocr")
+        physical_requests = 0
+        def count_request(_):
+            nonlocal physical_requests
+            if physical_requests >= 1:
+                raise ValueError("layout_request_budget_exhausted")
+            physical_requests += 1
+        glm.request_guard = count_request
         warnings: List[str] = []
         model_calls = {"glm_ocr": 0, "vlm_ocr": 0}
         markdown = ""
@@ -695,10 +686,24 @@ def _analyze_single_page_layout(
                 markdown = str(raw.get("md_results") or raw.get("markdown") or "").strip()
                 blocks = _layout_blocks_from_raw(raw)
             except Exception as exc:
-                warnings.append(f"glm_ocr_failed: {exc}")
+                warnings.append("glm_ocr_layout_failed")
 
+        candidates = []
+        if (routing_config or {}).get("calculation_block_candidates") and raw:
+            from PIL import Image
+            from .layout_ledger import build_layout_outcome
+            from .calculation_blocks import _formula_sections, calculation_block_boxes, boundary_intersects_content
+            with Image.open(ctx.image_path) as image:
+                outcome = build_layout_outcome(raw, 1, *image.size)
+                candidates = calculation_block_boxes(_formula_sections(outcome['layout'], [0,0,1,1]), [0,0,1,1])
+                if any(boundary_intersects_content(image, box) for box in candidates):
+                    candidates = []
         return {
             "tool": "analyze_page_layout",
+            "image_sha256": hashlib.sha256(Path(ctx.source_path).read_bytes()).hexdigest(),
+            "candidate_blocks": candidates,
+            "candidate_bbox_space": "normalized_object",
+            "physical_requests": physical_requests,
             "source": _source_payload(ctx),
             "markdown": markdown,
             "blocks": blocks,
@@ -892,9 +897,6 @@ def _extract_tables(
                 if recovered:
                     items = [_table_item("vlm_ocr", recovered, ctx.page_text, describe, table_rows_format=table_rows_format, source_text=source_text)]
             if items:
-                model_calls['vlm_ocr'] += complete_calculation_batch(vlm, ctx.image_path,
-                    [(item, str(item.get('raw_html') or item.get('markdown') or ''), f'tables:{index}')
-                     for index, item in enumerate(items)], model_calls['vlm_ocr'])
                 return items
             if _vlm_table_response_was_truncated(vlm, result):
                 warnings.append("vlm_ocr_detailed_response_truncated")
@@ -939,9 +941,6 @@ def _extract_tables(
                             )
                         ]
                 if compact_items:
-                    model_calls['vlm_ocr'] += complete_calculation_batch(vlm, ctx.image_path,
-                        [(item, str(item.get('raw_html') or item.get('markdown') or ''), f'tables:{index}')
-                         for index, item in enumerate(compact_items)], model_calls['vlm_ocr'])
                     warnings.append("vlm_ocr_compact_table_retry_used")
                     return compact_items
                 if _vlm_table_response_was_truncated(vlm, compact_result):
@@ -989,23 +988,19 @@ def _enrich_table_metadata_with_vlm(
         if getattr(vlm, "last_call_info", {}).get("finish_reason") in {"length", "content_filter", "tool_calls"}:
             warnings.append("table_classification_response_incomplete")
             for item in items:
-                classification_failed(item, 'table_classification_response_incomplete')
+                item.update(manualReviewRequired=True, metadata_status='incomplete')
             return
         metadata = _parse_table_metadata_response(raw)
         if metadata:
             _merge_table_metadata(items, metadata, description_language)
-            model_calls['vlm_ocr'] += complete_calculation_batch(vlm, ctx.image_path,
-                [(item, str(item.get('raw_html') or item.get('markdown') or ''), f'tables:{index}')
-                 for index, item in enumerate(items)], model_calls['vlm_ocr'])
         else:
             warnings.append("vlm_ocr_returned_no_table_metadata")
             for item in items:
-                classification_failed(item, 'classification_response_invalid')
+                item.update(manualReviewRequired=True, metadata_status='invalid')
     except Exception as exc:
-        reason = 'source_image_unavailable' if isinstance(exc, FileNotFoundError) else 'calculation_provider_failed'
         warnings.append("vlm_ocr_table_metadata_failed")
         for item in items:
-            classification_failed(item, reason)
+            item.update(manualReviewRequired=True, metadata_status='failed')
 
 
 def _fill_local_table_descriptions(items: List[Dict[str, Any]], description_language: str) -> None:
@@ -1334,10 +1329,8 @@ def _table_item(
 ) -> Dict[str, Any]:
     raw_text = source_text or str(markdown or "").strip()
     raw_candidate = raw_item.raw if raw_item and isinstance(raw_item.raw, dict) else {}
-    typed = ({k: raw_candidate[k] for k in ("layout_id", "bbox", "bbox_space") if k in raw_candidate}
-             if defer_grid or "table_kind" in raw_candidate else {})
-    apply_calculation_sheet(typed, raw_candidate, raw_text)
-    skip_grid = defer_grid or typed.get("table_kind", "data_table") != "data_table"
+    typed = {k: raw_candidate[k] for k in ("layout_id", "bbox", "bbox_space") if k in raw_candidate}
+    skip_grid = defer_grid
     normalized = _normalize_table_contract("" if skip_grid else raw_text, table_rows_format)
     if skip_grid:
         normalized.update(markdown=raw_text, raw_html=_extract_html_table(raw_text), tableRowsContent="")
@@ -2160,7 +2153,6 @@ def _prompt_tables(page_text: str, describe: bool, description_language: str = "
         "\"source_cells\":[{\"row\":0,\"col\":0,\"text\":\"\",\"rowspan\":1,\"colspan\":1,\"source_cell_index\":0,\"bbox\":[0,0,0,0],\"bbox_space\":\"normalized_page\",\"confidence\":1.0}],"
         "\"cell_status\":[{\"row\":0,\"col\":0,\"status\":\"recognized\"}],"
         "\"raw_html\":\"\",\"markdown\":\"\",\"degraded\":false,\"manualReviewRequired\":false,\"warnings\":[]}]}。\n"
-        + classification_prompt()
         + _table_image_instruction()
         + f"是否需要语义描述：{bool(describe)}。\n"
         f"可用的文本层上下文：\n{_trim_context(page_text)}"
@@ -2176,7 +2168,6 @@ def _prompt_tables_compact(page_text: str, description_language: str = "en") -> 
         "按图片从上到下保持表格顺序；没有表格时返回空数组。\n"
         "同时返回 contains_images 布尔值；表内含图片时返回 image_unresolved:[{reason:missing_cell_image_geometry}]，"
         "无法判断时返回 contains_images:null 和 image_unresolved:[{reason:image_detection_incomplete}]。\n"
-        + classification_prompt()
         + "JSON schema：{\"tables\":[{\"title\":\"\",\"markdown\":\"| A | B |\\n| --- | --- |\\n| 1 | 2 |\","
         "\"notes\":[],\"footnotes\":[]}]}。\n"
         f"可用的文本层上下文：\n{_trim_context(page_text)}"
@@ -2193,7 +2184,7 @@ def _prompt_table_metadata(items: List[Dict[str, Any]], page_text: str, descript
                 "index": idx,
                 "bbox": item.get("bbox"),
                 "bbox_space": item.get("bbox_space"),
-                "calculation_source": source_context(str(item.get("raw_html") or item.get("markdown") or ""), evidence=True, source_title=item.get("title")),
+                "source_content": str(item.get("raw_html") or item.get("markdown") or ""),
                 "existing_title": str(item.get("title") or "")[:120],
                 "columns": [str(col) for col in columns[:12]],
                 "sample_rows": rows[:3],
@@ -2208,7 +2199,6 @@ def _prompt_table_metadata(items: List[Dict[str, Any]], page_text: str, descript
         "表名必须来自图片中可见的表题/表注原文，例如“表 7-35 ...”；看不到可靠表名时返回空字符串。\n"
         "semanticDesc 必须遵守开头指定的描述语言，简要说明该表含义，不要编造数据。\n"
         "返回 schema：{\"tables\":[{\"index\":0,\"title\":\"\",\"semanticDesc\":\"\"}]}。\n"
-        + classification_prompt(include_items=False)
         + _table_image_instruction()
         + f"已抽取表格摘要：\n{json.dumps(summaries, ensure_ascii=False)}\n"
         f"可用页面文本上下文（可能含 OCR 噪声，仅供定位，不要当正文）：\n{_trim_context(page_text)}"
@@ -2597,7 +2587,6 @@ def _merge_table_metadata(items: List[Dict[str, Any]], metadata: List[Dict[str, 
             continue
         item = items[idx]
         _merge_table_image_metadata(item, entry)
-        apply_calculation_sheet(item, entry, str(item.get("raw_html") or item.get("markdown") or ""), description_language)
         title = _cell_to_text(
             entry.get("title")
             or entry.get("table_title")

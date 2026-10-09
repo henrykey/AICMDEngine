@@ -143,36 +143,13 @@ def framed_proposal(target):
         'unresolved': [], 'image_discrepancies': []}
 
 
-def test_upload_reuses_source_without_structuring_and_survives_normalization(calculation_image):
-    calls = []
-    class VLM:
-        table_analysis_max_model_calls = 3
-        def extract_region_structured(self, image_path, semantic_objects):
-            calls.append(semantic_objects)
-            assert 'calculation_source' in semantic_objects[0]
-            return {'tables': [{'object_ref': 'tables:0', **proposal()}]}
-        def extract_calculation_sheet(self, image_path, target):
-            calls.append(target)
-            if image_path is not None:
-                return {**target, 'source_text': HTML}
-            return framed_proposal(target)
-    item = {**CALCULATION_REGION, 'markdown': HTML, 'layout_id':'p1-t1'}
-    payloads = {'tables': [item]}
-    assert pp._enrich_upload_semantics(VLM(), calculation_image, {}, payloads, True) == 1
-    assert len(calls) == 1
-    assert item['table_kind'] == 'calculation_sheet'
-    normalized = pp._normalize_structured(payloads)
-    out = pp._build_output_elements('', normalized, 'full_glm_ocr')['tables'][0]
-    assert 'calculation_sheet' not in out
-    assert out['calculation_source']['original_content'] == HTML
-    assert out['calculation_source']['pipeline']['semantic']['status'] == 'not_requested'
 
 
 
 def test_metadata_merge_single_page_and_query_guard():
     item = {'markdown': HTML, 'raw_html': HTML}
     sp._merge_table_metadata([item], [{'index':0, **proposal()}])
-    assert item['table_kind'] == 'calculation_sheet'
+    assert 'table_kind' not in item and 'calculation_sheet' not in item
     from tests.test_pdf2md_enhanced_table_query import request
     q = importlib.import_module(sp.__package__ + '.table_query')
     req = request(HTML); req['table']['table_kind'] = 'calculation_sheet'
@@ -194,7 +171,7 @@ def test_direct_vlm_normalization_keeps_validated_not_raw_proposal():
     assert out['calculation_sheet']['quality_status'] == 'needs_review'
 
 
-def test_single_page_glm_classifies_before_any_grid_call(monkeypatch, calculation_image):
+def test_single_page_glm_keeps_source_without_accepting_calculation_proposal(monkeypatch, calculation_image):
     from tests.test_pdf2md_enhanced_single_page_tools import (
         _patch_clients, FakeGLMOcrClient, FakeVLMClient, OcrResult, OcrElement, PNG_DATA)
     import base64
@@ -204,43 +181,28 @@ def test_single_page_glm_classifies_before_any_grid_call(monkeypatch, calculatio
     monkeypatch.setattr(FakeVLMClient, 'result_text', json.dumps({'tables':[{'index':0, **proposal()}]}))
     monkeypatch.setattr(FakeVLMClient, 'extract_calculation_sheet', lambda self, path, target: framed_proposal(target) if path is None else {**target, 'source_text': HTML}, raising=False)
     monkeypatch.setattr(FakeVLMClient, 'table_analysis_max_model_calls', 3, raising=False)
-    monkeypatch.setattr(sp, '_html_table_to_grid', lambda *_: pytest.fail('classification must precede grid'))
     out = json.loads(sp.extract_page_tables_direct(file_data=base64.b64encode(Path(calculation_image).read_bytes()).decode(), input_type='image',
         ocr_config={'glm_ocr': {'enabled':True, 'model':'stub', 'api_key':'stub', 'base_url':'http://stub'}},
         vlm_config={'model':'stub', 'api_key':'stub', 'base_url':'http://stub'}))
     assert out['model_calls'] == {'glm_ocr':1, 'vlm_ocr':1}
-    assert out['table_kind'] == 'calculation_sheet'
-    assert out['columns'] == [] and out['normalized_rows'] == []
-    assert out['tableRowsContent'] == ''
+    assert 'table_kind' not in out
+    assert out['raw_html'] == HTML
     assert '_pending_grid' not in out['tables'][0]
     assert 'calculation_sheet' not in out
-    assert out['calculation_source']['original_content'] == HTML
+    assert 'calculation_source' not in out
 
 
-def test_single_page_vlm_calculation_response_bypasses_grid(monkeypatch):
+def test_single_page_vlm_does_not_adopt_calculation_json(monkeypatch):
     from tests.test_pdf2md_enhanced_single_page_tools import OcrElement
-    monkeypatch.setattr(sp, '_html_table_to_grid', lambda *_: pytest.fail('not a grid'))
     raw = {'markdown':HTML, **proposal(), 'bbox':[.1,.1,.8,.8], 'bbox_space':'normalized_page'}
     item = sp._table_item('vlm_ocr', HTML, '', True, OcrElement(kind='table', source='vlm_ocr', markdown=HTML, raw=raw))
-    assert item['calculation_sheet']['sections'][0]['items'][0]['source']['bbox'] == raw['bbox']
-    assert item['markdown'] == HTML
+    assert 'calculation_sheet' not in item and 'table_kind' not in item
+    assert item['bbox'] == raw['bbox']
+    assert item['raw_html'] == HTML
 
 
-def test_disabled_semantics_makes_zero_calls():
-    class Forbidden:
-        def extract_region_structured(self, *args, **kwargs):
-            pytest.fail('disabled means no model')
-    payload = {'tables':[{'markdown':HTML}]}
-    assert pp._enrich_upload_semantics(Forbidden(), 'unused', {}, payload, False) == 0
 
 
-def test_foreign_or_duplicate_upload_reference_not_applied():
-    class VLM:
-        def extract_region_structured(self, *args, **kwargs):
-            return {'tables':[{'object_ref':'tables:0', **proposal()}]*2 + [{'object_ref':'tables:1', **proposal()}]}
-    payload = {'tables':[{'markdown':HTML}]}
-    assert pp._enrich_upload_semantics(VLM(), 'unused', {}, payload, True) == 1
-    assert 'calculation_sheet' not in payload['tables'][0]
 
 
 def test_ambiguous_quote_and_image_discrepancies_require_review():
@@ -278,14 +240,6 @@ def test_missing_items_and_generated_evidence_cannot_report_success():
     assert item['table_kind'] == 'data_table'
 
 
-def test_upload_truncated_response_not_accepted():
-    class VLM:
-        last_call_info = {'finish_reason':'length'}
-        def extract_region_structured(self, *args, **kwargs):
-            return {'tables':[{'object_ref':'tables:0', **proposal()}]}
-    payload={'tables':[{'markdown':HTML}]}
-    assert pp._enrich_upload_semantics(VLM(), 'unused', {}, payload, True) == 1
-    assert 'calculation_sheet' not in payload['tables'][0]
 
 
 def test_table_prompt_requires_items_without_suppressing_them(monkeypatch):
@@ -326,45 +280,9 @@ def test_item_geometry_distinct_from_table_geometry():
     assert source['location_scope']=='item'
 
 
-@pytest.mark.parametrize('budget,expected_calls', [(0,0),(1,1),(2,1)])
-def test_two_stage_upload_has_shared_budget(budget, expected_calls, calculation_image):
-    events=[]
-    class VLM:
-        table_analysis_max_model_calls=budget
-        def extract_region_structured(self, path, semantic_objects):
-            events.append('classify')
-            p=proposal();p.pop('calculation_sheet')
-            return {'tables':[{'object_ref':'tables:0',**p}]}
-        def extract_calculation_sheet(self,path,target):
-            events.append('extract')
-            if path is not None:
-                return {**target, 'source_text': HTML}
-            assert target['source_sections']
-            return framed_proposal(target)
-    payload={'tables':[{**CALCULATION_REGION, 'markdown':HTML}]}
-    assert pp._enrich_upload_semantics(VLM(),calculation_image,{},payload,True)==expected_calls
-    assert len(events)==expected_calls
-    if budget:
-        assert events == ['classify']
-        assert payload['tables'][0]['calculation_source']['origin'] == 'existing_ocr'
-        assert 'calculation_sheet' not in payload['tables'][0]
 
 
 
-def test_two_tables_do_not_each_receive_a_fresh_budget(calculation_image):
-    events=[]
-    class VLM:
-        table_analysis_max_model_calls=2
-        def extract_region_structured(self,path,semantic_objects):
-            p=proposal();p.pop('calculation_sheet')
-            return {'tables':[{'object_ref':t['object_ref'],**p} for t in semantic_objects]}
-        def extract_calculation_sheet(self,path,target):
-            events.append(target['object_ref'])
-            return {**target, 'source_text': HTML}
-    payload={'tables':[{**CALCULATION_REGION, 'markdown':HTML},{**CALCULATION_REGION, 'markdown':HTML}]}
-    assert pp._enrich_upload_semantics(VLM(),calculation_image,{},payload,True)==1
-    assert events == []
-    assert all(t['calculation_source']['original_content'] == HTML for t in payload['tables'])
 
 
 
@@ -646,76 +564,9 @@ def test_source_first_bad_auxiliary_field_keeps_formula_and_valid_conditions():
     assert sheet['coverage']['needs_review'] == 1
 
 
-@pytest.mark.parametrize('persistence_failure', [False, True])
-def test_upload_saves_source_before_semantics_and_never_structures_unsaved_source(persistence_failure, calculation_image):
-    events = []
-    class VLM:
-        table_analysis_max_model_calls = 3
-        def extract_region_structured(self, image_path, semantic_objects):
-            events.append('classify')
-            return {'tables': [{'object_ref': 'tables:0', **proposal()}]}
-        def extract_calculation_sheet(self, image_path, target):
-            if image_path is not None:
-                assert events == ['classify']
-                events.append('transcribe')
-                return {**target, 'source_text': HTML}
-            assert events == ['classify', 'save']
-            events.append('semantic')
-            assert image_path is None
-            return framed_proposal(target)
-    def save(ref, item, content):
-        events.append('save')
-        assert ref == 'tables:0' and content == HTML and item['layout_id'] == 'region-a'
-        if persistence_failure:
-            raise OSError('synthetic disk failure')
-        return {'artifact_id': 'saved-source', 'task_id': 'task', 'page_no': 1}
-    item = {**CALCULATION_REGION, 'markdown': HTML, 'layout_id': 'region-a'}
-    pp._enrich_upload_semantics(VLM(), calculation_image, {}, {'tables': [item]}, True, source_store=save)
-    assert events == ['classify', 'save']
-    assert item['calculation_source']['original_content'] == HTML
-    if persistence_failure:
-        assert item['calculation_source']['reason'] == 'calculation_source_persistence_failed'
-        assert 'calculation_sheet' not in item
-    else:
-        assert item['calculation_source']['artifact']['artifact_id'] == 'saved-source'
 
 
 
-def test_upload_task_wires_durable_source_before_semantic_model(monkeypatch, tmp_path, calculation_image):
-    import asyncio
-    import fitz
-    from tests.test_pdf2md_enhanced_single_page_tools import server
-    pdf_path = tmp_path / 'synthetic.pdf'
-    with fitz.open() as pdf:
-        pdf.new_page(); pdf.save(pdf_path)
-    manager = server.TaskManager(str(tmp_path / 'output'))
-    monkeypatch.setattr(server, 'manager', manager)
-    class VLM:
-        table_analysis_max_model_calls = 3
-        def extract_region_structured(self, image_path, semantic_objects):
-            return {'tables': [{'object_ref': 'tables:0', **proposal()}]}
-        def extract_calculation_sheet(self, image_path, target):
-            if image_path is not None:
-                return {**target, 'source_text': HTML}
-            paths = list((tmp_path / 'output').glob('tasks/*/calculation_sources/*.json'))
-            assert len(paths) == 1
-            snapshot = json.loads(paths[0].read_text())
-            assert snapshot['original_content'] == HTML
-            assert snapshot['origin'] == 'existing_ocr'
-            assert 'image_sha256' not in snapshot
-            return framed_proposal(target)
-    def process(source, page, policy, vlm, routing, previous):
-        payload = {'tables': [{**CALCULATION_REGION, 'markdown': HTML, 'layout_id': 'region-a'}]}
-        pp._enrich_upload_semantics(VLM(), calculation_image, {}, payload, True,
-                                    source_store=routing['__calculation_source_store'])
-        return {'elements': payload}
-    monkeypatch.setattr(server, 'process_page', process)
-    started = manager.start_task('source-first-synthetic', file_path=str(pdf_path))
-    response = json.loads(asyncio.run(server.process_task_page(started.task_id, 1)))
-    item = response['page_result']['elements']['tables'][0]
-    assert item['calculation_source']['artifact']['task_id'] == started.task_id
-    assert item['calculation_source']['pipeline']['semantic']['status'] == 'not_requested'
-    assert manager.get_task(started.task_id).pages[1].result['elements']['tables'][0] == item
 
 
 @pytest.mark.parametrize('kind', ['data_table', 'calculation_sheet'])
@@ -760,25 +611,6 @@ def test_semantically_uncertain_classification_is_not_format_retry():
     assert cs.repair_table_classification(object(), 'page.png', item, HTML, 'one', 1) == 0
 
 
-def test_classification_repair_shares_budget_without_cross_object_results():
-    objects = []
-    for ref, source in [('first', 'axis A value 1'), ('second', 'axis B value 2')]:
-        item = {}
-        cs.apply_calculation_sheet(item, {'table_kind': 'data_table'}, source)
-        objects.append((item, source, ref))
-    class VLM:
-        table_analysis_max_model_calls = 2
-        last_call_info = {}
-        calls = []
-        def classify_table(self, image, target):
-            self.calls.append(target['object_ref'])
-            return {'table_kind': 'data_table', 'classification_evidence': [target['source_text']]}
-    vlm = VLM()
-    assert cs.complete_calculation_batch(vlm, 'page.png', objects, 1) == 0
-    assert vlm.calls == []
-    assert objects[0][0]['table_kind'] == 'data_table'
-    assert objects[1][0]['table_kind'] == 'data_table'
-    assert 'repair_reason' not in objects[1][0]['table_classification']
 
 
 @pytest.mark.parametrize('response', [
@@ -855,33 +687,11 @@ def test_unclassified_title_does_not_trigger_repair_and_keeps_quality():
 
 def test_single_page_prompt_supplies_independent_title_block():
     prompt = sp._prompt_table_metadata([{'title': '管板计算表', 'markdown': 'Parameter p'}], '')
-    assert 'source_field' in prompt and '管板计算表' in prompt
+    assert 'existing_title' in prompt and '管板计算表' in prompt
+    assert 'source_content' in prompt and 'Parameter p' in prompt
+    assert 'table_kind' not in prompt and 'calculation_sheet' not in prompt
 
 
-@pytest.mark.parametrize('candidate', [
-    {}, {'table_kind': None}, {'table_kind': 'invalid'},
-    {'table_kind': 'uncertain'}, {'table_kind': 'mixed', 'classification_evidence': ['Inputs']},
-    {'table_kind': 'data_table', 'classification_evidence': ['Inputs']},
-    {'table_kind': 'calculation_sheet', 'classification_evidence': ['foreign']},
-])
-def test_only_confirmed_calculation_enters_enhancement(candidate):
-    original = {'markdown': HTML, 'raw_html': HTML, 'columns': ['A'],
-                'normalized_rows': [['1']], 'source_cells': [{'row': 0, 'col': 0}],
-                'cell_status': ['ok'], 'tableRowsContent': '1', 'content_format': 'html',
-                'images': [{'image_path': 'source.png'}], 'lookup_sections': [{'title': 'A'}]}
-    item = copy.deepcopy(original)
-    candidate = {**candidate, 'transcription_quality': {'status': 'incomplete', 'evidence': ['missing index']}}
-    cs.apply_calculation_sheet(item, candidate, HTML)
-    class Provider:
-        def classify_table(self, *args):
-            pytest.fail('fallback must not retry classification')
-        def transcribe_calculation_blocks(self, *args):
-            pytest.fail('fallback must not transcribe calculation blocks')
-    assert cs.complete_calculation_batch(Provider(), 'page.png', [(item, HTML, 'tables:0')], 1) == 0
-    assert item['table_kind'] == 'data_table'
-    assert {key: item[key] for key in original} == original
-    assert 'calculation_source' not in item
-    assert 'manualReviewRequired' not in item
 
 
 def test_failed_classification_preserves_original_data_table_format():
@@ -893,29 +703,10 @@ def test_failed_classification_preserves_original_data_table_format():
     assert item['table_classification']['reason'] == 'provider_failed'
 
 
-def test_mixed_page_enhances_only_confirmed_calculation():
-    items = []
-    for kind in ('data_table', 'mixed', 'uncertain', 'calculation_sheet'):
-        item = {'markdown': HTML, 'columns': ['A'], 'normalized_rows': [['1']]}
-        cs.apply_calculation_sheet(item, {'table_kind': kind, 'classification_evidence': ['Inputs'],
-            'transcription_quality': {'status': 'incomplete', 'evidence': ['missing formula']}}, HTML)
-        items.append((item, HTML, kind))
-    calls = []
-    class Provider:
-        def classify_table(self, *args):
-            pytest.fail('no classification repair')
-        def transcribe_calculation_blocks(self, item):
-            calls.append(item)
-            return 'Recovered source', {'status': 'complete', 'reason': None, 'logical_calls': 1, 'blocks': []}
-    cs.complete_calculation_batch(Provider(), 'page.png', items, 1)
-    assert calls == [items[-1][0]]
-    assert items[-1][0]['calculation_source']['original_content'] == 'Recovered source'
-    assert all('calculation_source' not in item for item, _, _ in items[:-1])
 
 
-@pytest.mark.parametrize('entrypoint', ['upload', 'single_page'])
 @pytest.mark.parametrize('outcome', ['data_table', 'uncertain', 'mixed', 'missing', 'invalid', 'failure', 'truncated'])
-def test_table_entrypoints_fallback_keeps_structure_and_one_semantic_call(entrypoint, outcome):
+def test_single_page_fallback_keeps_structure_and_one_semantic_call(outcome):
     from types import SimpleNamespace
     item = {'markdown': HTML, 'columns': ['A'], 'normalized_rows': [['1']],
             'source_cells': [{'row': 0, 'col': 0, 'text': '1'}],
@@ -944,15 +735,12 @@ def test_table_entrypoints_fallback_keeps_structure_and_one_semantic_call(entryp
         def transcribe_calculation_blocks(self, *args):
             pytest.fail('no calculation recovery on fallback')
     vlm = Provider()
-    if entrypoint == 'upload':
-        assert pp._enrich_upload_semantics(vlm, 'unused', {}, {'tables': [item]}, True) == 1
-    else:
-        calls = {'vlm_ocr': 0}
-        sp._enrich_table_metadata_with_vlm(SimpleNamespace(image_path='unused', page_text=''),
-            vlm, [item], True, calls, [], 'en')
-        assert calls['vlm_ocr'] == 1
+    calls = {'vlm_ocr': 0}
+    sp._enrich_table_metadata_with_vlm(SimpleNamespace(image_path='unused', page_text=''),
+        vlm, [item], True, calls, [], 'en')
+    assert calls['vlm_ocr'] == 1
     assert vlm.calls == 1
-    assert item['table_kind'] == 'data_table'
+    assert 'table_kind' not in item
     assert {key: item[key] for key in original} == original
     assert 'calculation_source' not in item
     assert 'continuation' not in item

@@ -50,11 +50,11 @@ def test_crop_layout_maps_back_to_page_and_preserves_failed_source(tmp_path):
                 {'label':'text','bbox_2d':[0,360,width,400],'content':'for f > 0'}]]}
         def extract_page(self, crop):
             raise TimeoutError()
-    text, manifest = b.transcribe_calculation_blocks(str(path), [.05,.05,.95,.95], Ocr(), tmp_path/'crops')
+    text, manifest = b.transcribe_calculation_blocks(str(path), [.05,.05,.95,.95], Ocr(), tmp_path/'crops', blocks=[[.05,.05,.95,.35], [.05,.35,.95,.95]], engine='ocr')
     assert text is None
     assert manifest['reason'] == 'block_transcription_failed'
     assert manifest['blocks'][0]['bbox'][1] == .05
-    assert manifest['logical_calls'] == 2
+    assert manifest['logical_calls'] == 1
 
 
 def test_success_preserves_multiline_formula_conditions_and_notes(tmp_path):
@@ -69,7 +69,7 @@ def test_success_preserves_multiline_formula_conditions_and_notes(tmp_path):
               {'type':'text','bbox':[.1,.23,.8,.28]},
               {'type':'formula','bbox':[.1,.44,.8,.52]},
               {'type':'text','bbox':[.1,.54,.8,.89]}]
-    text, manifest = b.transcribe_calculation_blocks(str(path), [.05,.05,.95,.95], Ocr(), tmp_path/'blocks', layout=layout)
+    text, manifest = b.transcribe_calculation_blocks(str(path), [.05,.05,.95,.95], Ocr(), tmp_path/'blocks', blocks=b.calculation_block_boxes(b._formula_sections(layout, [.05,.05,.95,.95]), [.05,.05,.95,.95]), engine='ocr')
     assert manifest['status'] == 'complete'
     assert manifest['layout_calls'] == 0 and manifest['logical_calls'] == 2
     assert text == '标题\n$a=b+c$\n条件 b>0\n\n$d=\\frac{e}{f}+\\frac{g}{h}$\n条件 f>0\n注：SI'
@@ -85,7 +85,7 @@ def test_missed_ink_at_section_boundary_keeps_whole_source(tmp_path):
         def extract_page(self, path):
             raise AssertionError('unsafe crops must not be sent to OCR')
     layout = [{'type':'formula','bbox':[.1,.2,.9,.3]}, {'type':'formula','bbox':[.1,.6,.9,.7]}]
-    text, manifest = b.transcribe_calculation_blocks(str(path), [0,0,1,1], Ocr(), tmp_path/'blocks', layout=layout)
+    text, manifest = b.transcribe_calculation_blocks(str(path), [0,0,1,1], Ocr(), tmp_path/'blocks', blocks=b.calculation_block_boxes(b._formula_sections(layout, [0,0,1,1]), [0,0,1,1]), engine='ocr')
     assert text is None and manifest['reason'] == 'block_boundary_intersects_content'
     assert manifest['logical_calls'] == 0
 
@@ -95,8 +95,9 @@ def test_crop_error_keeps_whole_source(monkeypatch, tmp_path):
     pp = importlib.import_module(cp.__package__ + '.page_processor')
     def failed(*args, **kwargs): raise ValueError('invalid image')
     monkeypatch.setattr(pp, '_crop_layout_block_image', failed)
-    text, manifest = b.transcribe_calculation_blocks(str(path), [0,0,1,1], object(), tmp_path/'blocks')
-    assert text is None and manifest['reason'] == 'object_crop_failed'
+    text, manifest = b.transcribe_calculation_blocks(str(path), [0,0,1,1], object(), tmp_path/'blocks', blocks=[[0,0,1,1]], engine='ocr')
+    assert text is None and manifest['reason'] == 'block_transcription_failed'
+    assert manifest['logical_calls'] == 0
 
 
 @pytest.mark.parametrize('automatic', [False, True])
@@ -114,7 +115,7 @@ def test_blocks_share_physical_budget_and_never_exceed_explicit_cap(tmp_path, au
     layout = [{'type':'formula','bbox':[.1,.15,.8,.28]}, {'type':'formula','bbox':[.1,.44,.8,.89]}]
     with client.calculation_scope():
         text, manifest = b.transcribe_calculation_blocks(str(path), [.05,.05,.95,.95],
-                b.BudgetedCalculationOcr(Ocr(), client), tmp_path/'budget', layout=layout)
+                b.BudgetedCalculationOcr(Ocr(), client), tmp_path/'budget', blocks=b.calculation_block_boxes(b._formula_sections(layout, [.05,.05,.95,.95]), [.05,.05,.95,.95]), engine='ocr')
     assert client.physical_requests == len(calls) == (2 if automatic else 1)
     if automatic:
         assert text == '$x=1$\n\n$x=1$'
@@ -122,7 +123,7 @@ def test_blocks_share_physical_budget_and_never_exceed_explicit_cap(tmp_path, au
     else:
         assert client.physical_request_limit == 1
         assert text is None
-        assert manifest['status'] == 'fallback'
+        assert manifest['status'] == 'failed'
         assert manifest['blocks'][0]['text'] == '$x=1$'
 
 
@@ -193,27 +194,20 @@ def test_outer_boundary_detects_cut_formula_but_not_thin_rule(tmp_path):
     assert not b.boundary_intersects_content(image, [0,0,1,.5])
 
 
-def test_clipped_ocr_box_relocated_on_original_image_before_vlm_transcription(tmp_path):
-    path=tmp_path/'clipped.png'
-    image=Image.new('RGB',(600,800),'white')
-    ImageDraw.Draw(image).rectangle((100,390,180,410),fill='black');image.save(path)
-    calls=[]
+def test_clipped_object_is_rejected_without_relocation(tmp_path):
+    path = tmp_path / 'clipped.png'
+    image = Image.new('RGB', (600,800), 'white')
+    ImageDraw.Draw(image).rectangle((100,390,180,410), fill='black')
+    image.save(path)
     class Vlm:
-        enabled=True
-        def reserve_automatic_calculation_calls(self,n): pass
-        def calculation_sections(self,image_path, target_bbox=None):
-            assert image_path == str(path)
-            assert target_bbox == [0,0,1,.5]
-            return {'coordinate_space':'normalized_1000','object_bbox':[0,0,1000,750],
-                    'sections':[{'bbox':[100,50,900,200]}, {'bbox':[100,450,900,700]}]}
-        def transcribe_calculation_block(self,crop, **kwargs):
-            calls.append(Image.open(crop).size)
-            return '$S_{bi}$' if len(calls)==1 else '$S_{bo}$'
-    text,manifest=b.transcribe_calculation_blocks(str(path),[0,0,1,.5],object(),tmp_path/'out',vlm=Vlm())
-    assert text == '$S_{bi}$\n\n$S_{bo}$'
-    assert manifest['effective_bbox'] == [0,0,1,.75]
-    assert manifest['engine'] == 'vlm_blocks'
-    assert manifest['layout_reason'] == 'object_boundary_intersects_content'
+        enabled = True
+        def calculation_sections(self, *args, **kwargs): pytest.fail('no implicit relocation')
+        def transcribe_calculation_block(self, *args, **kwargs): pytest.fail('unsafe block')
+    text, manifest = b.transcribe_calculation_blocks(str(path), [0,0,1,.5], object(), tmp_path/'out',
+        blocks=[[0,0,1,.5]], engine='vlm', vlm=Vlm())
+    assert text is None
+    assert manifest['reason'] == 'block_boundary_intersects_content'
+    assert manifest['vlm_calls'] == 0
 
 
 @pytest.mark.parametrize('space,box', [('normalized',[.1,.1,.9,.9]), ('pixels',[60,80,540,720])])
@@ -244,8 +238,8 @@ def test_good_ocr_layout_is_used_without_vlm_layout_call(tmp_path):
             raise AssertionError('reliable OCR layout must be reused')
         def transcribe_calculation_block(self,path, **kwargs):return '$x=1$'
     layout=[{'type':'formula','bbox':[.1,.15,.8,.28]}, {'type':'formula','bbox':[.1,.44,.8,.89]}]
-    text,manifest=b.transcribe_calculation_blocks(str(path),[.05,.05,.95,.95],object(),tmp_path/'out',layout=layout,vlm=Vlm())
-    assert manifest['status']=='complete' and manifest['layout_source']=='ocr'
+    text,manifest=b.transcribe_calculation_blocks(str(path),[.05,.05,.95,.95],object(),tmp_path/'out',blocks=b.calculation_block_boxes(b._formula_sections(layout, [.05,.05,.95,.95]), [.05,.05,.95,.95]),engine='vlm',vlm=Vlm())
+    assert manifest['status']=='complete' and manifest['layout_source']=='caller'
     assert manifest['vlm_calls']==2 and manifest['layout_calls']==0
 
 
@@ -260,7 +254,7 @@ def test_vlm_block_failure_preserves_partial_evidence_and_falls_back(tmp_path):
             if self.calls==2:raise TimeoutError()
             return '$x=1$'
     layout=[{'type':'formula','bbox':[.1,.15,.8,.28]}, {'type':'formula','bbox':[.1,.44,.8,.89]}]
-    text,manifest=b.transcribe_calculation_blocks(str(path),[.05,.05,.95,.95],object(),tmp_path/'out',layout=layout,vlm=Vlm())
+    text,manifest=b.transcribe_calculation_blocks(str(path),[.05,.05,.95,.95],object(),tmp_path/'out',blocks=b.calculation_block_boxes(b._formula_sections(layout, [.05,.05,.95,.95]), [.05,.05,.95,.95]),engine='vlm',vlm=Vlm())
     assert text is None and manifest['reason']=='block_transcription_failed'
     assert manifest['blocks'][0]['text']=='$x=1$'
     assert manifest['blocks'][1]['error_type']=='TimeoutError'
@@ -280,32 +274,20 @@ def test_touching_regions_are_not_overlapping():
     assert b.calculation_block_boxes(regions,[0,0,1,1]) == [[0,0,1,.5],[0,.5,1,1]]
 
 
-@pytest.mark.parametrize('mismatch', [False, True])
-def test_unsafe_internal_split_recovers_whole_object_without_clipping(tmp_path, mismatch):
+def test_unsafe_internal_split_returns_control_without_whole_fallback(tmp_path):
     path = tmp_path / 'internal.png'
-    image = Image.new('RGB', (600, 800), 'white')
-    ImageDraw.Draw(image).rectangle((60, 390, 530, 410), fill='black')
+    image = Image.new('RGB', (600,800), 'white')
+    ImageDraw.Draw(image).rectangle((60,390,530,410), fill='black')
     image.save(path)
-    calls = []
     class Vlm:
         enabled = True
-        def reserve_automatic_calculation_calls(self, count):
-            pass
-        def calculation_sections(self, image_path, target_bbox=None):
-            return {'coordinate_space': 'normalized', 'object_bbox': [.2, .2, .8, .8] if mismatch else [0, 0, 1, 1],
-                    'sections': [{'bbox': [.1, .1, .9, .3]}, {'bbox': [.1, .7, .9, .9]}]}
-        def transcribe_calculation_block(self, crop, logical_reorder=False):
-            assert logical_reorder, 'Unreliable layout must use explicit logical transcription'
-            calls.append(Image.open(crop).size)
-            return 'Heading\n$x_{i}=1$\nNote A'
-    text, manifest = b.transcribe_calculation_blocks(str(path), [0, 0, 1, 1], object(), tmp_path/'blocks', vlm=Vlm())
-    assert text == 'Heading\n$x_{i}=1$\nNote A'
-    assert calls == [(600, 800)]
-    assert manifest['mode'] == 'whole_recovery'
-    assert manifest['recovery_reason'] == ('section_target_mismatch' if mismatch else 'block_boundary_intersects_content')
-    assert manifest['status'] == 'complete'
-    assert manifest['vlm_calls'] == 2
-    assert manifest['blocks'][0]['bbox'] == [0, 0, 1, 1]
+        def calculation_sections(self, *args, **kwargs): pytest.fail('no implicit layout')
+        def transcribe_calculation_block(self, *args, **kwargs): pytest.fail('no whole fallback')
+    text, manifest = b.transcribe_calculation_blocks(str(path), [0,0,1,1], object(), tmp_path/'blocks',
+        blocks=[[0,0,1,.5], [0,.5,1,1]], engine='vlm', vlm=Vlm())
+    assert text is None
+    assert manifest['reason'] == 'block_boundary_intersects_content'
+    assert manifest['vlm_calls'] == 0
 
 
 def test_section_prompt_uses_one_coordinate_scale_for_target_and_response(monkeypatch):
@@ -344,7 +326,7 @@ def test_each_block_receives_same_complete_object_context(tmp_path):
             calls.append((Image.open(crop).size, Image.open(context_image).size if context_image else None, logical_reorder))
             return '$x=1$'
     layout = [{'type':'formula','bbox':[.1,.15,.8,.28]}, {'type':'formula','bbox':[.1,.44,.8,.89]}]
-    _, manifest = b.transcribe_calculation_blocks(str(path), [.05,.05,.95,.95], object(), tmp_path/'out', layout=layout, vlm=Vlm())
+    _, manifest = b.transcribe_calculation_blocks(str(path), [.05,.05,.95,.95], object(), tmp_path/'out', blocks=b.calculation_block_boxes(b._formula_sections(layout, [.05,.05,.95,.95]), [.05,.05,.95,.95]), engine='vlm', vlm=Vlm())
     assert manifest['status'] == 'complete'
     assert len(calls) == 2
     assert all(context == (540,720) and logical for crop, context, logical in calls)

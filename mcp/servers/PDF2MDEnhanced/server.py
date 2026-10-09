@@ -291,11 +291,12 @@ async def extract_page_tables(
 async def enhance_object_semantics(
     request: Dict[str, Any],
     vlm_config: Optional[Dict[str, Any]] = None,
+    image_data: Optional[str] = None,
 ) -> str:
     from .object_semantics import enhance_object_semantics as complete
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(
-        None, lambda: complete(request, _normalize_vlm_config(vlm_config)))
+        None, lambda: complete(request, _normalize_vlm_config(vlm_config), image_data=image_data))
     return json.dumps(result, ensure_ascii=False)
 
 

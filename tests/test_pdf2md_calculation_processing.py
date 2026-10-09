@@ -287,15 +287,6 @@ def test_full_pdf_hash_mismatch_fails_before_model(monkeypatch, tmp_path):
     assert not vlm.calls
 
 
-def test_legacy_classification_provider_failure_is_object_diagnostic():
-    from tests.test_pdf2md_enhanced_upload_semantics import pp
-    class Failed:
-        def extract_region_structured(self, *args, **kwargs):
-            raise RuntimeError('private model response')
-    payload = {'tables': [{'markdown': 'Pressure p = MPa'}]}
-    pp._enrich_upload_semantics(Failed(), 'image', {}, payload, True)
-    assert payload['tables'][0]['table_kind'] == 'data_table'
-    assert payload['tables'][0]['table_classification']['reason'] == 'calculation_provider_failed'
 
 
 def test_legacy_image_classification_error_logs_do_not_contain_response(monkeypatch, tmp_path, caplog):
@@ -1907,7 +1898,7 @@ def test_semantic_prompt_distinguishes_condition_headings_from_formula_branches(
 
 
 @pytest.mark.parametrize('recovered', [True, False])
-def test_default_ocr_recovers_inconsistent_spans_once_and_preserves_source_on_failure(monkeypatch, recovered):
+def test_default_ocr_reports_inconsistent_spans_without_implicit_recovery(monkeypatch, recovered):
     from tests.test_pdf2md_enhanced_single_page_tools import PNG_DATA
     from types import SimpleNamespace
     import importlib
@@ -1937,16 +1928,15 @@ def test_default_ocr_recovers_inconsistent_spans_once_and_preserves_source_on_fa
     out = json.loads(sp.extract_page_tables_direct(file_data=PNG_DATA, input_type='image',
         table_kind_hint='calculation_sheet', processing_mode='reextract',
         context={'object_crop': True, 'calculation_request': req}))
-    assert len(calls) == 1
+    assert calls == []
     source = out['calculation_source']
-    assert source['original_content'] == (replacement if recovered else original)
-    assert source['layout_status'] == ('logical_reordered' if recovered else 'needs_review')
-    assert source['block_transcription']['blocks'][0]['bbox_space'] == 'normalized_object'
+    assert source['original_content'] == original
+    assert 'block_transcription' not in source
     assert source['transcription_quality']['status'] == 'misaligned'
     assert out['model_calls']['glm_ocr'] == 1
-    assert out['model_calls']['vlm_ocr'] == 2
-    assert out['budget']['logical_calls'] == 3
-    assert source['pipeline']['transcription']['logical_calls'] == 3
+    assert out['model_calls']['vlm_ocr'] == 0
+    assert out['budget']['logical_calls'] == 1
+    assert source['pipeline']['transcription']['logical_calls'] == 1
     assert 'calculation_sheet' not in out
 
 
@@ -1981,7 +1971,7 @@ def test_source_only_request_selects_transcription_budget(monkeypatch):
 
 
 @pytest.mark.parametrize('quality,recovery', [('incomplete', True), ('reliable', False), ('error', False), ('foreign', False)])
-def test_object_ocr_reuses_content_review_before_optional_recovery(monkeypatch, quality, recovery):
+def test_object_ocr_does_not_run_unrequested_content_review(monkeypatch, quality, recovery):
     from tests.test_pdf2md_enhanced_single_page_tools import PNG_DATA
     from types import SimpleNamespace
     import importlib
@@ -2014,10 +2004,8 @@ def test_object_ocr_reuses_content_review_before_optional_recovery(monkeypatch, 
     out = json.loads(sp.extract_page_tables_direct(file_data=PNG_DATA, input_type='image',
         table_kind_hint='calculation_sheet', processing_mode='reextract',
         context={'object_crop':True, 'calculation_request':req}))
-    assert len(reviews) == 1, out
-    assert reviews[0][0]['markdown'] == original
-    assert bool(calls) == recovery
-    assert out['calculation_source']['original_content'] == ('$S^t$' if recovery else original)
-    assert out['calculation_source']['transcription_quality']['status'] == (quality if quality in ('incomplete','reliable') else 'uncertain')
-    assert out['model_calls']['vlm_ocr'] == (3 if recovery else 1)
-    assert out['budget']['logical_calls'] == (4 if recovery else 2)
+    assert reviews == []
+    assert calls == []
+    assert out['calculation_source']['original_content'] == original
+    assert out['model_calls']['vlm_ocr'] == 0
+    assert out['budget']['logical_calls'] == 1

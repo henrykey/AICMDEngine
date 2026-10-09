@@ -37,7 +37,7 @@ Optional fields inside `query_enhancement`:
 | Field | Meaning |
 | --- | --- |
 | `annotations` | Explicitly attached `{text, kind}` notes, units or titles; references `a0`, `a1`, etc. No implicit page context. |
-| `max_model_calls` | 0 (default), 1 or 2 logical semantic calls. This is a cap, not a requirement. Calls occur only when `query_strategy` is `semantic_review` or `model_required`; deterministic complete projections therefore remain zero-call. |
+| `max_model_calls` | 0 (default) or 1 logical semantic call; larger budgets are rejected. This is a cap, not a requirement. Calls occur only when `query_strategy` is `semantic_review` or `model_required`; deterministic complete projections therefore remain zero-call. |
 | `query_strategy` | Optional explicit model policy: `semantic_review` or `model_required` enables bounded semantic calls; omitted means deterministic source projection only. |
 | `object_image_path` | Explicit local crop of this object, sent only in an enabled semantic call. Never inferred from page/file arguments. |
 | `object_image_data` | Explicit PNG/JPEG data URI or base64 for one table crop from another service. The bytes must decode through the existing image library, match the declared MIME, and remain within byte/pixel limits. The validated file is temporary and deleted after all retries; it never grants arbitrary local-file access. |
@@ -50,7 +50,7 @@ metadata, is returned unchanged. Existing `file_*`, OCR and page context inputs 
 not used by this branch. Supply only the target table and explicit annotations.
 
 Temporary crops created from `object_image_data` are owned by this request and
-removed on provider initialization failure, call failure, retry exhaustion and
+removed on provider initialization failure, call failure and
 normal return. Caller-supplied `object_image_path` files are never deleted.
 Provider initialization exceptions return `model_initialization_failed` with
 `model_calls: 0`, without exposing configuration values or exception text.
@@ -142,9 +142,9 @@ It does not guess headers in all-`td` HTML.
 `DynamicVLMClient.explain_table_query` reuses the text/image transport, language
 instruction and token/timeout controls. Models propose only source references and
 exact spans, never replacement values. Validation runs before a proposal replaces
-any candidate. A second logical call receives unresolved reasons and the same
-bounded table; no automatic expansion to another page or object occurs. This is a
-whole-target retry with feedback, not independent per-region calls. Input limits:
+any candidate. Each request performs at most one logical call and one physical HTTP
+send. Failure returns control to Docs, which owns any later request and its budget;
+the tool does not expand to another page or object. Input limits:
 200,000 HTML characters, 2,000 cells/annotations, 100,000 source text characters,
 spans at most 100, timeout at most 60 seconds per logical call. A conservative
 character-based context estimate rejects oversized prompts without dropping cells.
@@ -194,7 +194,7 @@ require separate acceptance. Do not treat these offline tests as product rollout
 
 ### Diagnostic attempt history
 
-`query_enhancement.diagnostics` is an additive v1 field containing ordered, content-free events. Each event has `stage` and `reasons` (reason codes only); model attempts additionally have a one-based `attempt`. Stages are `source_validation`, `deterministic_projection`, `strategy_validation`, `model_initialization`, `model_projection`, and `condition_validation`. A successful retry retains the earlier failure event even though final `unresolved` is empty. `model_calls` remains the actual logical call count. Diagnostic history neither relaxes source validation nor establishes image verification. No prompts, source content, provider exceptions, or provider configuration are included.
+`query_enhancement.diagnostics` is an additive v1 field containing ordered, content-free events. Each event has `stage` and `reasons` (reason codes only); model attempts additionally have a one-based `attempt`. Stages are `source_validation`, `deterministic_projection`, `strategy_validation`, `model_initialization`, `model_projection`, and `condition_validation`. A failed attempt returns control to Docs; a subsequent RPC is a caller-owned retry. `model_calls` remains the actual logical call count; `physical_requests` counts HTTP sends, capped at one using the existing VLM request guard. Diagnostic history neither relaxes source validation nor establishes image verification. No prompts, source content, provider exceptions, or provider configuration are included.
 
 ## Generic quality additions (2026-09-07)
 

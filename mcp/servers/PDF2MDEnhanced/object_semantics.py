@@ -1,6 +1,8 @@
 """Single-object semantic completion. Source structures are never rewritten."""
 from __future__ import annotations
 import json
+from pathlib import Path
+from .table_query import _object_image_args
 from .semantic_language import description_mismatch
 from .vlm_client import DynamicVLMClient
 
@@ -8,10 +10,12 @@ GROUPS = {"table": "tables", "formula": "formulas", "figure": "figures"}
 FIELDS = {"semantic_desc", "formula_name", "table_title"}
 
 
-def enhance_object_semantics(request, vlm_config=None, *, provider_factory=None):
+def enhance_object_semantics(request, vlm_config=None, *, provider_factory=None, image_data=None):
     calls = 0
+    provider = None
     def failed(reason):
         return {"status": "failed", "reason": reason, "model_calls": calls,
+                "physical_requests": getattr(provider, "physical_requests", 0),
                 "request_id": request.get("request_id") if isinstance(request, dict) else None}
     if (not isinstance(request, dict) or not isinstance(request.get("element_type"), str) or request.get("element_type") not in GROUPS
             or not isinstance(request.get("element_id"), str) or not request["element_id"].strip()
@@ -42,16 +46,34 @@ def enhance_object_semantics(request, vlm_config=None, *, provider_factory=None)
         "Copy source names and titles verbatim; do not translate them. "
         f"Schema: {json.dumps(schema, ensure_ascii=False)}. Evidence: "
         + json.dumps(request, ensure_ascii=False))
+    image_args = {}
+    if image_data is not None:
+        try:
+            if not image_data:
+                return failed("invalid_object_image")
+            image_args = _object_image_args({"object_image_data": image_data})
+        except (ValueError, TypeError):
+            return failed("invalid_object_image")
+        prompt += " Use the attached object image as visual evidence for this object only."
     try:
-        provider = (provider_factory or DynamicVLMClient)(vlm_config)
-    except Exception:
-        return failed("model_initialization_failed")
-    # One call per RPC; task retries remain with the caller. No hidden corrective call.
-    try:
-        calls = 1
-        raw = provider._call_text_prompt(prompt, max_tokens=4096, safe_errors=True)
-    except Exception:
-        return failed("provider_call_failed")
+        try:
+            provider = (provider_factory or DynamicVLMClient)({**(vlm_config or {}),
+                "max_retries": 0, "_calculation_processing": "single_operation",
+                "table_analysis_max_model_calls": 1, "table_analysis_max_physical_requests": 1})
+        except Exception:
+            return failed("model_initialization_failed")
+        # One call per RPC; task retries remain with the caller.
+        try:
+            calls = 1
+            if image_args:
+                raw = provider._call_image_prompt(image_args["image_path"], prompt, max_tokens=4096, safe_errors=True)
+            else:
+                raw = provider._call_text_prompt(prompt, max_tokens=4096, safe_errors=True)
+        except Exception:
+            return failed("provider_call_failed")
+    finally:
+        if image_args.get("_owned_image_path"):
+            Path(image_args["_owned_image_path"]).unlink(missing_ok=True)
     try:
         proposal = json.loads(raw)
         if not isinstance(proposal, dict) or set(proposal) != {group}:
@@ -78,9 +100,9 @@ def enhance_object_semantics(request, vlm_config=None, *, provider_factory=None)
         repair["semantic_desc"] = ""
         rejected.append("semantic_desc")
     unresolved = [f for f in fields if not str(repair.get(f) or "").strip()]
-    quality = {"evidence_basis": "supplied_text_not_image_verified", "unresolved_fields": unresolved,
+    quality = {"evidence_basis": "supplied_object_image" if image_args else "supplied_text_not_image_verified", "unresolved_fields": unresolved,
                "reasons": ["description_language_mismatch"] if rejected else []}
     if not any(str(repair.get(f) or "").strip() for f in fields):
         return {**failed("description_language_mismatch"), "quality": quality}
     return {"status": "complete", "request_id": request.get("request_id"), "repairs": proposal, "model_calls": calls,
-            "quality": quality}
+            "physical_requests": getattr(provider, "physical_requests", 0), "quality": quality}

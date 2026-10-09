@@ -377,6 +377,12 @@ def reconcile_layout(
                                    and payload.get("semantic_status") == "missing")
             if retained_figure:
                 item["payload_ref"] = {"collection": collection, "index": index}
+                asset = payload.get("image_asset") or {}
+                if asset.get("status") == "available" and asset.get("layout_id") == layout_id:
+                    # A page-owned crop completes source coverage, independently of its description.
+                    item["status"] = "EXTRACTED"
+                    item["error"] = None
+                    payload["status"] = "EXTRACTED"
             else:
                 unmatched_payloads.append(layout_id)
 

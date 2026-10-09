@@ -122,14 +122,25 @@ class BudgetedCalculationOcr:
         return self._call(self.ocr.parse_layout, path)
 
 
-def transcribe_calculation_blocks(image_path, bbox, ocr, directory, dpi=300, layout=None, vlm=None, review_evidence=None):
+def transcribe_calculation_blocks(image_path, bbox, ocr, directory, dpi=300, *, blocks=None, engine=None,
+                                 vlm=None, review_evidence=None):
+    """Transcribe exactly the caller-selected rectangles with its selected engine."""
     from PIL import Image
     from .page_processor import _crop_layout_block_image
-    from .layout_ledger import build_layout_outcome
-    manifest = {'mode': 'blocks', 'status': 'fallback', 'reason': 'no_reliable_section_boundaries',
+    manifest = {'mode': 'blocks', 'status': 'failed', 'reason': 'explicit_blocks_required',
                 'blocks': [], 'logical_calls': 0, 'layout_calls': 0, 'vlm_calls': 0}
-    if not _valid(bbox):
-        manifest['reason'] = 'invalid_object_geometry'
+    if not isinstance(blocks, list) or not 1 <= len(blocks) <= 16:
+        return None, manifest
+    if engine not in ('ocr', 'vlm'):
+        manifest['reason'] = 'explicit_engine_required'
+        return None, manifest
+    if not _valid(bbox) or any(not _valid(b) or b[0] < bbox[0] or b[1] < bbox[1]
+            or b[2] > bbox[2] or b[3] > bbox[3] for b in blocks):
+        manifest['reason'] = 'invalid_section_geometry'
+        return None, manifest
+    if any(max(a[0], b[0]) < min(a[2], b[2]) and max(a[1], b[1]) < min(a[3], b[3])
+           for index, a in enumerate(blocks) for b in blocks[index + 1:]):
+        manifest['reason'] = 'overlapping_sections'
         return None, manifest
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -141,73 +152,16 @@ def transcribe_calculation_blocks(image_path, bbox, ocr, directory, dpi=300, lay
         return None, manifest
     manifest['original_bbox'] = list(bbox)
     effective = list(bbox)
-    clipped = boundary_intersects_content(image, effective)
-    boxes = [] if clipped else calculation_block_boxes(_formula_sections(layout or [], bbox), bbox)
-    manifest['layout_reason'] = 'object_boundary_intersects_content' if clipped else 'no_reliable_section_boundaries'
-    if not boxes and not clipped:
-        try:
-            crop, _ = _crop_layout_block_image(Path(image_path), {'bbox': bbox}, directory,
-                                               padding_ratio=0, source_dpi=dpi, max_dpi=None)
-        except Exception:
-            manifest['reason'] = 'object_crop_failed'
-            return None, manifest
-        if getattr(ocr, 'use_layout_parsing', False) and callable(getattr(ocr, 'parse_layout', None)):
-            try:
-                manifest['logical_calls'] += 1
-                manifest['layout_calls'] += 1
-                raw = ocr.parse_layout(str(crop))
-                with Image.open(crop) as cropped:
-                    outcome = build_layout_outcome(raw, 1, *cropped.size)
-                local = calculation_block_boxes(_formula_sections(outcome['layout'], [0,0,1,1]), [0,0,1,1])
-                boxes = [[bbox[0]+b[0]*(bbox[2]-bbox[0]), bbox[1]+b[1]*(bbox[3]-bbox[1]),
-                          bbox[0]+b[2]*(bbox[2]-bbox[0]), bbox[1]+b[3]*(bbox[3]-bbox[1])] for b in local]
-            except Exception as exc:
-                manifest['layout_error'] = type(exc).__name__
-    if boxes and any(boundary_intersects_content(image, b) for b in boxes):
-        boxes = []
-        manifest['layout_reason'] = 'block_boundary_intersects_content'
-    if not boxes and vlm is not None and vlm.enabled:
-        try:
-            vlm.reserve_automatic_calculation_calls(1)
-            manifest['vlm_calls'] += 1
-            # Full-image context lets VLM recover content beyond a clipped OCR box.
-            result = vlm.calculation_sections(str(image_path), target_bbox=bbox)
-            proposed, regions = normalize_calculation_regions(result, image.size)
-            manifest.update(proposed_bbox=proposed, proposed_sections=regions)
-            intersection = max(0,min(bbox[2],proposed[2])-max(bbox[0],proposed[0])) * max(0,min(bbox[3],proposed[3])-max(bbox[1],proposed[1]))
-            area = lambda b: (b[2]-b[0])*(b[3]-b[1])
-            if intersection / area(bbox) < .8 or area(proposed) > 2*area(bbox):
-                raise ValueError('section_target_mismatch')
-            effective = [min(bbox[0],proposed[0]),min(bbox[1],proposed[1]),max(bbox[2],proposed[2]),max(bbox[3],proposed[3])]
-            for item in layout or []:
-                other = item.get('bbox')
-                if item.get('type') == 'table' and _valid(other) and other != bbox:
-                    if max(effective[0],other[0]) < min(effective[2],other[2]) and max(effective[1],other[1]) < min(effective[3],other[3]):
-                        raise ValueError('section_target_overlap')
-            boxes = calculation_block_boxes(regions, effective)
-            manifest['layout_source'] = 'vlm'
-        except Exception as exc:
-            manifest['layout_error'] = type(exc).__name__
-            known = {'section_response_truncated', 'section_response_invalid', 'unknown_coordinate_space',
-                     'invalid_section_geometry', 'section_target_mismatch', 'section_target_overlap'}
-            manifest['reason'] = str(exc) if type(exc) is ValueError and str(exc) in known else 'section_detection_failed'
-            boxes = []
-    else:
-        manifest['layout_source'] = 'ocr'
-    if not boxes or any(boundary_intersects_content(image, box) for box in boxes):
-        if boxes or manifest['layout_reason'] == 'block_boundary_intersects_content':
-            manifest['reason'] = 'block_boundary_intersects_content'
-        if clipped:
-            manifest['reason'] = 'object_boundary_intersects_content'
-        if (clipped or vlm is None or not vlm.enabled
-                or not callable(getattr(vlm, 'transcribe_calculation_block', None))):
-            return None, manifest
-        # Ignore untrusted proposed regions; recover the caller's safe original object once.
-        manifest.update(mode='whole_recovery', recovery_reason=manifest['reason'])
-        effective = list(bbox)
-        boxes = [effective]
+    boxes = [list(box) for box in blocks]
+    if any(boundary_intersects_content(image, box) for box in boxes):
+        manifest['reason'] = 'block_boundary_intersects_content'
+        return None, manifest
+    manifest['layout_source'] = 'caller'
     manifest['effective_bbox'] = effective
-    use_vlm = vlm is not None and vlm.enabled
+    use_vlm = engine == 'vlm'
+    if use_vlm and (vlm is None or not vlm.enabled):
+        manifest['reason'] = 'calculation_vlm_unavailable'
+        return None, manifest
     manifest['engine'] = 'vlm_blocks' if use_vlm else 'glm_ocr_blocks'
     context_crop = None
     if use_vlm and manifest['mode'] == 'blocks':
@@ -242,7 +196,7 @@ def transcribe_calculation_blocks(image_path, bbox, ocr, directory, dpi=300, lay
             chunks.append(text)
         except Exception as exc:
             block.update(status='failed', error_type=type(exc).__name__)
-            manifest.update(status='fallback', reason='block_transcription_failed')
+            manifest.update(status='failed', reason='block_transcription_failed')
             return None, manifest
     manifest.update(status='complete', reason=None)
     return '\n\n'.join(chunks), manifest

@@ -693,94 +693,10 @@ def calculation_transcription_quality(content, quality=None):
     return quality
 
 
-def extract_calculation_items(vlm, image_path, item, content, object_ref, available_calls=1, source_store=None):
-    """Persist independently usable transcription; organization is a separate review request."""
-    if item.get('table_kind') != 'calculation_sheet':
-        return 0
-
-    source = item.setdefault('calculation_source', {})
-    block_manifest = None
-    transcribe = getattr(vlm, 'transcribe_calculation_blocks', None)
-    quality = calculation_transcription_quality(content, item.get('transcription_quality'))
-    recovery_needed = (not isinstance(content, str) or not content.strip()
-                       or quality.get('status') in {'missing', 'truncated', 'misaligned', 'incomplete'})
-    if recovery_needed and callable(transcribe):
-        try:
-            replacement, block_manifest = transcribe(item)
-            if replacement is not None:
-                content = replacement
-        except Exception:
-            block_manifest = {'status': 'fallback', 'reason': 'block_transcription_failed',
-                              'logical_calls': 0, 'blocks': []}
-    source.update(origin='existing_ocr', original_content=content)
-    if isinstance(content, str):
-        source['content_sha256'] = hashlib.sha256(content.encode()).hexdigest()
-    source['transcription_quality'] = deepcopy(quality)
-    if block_manifest is not None:
-        source['block_transcription'] = block_manifest
-        if block_manifest['status'] == 'complete':
-            source['origin'] = 'block_vlm' if block_manifest.get('engine') == 'vlm_blocks' else 'block_ocr'
-            if block_manifest.get('effective_bbox') is not None:
-                item['bbox'] = list(block_manifest['effective_bbox'])
-
-    calls = 0
-    reason = None if isinstance(content, str) and content.strip() else 'calculation_source_missing'
-    source['pipeline'] = {'transcription': {
-        'status': 'reused' if not reason else 'failed',
-        'engine': 'existing_ocr', 'logical_calls': 0}}
-    if block_manifest is not None:
-        source['pipeline']['transcription'] = {k: block_manifest[k] for k in ('status', 'reason', 'logical_calls')}
-        source['pipeline']['transcription']['engine'] = block_manifest.get('engine', 'glm_ocr_blocks')
-        source['pipeline']['transcription']['logical_calls'] += block_manifest.get('vlm_calls', 0)
-    if not reason and source_store is not None:
-        try:
-            source['artifact'] = source_store(object_ref, item, content)
-        except Exception:
-            reason = 'calculation_source_persistence_failed'
-    source['format'] = 'html' if isinstance(content, str) and re.search(r'<(?:table|div|p|h[1-6])\b', content, re.I) else 'markdown'
-    source['status'] = 'failed' if reason else 'available'
-    source['quality_status'] = 'needs_review'
-    source['layout_status'] = ('logical_reordered' if block_manifest and block_manifest.get('status') == 'complete'
-                               else 'needs_review' if recovery_needed else 'original')
-    source['pipeline']['semantic'] = {'status': 'not_requested'}
-    if reason:
-        source['reason'] = reason
-    description = item.get('semantic_desc') or item.get('description') or ''
-    description = valid_description(description, item.get('title', '')) if isinstance(description, str) else ''
-    source['semantic_status'] = 'available' if description else 'missing'
-    if description:
-        item['semantic_desc'] = description
-        item['description'] = description
-    item.pop('calculation_sheet', None)
-    item.update(content_format=source['format'], lookup_status='unavailable', lookup_sections=[],
-                manualReviewRequired=True)
-    return calls
 
 
-def needs_calculation_call(item):
-    return (item.get('table_kind') == 'calculation_sheet'
-            and item.get('calculation_source', {}).get('pipeline', {}).get('semantic', {}).get('status') != 'not_requested'
-            and ('pipeline' not in item.get('calculation_source', {})
-                 or item.get('calculation_sheet', {}).get('validation_status') != 'source_validated'))
 
 
 def calculation_budget(vlm):
     value = getattr(vlm, 'table_analysis_max_model_calls', 2)
     return value if type(value) is int and 0 <= value <= 8 else 0
-
-
-def complete_calculation_batch(vlm, image_path, targets, used_calls, source_store=None):
-    """Share one analysis budget across all tables, including the classification call."""
-    additional = 0
-    for item, content, object_ref in targets:
-        if 'table_kind' not in item:
-            apply_calculation_sheet(item, {}, content)
-        if not needs_calculation_call(item):
-            continue
-        available = calculation_budget(vlm) - used_calls - additional
-        if getattr(vlm, 'automatic_calculation_budget', False):
-            available = 1
-        additional += extract_calculation_items(vlm, image_path, item, content, object_ref,
-                                                 available,
-                                                 source_store=source_store)
-    return additional

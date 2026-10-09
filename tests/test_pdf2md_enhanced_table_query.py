@@ -91,8 +91,8 @@ def test_model_failures_do_not_publish_or_mutate(monkeypatch, mutation, reason):
     assert reason in [i['reason'] for i in out['unresolved']]
 
 
-def test_bounded_retry_language_and_truncation(monkeypatch):
-    req = request(); req['max_model_calls'] = 2; req['query_strategy'] = 'semantic_review'
+def test_truncation_returns_control_and_caller_can_retry(monkeypatch):
+    req = request(); req['max_model_calls'] = 1; req['query_strategy'] = 'semantic_review'
     calls = []
     def model(self, payload, language):
         calls.append((deepcopy(payload), language, self.max_retries))
@@ -100,20 +100,22 @@ def test_bounded_retry_language_and_truncation(monkeypatch):
         return proposal(req)
     monkeypatch.setattr(DynamicVLMClient, 'explain_table_query', model)
     out = run(req, description_language='zh')['query_enhancement']
-    assert out['lookup_status'] == 'complete' and out['model_calls'] == 2
-    assert calls[1][0]['unresolved'][-1]['reason'] == 'model_response_truncated'
+    assert out['lookup_status'] == 'unavailable' and out['model_calls'] == 1
+    assert len(calls) == 1
+    out = run(req, description_language='zh')['query_enhancement']
+    assert out['lookup_status'] == 'complete' and out['model_calls'] == 1
     assert all(c[1:] == ('zh', 0) for c in calls)
     assert set(calls[0][0]) == {'binding','source_cells','positions','unresolved'}
 
 
 def test_provider_failure_safe_and_bounded(monkeypatch):
-    req = request(); req['max_model_calls'] = 2; req['query_strategy'] = 'semantic_review'
+    req = request(); req['max_model_calls'] = 1; req['query_strategy'] = 'semantic_review'
     def fail(*args):
         raise TimeoutError('SECRET private table response')
     monkeypatch.setattr(DynamicVLMClient, 'explain_table_query', fail)
     result = run(req)
     assert 'SECRET' not in json.dumps(result)
-    assert result['query_enhancement']['model_calls'] == 2
+    assert result['query_enhancement']['model_calls'] == 1
     assert result['query_enhancement']['lookup_sections'] == []
 
 
@@ -123,7 +125,7 @@ def test_provider_failure_safe_and_bounded(monkeypatch):
     ('source_assertions', 'content_conflict'),
 ])
 def test_deterministic_blockers_skip_provider(monkeypatch, field, reason):
-    req = request(); req['max_model_calls'] = 2
+    req = request(); req['max_model_calls'] = 1
     if field == 'content_conflicts':
         req[field] = [{'reason': 'image disagreement'}]
     elif field == 'requires_previous_context':
@@ -139,7 +141,7 @@ def test_deterministic_blockers_skip_provider(monkeypatch, field, reason):
 
 
 def test_model_budget_is_cap_and_semantic_review_is_explicit(monkeypatch):
-    req = request(); req['max_model_calls'] = 2
+    req = request(); req['max_model_calls'] = 1
     calls = []
     monkeypatch.setattr(DynamicVLMClient, 'explain_table_query', lambda *args, **kwargs: calls.append(1) or proposal(req))
     out = run(req)['query_enhancement']
@@ -298,10 +300,10 @@ def test_provider_initialization_failure_cleans_only_owned_image(monkeypatch, tm
 
 
 @pytest.mark.parametrize('outcomes', [('failure', 'success'), ('truncated', 'success'), ('failure', 'failure')])
-def test_query_image_cleanup_after_retries(monkeypatch, outcomes):
+def test_query_image_cleanup_after_single_attempt(monkeypatch, outcomes):
     import base64
     from pathlib import Path
-    req = request(); req.update(query_strategy='semantic_review', max_model_calls=2)
+    req = request(); req.update(query_strategy='semantic_review', max_model_calls=1)
     req['object_image_data'] = base64.b64encode(_real_image_bytes('png')).decode()
     paths = []
 
@@ -317,9 +319,9 @@ def test_query_image_cleanup_after_retries(monkeypatch, outcomes):
     monkeypatch.setattr(DynamicVLMClient, 'explain_table_query', model)
     result = run(req)
     assert result['table'] == req['table']
-    assert result['query_enhancement']['model_calls'] == 2
-    assert result['query_enhancement']['lookup_status'] == ('complete' if outcomes[-1] == 'success' else 'unavailable')
-    assert len(paths) == 2 and all(not Path(path).exists() for path in paths)
+    assert result['query_enhancement']['model_calls'] == 1
+    assert result['query_enhancement']['lookup_status'] == 'unavailable'
+    assert len(paths) == 1 and all(not Path(path).exists() for path in paths)
 
 
 def test_cross_service_image_pixel_limit_is_enforced_before_provider(monkeypatch):
@@ -551,9 +553,9 @@ def test_both_runtime_manifests_include_query_module():
         assert 'table_query.py' in next(line for line in (root/name).read_text().splitlines() if line.startswith('COPY __init__.py'))
 
 
-def test_diagnostic_stages_preserve_retry_history_without_provider_content(monkeypatch):
+def test_diagnostics_return_single_failure_without_provider_content(monkeypatch):
     req = request()
-    req.update(max_model_calls=2, query_strategy='semantic_review')
+    req.update(max_model_calls=1, query_strategy='semantic_review')
     calls = []
     def model(self, payload, language):
         calls.append(1)
@@ -563,12 +565,20 @@ def test_diagnostic_stages_preserve_retry_history_without_provider_content(monke
         return proposal(req)
     monkeypatch.setattr(DynamicVLMClient, 'explain_table_query', model)
     out = run(req)['query_enhancement']
-    assert out['lookup_status'] == 'complete'
-    assert out['model_calls'] == 2
+    assert out['lookup_status'] == 'unavailable'
+    assert out['model_calls'] == 1
     assert out['diagnostics'] == [
         {'stage': 'deterministic_projection', 'reasons': []},
         {'stage': 'model_projection', 'attempt': 1, 'reasons': ['model_call_failed']},
-        {'stage': 'model_projection', 'attempt': 2, 'reasons': []},
         {'stage': 'condition_validation', 'reasons': []},
     ]
     assert 'SECRET' not in json.dumps(out)
+
+
+def test_query_rejects_multi_attempt_business_budget(monkeypatch):
+    req = request(); req.update(max_model_calls=2, query_strategy='semantic_review')
+    calls = []
+    monkeypatch.setattr(DynamicVLMClient, 'explain_table_query', lambda *a, **kw: calls.append(1))
+    out = run(req)['query_enhancement']
+    assert calls == []
+    assert any(issue['reason'] == 'invalid_model_budget' for issue in out['unresolved'])

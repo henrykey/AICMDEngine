@@ -1,0 +1,81 @@
+{
+  "source": "| Input | Value |\n| --- | --- |\n| p | 12 MPa |",
+  "page_result": {
+    "rag": {
+      "content": "| Input | Value |\n| --- | --- |\n| p | 12 MPa |\n\n[TABLES]\n| Input | Value |\n| --- | --- |\n| p | 12 MPa |",
+      "page_text": "| Input | Value |\n| --- | --- |\n| p | 12 MPa |",
+      "elements": {
+        "tables": [
+          {
+            "source": "glm_ocr_layout",
+            "title": "",
+            "markdown": "| Input | Value |\n| --- | --- |\n| p | 12 MPa |",
+            "context": "",
+            "bbox": [
+              0.1,
+              0.2,
+              0.9,
+              0.8
+            ],
+            "status": "EXTRACTED",
+            "bbox_space": "normalized_page",
+            "layout_id": "p1-o001-table",
+            "reading_order": 1,
+            "source_block_index": 1,
+            "description": "",
+            "semantic_summary": "",
+            "missing_fields": [
+              "title",
+              "description"
+            ],
+            "semantic_status": "missing"
+          }
+        ],
+        "formulas": [],
+        "figures": []
+      }
+    },
+    "render": {
+      "markdown": "| Input | Value |\n| --- | --- |\n| p | 12 MPa |"
+    },
+    "semantic_status": {
+      "complete": false,
+      "missing": [
+        "tables[0].title",
+        "tables[0].description"
+      ],
+      "reason": "docs_semantics_pending",
+      "objects": [
+        {
+          "collection": "tables",
+          "index": 0,
+          "missing_fields": [
+            "title",
+            "description"
+          ],
+          "semantic_status": "missing",
+          "layout_id": "p1-o001-table"
+        }
+      ]
+    },
+    "layout_status": "EXTRACTED",
+    "reconciliation": {
+      "identified": 1,
+      "extracted": 1,
+      "failed": 0,
+      "by_type": {
+        "table": {
+          "identified": 1,
+          "extracted": 1,
+          "failed": 0
+        }
+      },
+      "unmatched_layout_ids": [],
+      "unmatched_payload_layout_ids": [],
+      "duplicate_layout_ids": [],
+      "review_required_layout_ids": [],
+      "accounted_for": true,
+      "complete": true
+    }
+  }
+}

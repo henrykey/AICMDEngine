@@ -267,7 +267,7 @@ def _build_structured_pdf_fixture(path: Path) -> None:
     doc.close()
 
 
-def test_real_pdf_auto_glm_to_vlm_preserves_structured_element_contract(monkeypatch, tmp_path):
+def test_real_pdf_explicit_vlm_preserves_structured_element_contract(monkeypatch, tmp_path):
     pdf_path = tmp_path / "structured-extraction-fixture.pdf"
     _build_structured_pdf_fixture(pdf_path)
 
@@ -365,14 +365,14 @@ def test_real_pdf_auto_glm_to_vlm_preserves_structured_element_contract(monkeypa
     result = page_processor.process_page(
         source_path=str(pdf_path),
         page_no=1,
-        policy="auto",
+        policy="force_vlm",
         vlm_config={"provider": "fixture"},
         routing_config={
             "formula_score_region_vlm": 0.01,
             "table_score_region_vlm": 0.01,
             "ocr_config": {
                 "glm_ocr": {
-                    "enabled": True,
+                    "enabled": False,
                     "model": "fixture-glm",
                     "api_key": "unused",
                     "base_url": "local://fixture",
@@ -384,8 +384,8 @@ def test_real_pdf_auto_glm_to_vlm_preserves_structured_element_contract(monkeypa
     )
 
     assert result["route_selected"] == "full_vlm_ocr"
-    assert result["decision"]["fallback_reason"] == "glm_ocr_insufficient_structured_output"
-    assert result["decision"]["glm_calls"] == FixtureGLMOcrClient.calls == 1
+    assert not result["decision"]["fallback_reason"]
+    assert result["decision"]["glm_calls"] == FixtureGLMOcrClient.calls == 0
     assert result["decision"]["vlm_calls"] == FixtureVLMClient.calls == 1
     assert result["semantic_status"]["complete"] is False
     assert result["semantic_status"]["missing"] == ["formulas[0].formula_name"]
@@ -419,7 +419,7 @@ def test_real_pdf_auto_glm_to_vlm_preserves_structured_element_contract(monkeypa
     assert figure["status"] == "EXTRACTED"
 
 
-def test_full_glm_keeps_usable_markdown_when_structured_fallback_fails(monkeypatch, tmp_path):
+def test_full_glm_keeps_usable_markdown_without_implicit_structured_fallback(monkeypatch, tmp_path):
     pdf_path = tmp_path / "large-table-recovery-fixture.pdf"
     _build_structured_pdf_fixture(pdf_path)
 
@@ -479,7 +479,8 @@ def test_full_glm_keeps_usable_markdown_when_structured_fallback_fails(monkeypat
 
     assert result["render"]["markdown"] == glm_markdown
     assert result["route_selected"] == "full_glm_ocr"
-    assert result["decision"]["fallback_reason"] == "dual output json parse failed"
+    assert result["decision"]["vlm_calls"] == 0
+    assert result["decision"]["glm_calls"] == 1
     assert result["semantic_status"]["complete"] is False
     assert "formula_latex" in result["semantic_status"]["missing"]
     assert len(result["elements"]["tables"]) == 1
@@ -670,9 +671,10 @@ def test_formula_page_uses_hybrid_glm_when_enabled(monkeypatch):
     assert result["route_selected"] == "full_glm_ocr"
     assert result["decision"]["glm_calls"] == 1
     assert result["elements"]["formulas"][0]["source"] == "glm_ocr"
-    assert result["elements"]["formulas"][0]["semantic_summary"] == "壁厚计算公式: 用于计算承压部件所需壁厚。"
-    assert result["semantic_status"]["complete"] is True
-    assert len(semantic_calls) == result["decision"]["vlm_calls"] == 1
+    assert result["elements"]["formulas"][0]["latex"] == r"t=\frac{pD}{2\sigma\phi-p}"
+    assert result["semantic_status"]["complete"] is False
+    assert result["semantic_status"]["reason"] == "docs_semantics_pending"
+    assert len(semantic_calls) == result["decision"]["vlm_calls"] == 0
 
 
 def test_formula_page_without_ocr_result_is_not_marked_complete(monkeypatch):
@@ -701,7 +703,7 @@ def test_formula_page_without_ocr_result_is_not_marked_complete(monkeypatch):
     assert result["semantic_status"]["reason"] == "vlm_ocr_disabled"
 
 
-def test_scanned_page_uses_full_glm_then_falls_back_to_vlm(monkeypatch):
+def test_scanned_page_returns_glm_failure_without_fallback(monkeypatch):
     page = FakePage(
         text="",
         blocks=[],
@@ -715,24 +717,20 @@ def test_scanned_page_uses_full_glm_then_falls_back_to_vlm(monkeypatch):
     FakeVLMClient.render = "Fallback VLM markdown"
     FakeVLMClient.page_text = "Fallback VLM text"
 
-    result = page_processor.process_page(
-        source_path="/tmp/scanned.pdf",
-        page_no=1,
-        policy="auto",
-        vlm_config={"provider": "fake"},
-        routing_config={
-            "bad_text_policy": BAD_TEXT_POLICY,
-            "ocr_config": {"glm_ocr": {"enabled": True, "model": "glm-ocr", "api_key": "x", "base_url": "http://x"}},
-            "render_cleanup_with_llm": False,
-        },
-        prev_context=None,
-    )
-
-    assert result["route_selected"] == "full_vlm_ocr"
-    assert result["decision"]["glm_calls"] == 1
-    assert result["decision"]["vlm_calls"] == 1
-    assert result["decision"]["fallback_reason"] == "glm unavailable"
-    assert result["render"]["markdown"] == "Fallback VLM markdown"
+    monkeypatch.setattr(FakeVLMClient, 'full_page_dual_output', lambda *args: pytest.fail('unexpected fallback'))
+    with pytest.raises(ValueError, match='ocr_conversion_failed'):
+        result = page_processor.process_page(
+            source_path="/tmp/scanned.pdf",
+            page_no=1,
+            policy="auto",
+            vlm_config={"provider": "fake"},
+            routing_config={
+                "bad_text_policy": BAD_TEXT_POLICY,
+                "ocr_config": {"glm_ocr": {"enabled": True, "model": "glm-ocr", "api_key": "x", "base_url": "http://x"}},
+                "render_cleanup_with_llm": False,
+            },
+            prev_context=None,
+        )
 
 
 def test_vlm_disabled_marks_missing_figure_semantics_incomplete(monkeypatch):
@@ -797,14 +795,16 @@ def test_visual_page_prefers_full_glm_ocr_for_page_markdown(monkeypatch):
         prev_context=None,
     )
 
-    assert result["route_selected"] == "full_glm_ocr"
-    assert result["decision"]["glm_calls"] == 1
-    assert result["decision"]["vlm_calls"] == 1
-    assert result["render"]["markdown"] == "7 结构\n\n7.1 总体结构"
-    assert result["elements"]["figures"][0]["semantic_summary"] == "发卡式热交换器结构示意图。"
+    assert result['route_selected'] == 'full_glm_ocr'
+    assert result['decision']['glm_calls'] == 1
+    assert result['decision']['vlm_calls'] == 0
+    assert result['render']['markdown'] == '7 结构\n\n7.1 总体结构'
+    assert result['elements']['figures'] == []
+    assert result['semantic_status']['complete'] is False
+    assert 'figure_description' in result['semantic_status']['missing']
 
 
-def test_bad_glm_markdown_falls_back_to_full_vlm(monkeypatch):
+def test_bad_glm_markdown_returns_failure_without_fallback(monkeypatch):
     text = "本页包含工程结构示意图，正文说明用于保持文本层可靠。" * 6
     page = FakePage(
         text=text,
@@ -818,23 +818,19 @@ def test_bad_glm_markdown_falls_back_to_full_vlm(monkeypatch):
     FakeGLMOcrClient.result = OcrResult(markdown="\ufffd\ufffd\ufffd????")
     FakeVLMClient.region_structured = {"formulas": [], "tables": [], "figures": []}
 
-    result = page_processor.process_page(
-        source_path="/tmp/bad-glm-page.pdf",
-        page_no=1,
-        policy="auto",
-        vlm_config={"provider": "fake"},
-        routing_config={
-            "ocr_config": {"glm_ocr": {"enabled": True, "model": "glm-ocr", "api_key": "x", "base_url": "http://x"}},
-            "render_cleanup_with_llm": False,
-        },
-        prev_context=None,
-    )
-
-    assert result["route_selected"] == "full_vlm_ocr"
-    assert result["decision"]["glm_calls"] == 1
-    assert result["decision"]["vlm_calls"] == 1
-    assert result["decision"]["fallback_reason"] == "glm_ocr_bad_markdown"
-    assert result["render"]["markdown"] == "VLM markdown"
+    monkeypatch.setattr(FakeVLMClient, 'full_page_dual_output', lambda *args: pytest.fail('unexpected fallback'))
+    with pytest.raises(ValueError, match='ocr_conversion_failed'):
+        result = page_processor.process_page(
+            source_path="/tmp/bad-glm-page.pdf",
+            page_no=1,
+            policy="auto",
+            vlm_config={"provider": "fake"},
+            routing_config={
+                "ocr_config": {"glm_ocr": {"enabled": True, "model": "glm-ocr", "api_key": "x", "base_url": "http://x"}},
+                "render_cleanup_with_llm": False,
+            },
+            prev_context=None,
+        )
 
 
 def test_blank_page_completes_placeholder_without_vlm(monkeypatch):
@@ -1122,7 +1118,10 @@ def test_layout_caption_survives_table_recovery_without_reusing_previous_title(m
         {"label": "table_caption", "bbox_2d": [10, 42, 90, 48], "content": "表 9 修正系数"},
         {"label": "table", "bbox_2d": [10, 50, 90, 90], "content": "<table><tr><td>"},
     ]), recovered={"tables": [{"layout_id": "p1-o004-table", "markdown": table.replace("A", "B")}]})
-    assert [t["title"] for t in result["elements"]["tables"]] == ["表 8（续）", "表 9 修正系数"]
+    assert [t['title'] for t in result['elements']['tables']] == ['表 8（续）']
+    assert result['layout'][3]['title'] == '表 9 修正系数'
+    assert result['layout'][3]['status'] == 'FAILED'
+    assert LayoutLedgerVLMClient.calls == 0
 
 
 def test_layout_caption_overrides_recovery_candidate_title(monkeypatch):
@@ -1135,7 +1134,10 @@ def test_layout_caption_overrides_recovery_candidate_title(monkeypatch):
     ]), recovered={"tables": [{
         "layout_id": "p1-o004-table", "markdown": table.replace("A", "B"), "title": "表 8（续）"
     }]})
-    assert [t["title"] for t in result["elements"]["tables"]] == ["表 8（续）", "表 9 修正系数"]
+    assert [t['title'] for t in result['elements']['tables']] == ['表 8（续）']
+    assert result['layout'][3]['title'] == '表 9 修正系数'
+    assert result['layout'][3]['status'] == 'FAILED'
+    assert LayoutLedgerVLMClient.calls == 0
 
 
 def test_layout_untitled_table_does_not_inherit_first_page_caption(monkeypatch):
@@ -1184,26 +1186,17 @@ def test_process_page_layout_uses_object_content_contract_for_original_layout_id
         recovered={"tables": [{"layout_id": "p1-o002-table", "markdown": recovered}]},
     )
 
-    assert result["_fixture_crop_calls"] == [
-        {"layout_id": "p1-o002-table", "bbox": [0.1, 0.5, 0.9, 0.9]}
-    ]
-    assert LayoutLedgerVLMClient.calls == 1
-    assert LayoutLedgerGLMOcrClient.calls == ["/tmp/layout-page.png"]
-    assert result["layout"][1]["layout_id"] == "p1-o002-table"
-    assert result["layout"][1]["reading_order"] == 2
-    assert result["layout"][1]["bbox"] == [0.1, 0.5, 0.9, 0.9]
-    assert result["layout"][1]["status"] == "EXTRACTED"
-    assert result["layout"][1]["review_required"] is False
-    assert result["elements"]["tables"][1]["layout_id"] == "p1-o002-table"
-    assert result["elements"]["tables"][1]["markdown"] == recovered
-    assert result["elements"]["tables"][1]["source"] == "glm_ocr_layout+vlm_object_crop"
-    diagnostic = result["layout_recovery"]["objects"][0]
-    assert diagnostic["layout_id"] == "p1-o002-table"
-    assert diagnostic["crop"]["pixel_bbox"] == [8, 8, 92, 92]
-    assert diagnostic["outcome"] == "recovered"
-    assert diagnostic["provider"] == "vlm_ocr"
-    assert diagnostic["attempts"][0]["reason"] == "validated_object"
-    assert diagnostic["attempts"][0]["candidate_chars"] == len(recovered)
+    assert result['_fixture_crop_calls'] == []
+    assert LayoutLedgerVLMClient.calls == 0
+    assert LayoutLedgerGLMOcrClient.calls == ['/tmp/layout-page.png']
+    item = result['layout'][1]
+    assert item['layout_id'] == 'p1-o002-table'
+    assert item['reading_order'] == 2
+    assert item['bbox'] == [0.1, 0.5, 0.9, 0.9]
+    assert item['status'] == 'FAILED'
+    assert item['content'] == incomplete
+    assert [t['markdown'] for t in result['elements']['tables']] == [complete]
+    assert result['reconciliation']['complete'] is False
 
 
 @pytest.mark.parametrize(
@@ -1213,7 +1206,7 @@ def test_process_page_layout_uses_object_content_contract_for_original_layout_id
         "<tr><td>0.00</td><td>1.000</td><td>1.000</td><td>0.980</td><td>0.950</td><td>0.90",
     ],
 )
-def test_process_page_layout_recovers_generic_large_table_crop(monkeypatch, truncated_tail):
+def test_process_page_layout_retains_incomplete_large_table_for_docs(monkeypatch, truncated_tail):
     first = "<table><tr><td>A</td><td>B</td></tr><tr><td>1</td><td>2</td></tr></table>"
     incomplete = (
         "<table><tr><td rowspan=\"2\">ratio</td><td colspan=\"6\">coefficients</td></tr>"
@@ -1237,15 +1230,15 @@ def test_process_page_layout_recovers_generic_large_table_crop(monkeypatch, trun
         recovered={"tables": [{"layout_id": "p1-o002-table", "markdown": recovered}]},
     )
 
-    assert [item["status"] for item in result["layout"]] == ["EXTRACTED", "EXTRACTED"]
-    assert result["elements"]["tables"][1]["layout_id"] == "p1-o002-table"
-    assert result["elements"]["tables"][1]["markdown"] == recovered
-    assert result["_fixture_crop_calls"] == [
-        {"layout_id": "p1-o002-table", "bbox": [0.08, 0.48, 0.92, 0.98]}
-    ]
+    assert [item['status'] for item in result['layout']] == ['EXTRACTED', 'FAILED']
+    assert result['layout'][1]['content'] == incomplete
+    assert result['layout'][1]['bbox'] == [0.08, 0.48, 0.92, 0.98]
+    assert [t['markdown'] for t in result['elements']['tables']] == [first]
+    assert result['_fixture_crop_calls'] == []
+    assert LayoutLedgerVLMClient.calls == 0
 
 
-def test_process_page_layout_recovers_only_incomplete_second_html_table(monkeypatch):
+def test_process_page_layout_isolates_incomplete_second_html_table(monkeypatch):
     first = "<table><tr><td>A</td><td>B</td></tr><tr><td>1</td><td>2</td></tr></table>"
     incomplete_second = "<table><tr><td>C</td><td>D</td></tr><tr><td>3</td><td>"
     recovered_second = "<table><tr><td>C</td><td>D</td></tr><tr><td>3</td><td>4</td></tr></table>"
@@ -1278,18 +1271,15 @@ def test_process_page_layout_recovers_only_incomplete_second_html_table(monkeypa
         },
     )
 
-    assert LayoutLedgerVLMClient.calls == 1
-    assert LayoutLedgerVLMClient.last_image_paths == ["/tmp/layout-recovery-p1-o002-table.png"]
-    assert [block["layout_id"] for block in LayoutLedgerVLMClient.last_blocks] == ["p1-o002-table"]
-    assert [item["status"] for item in result["layout"]] == ["EXTRACTED", "EXTRACTED"]
-    assert [item["reading_order"] for item in result["layout"]] == [1, 2]
-    assert [item["bbox"] for item in result["layout"]] == [first_bbox, second_bbox]
-    assert result["elements"]["tables"][0]["markdown"] == first
-    assert result["elements"]["tables"][0]["source"] == "glm_ocr_layout"
-    assert result["elements"]["tables"][1]["markdown"] == recovered_second
-    assert result["elements"]["tables"][1]["source"] == "glm_ocr_layout+vlm_object_crop"
-    assert result["elements"]["tables"][1]["layout_id"] == "p1-o002-table"
-    assert result["reconciliation"]["complete"] is True
+    assert LayoutLedgerVLMClient.calls == 0
+    assert [item['status'] for item in result['layout']] == ['EXTRACTED', 'FAILED']
+    assert [item['reading_order'] for item in result['layout']] == [1, 2]
+    assert [item['bbox'] for item in result['layout']] == [first_bbox, second_bbox]
+    assert result['layout'][1]['content'] == incomplete_second
+    assert result['elements']['tables'][0]['markdown'] == first
+    assert result['elements']['tables'][0]['source'] == 'glm_ocr_layout'
+    assert len(result['elements']['tables']) == 1
+    assert result['reconciliation']['complete'] is False
 
 
 def test_process_page_layout_incomplete_table_recovery_failure_is_isolated(monkeypatch):
@@ -1321,8 +1311,8 @@ def test_process_page_layout_incomplete_table_recovery_failure_is_isolated(monke
         },
     )
 
-    assert LayoutLedgerVLMClient.calls == 2
-    assert [block["layout_id"] for block in LayoutLedgerVLMClient.last_blocks] == ["p1-o002-table"]
+    assert LayoutLedgerVLMClient.calls == 0
+    assert LayoutLedgerVLMClient.last_blocks == []
     assert [item["status"] for item in result["layout"]] == ["EXTRACTED", "FAILED"]
     assert result["layout"][1]["error"] == {
         "code": "layout_table_content_incomplete",
@@ -1331,8 +1321,6 @@ def test_process_page_layout_incomplete_table_recovery_failure_is_isolated(monke
     }
     assert result["layout"][1]["review_required"] is True
     assert result["layout"][1]["content"] == incomplete_second
-    assert result["layout_recovery"]["objects"][0]["outcome"] == "failed"
-    assert result["layout_recovery"]["objects"][0]["review_required"] is True
     assert [item["markdown"] for item in result["elements"]["tables"]] == [first]
     assert result["reconciliation"]["accounted_for"] is True
     assert result["reconciliation"]["complete"] is False
@@ -1371,11 +1359,12 @@ def test_process_page_layout_ledger_covers_figure_and_table(monkeypatch):
     )
 
     assert [item["type"] for item in result["layout"]] == ["text", "figure", "table", "text"]
-    assert [item["status"] for item in result["layout"]] == ["EXTRACTED"] * 4
-    assert result["elements"]["figures"][0]["description"] == "A local mocked schematic."
+    assert [item["status"] for item in result["layout"]] == ["EXTRACTED", "FAILED", "EXTRACTED", "EXTRACTED"]
+    assert result["elements"]["figures"][0]["description"] == ""
+    assert LayoutLedgerVLMClient.calls == 0
     assert result["elements"]["figures"][0]["layout_id"] == result["layout"][1]["layout_id"]
     assert len(result["elements"]["tables"]) == 1
-    assert result["reconciliation"]["complete"] is True
+    assert result["reconciliation"]["complete"] is False
 
 
 def test_process_page_layout_ledger_covers_figure_and_formula(monkeypatch):
@@ -1406,8 +1395,9 @@ def test_process_page_layout_ledger_covers_figure_and_formula(monkeypatch):
     assert [item["type"] for item in result["layout"]] == ["text", "figure", "formula", "text"]
     assert result["elements"]["formulas"][0]["latex"] == "x=y+z"
     assert result["elements"]["formulas"][0]["reading_order"] == 3
-    assert result["elements"]["figures"][0]["description"] == "A mocked diagram beside a formula."
-    assert result["reconciliation"]["complete"] is True
+    assert result["elements"]["figures"][0]["description"] == ""
+    assert LayoutLedgerVLMClient.calls == 0
+    assert result["reconciliation"]["complete"] is False
 
 
 def test_process_page_layout_failure_does_not_stop_other_mixed_objects(monkeypatch):
@@ -1439,7 +1429,7 @@ def test_process_page_layout_failure_does_not_stop_other_mixed_objects(monkeypat
     assert [item["status"] for item in result["layout"]] == [
         "EXTRACTED",
         "FAILED",
-        "EXTRACTED",
+        "FAILED",
         "EXTRACTED",
         "EXTRACTED",
     ]
@@ -1454,7 +1444,7 @@ def test_process_page_layout_failure_does_not_stop_other_mixed_objects(monkeypat
     assert result["layout"][-1]["content"] == "after"
     assert result["reconciliation"]["accounted_for"] is True
     assert result["reconciliation"]["complete"] is False
-    assert result["reconciliation"]["failed"] == 1
+    assert result["reconciliation"]["failed"] == 2
 
 
 def test_process_page_layout_recovery_rejects_wrong_explicit_layout_id(monkeypatch):
@@ -1488,7 +1478,8 @@ def test_process_page_layout_recovery_rejects_wrong_explicit_layout_id(monkeypat
     assert retained["content_status"] == "geometry_only"
     assert retained["description"] == ""
     assert "Wrong correlation" not in str(retained)
-    assert result["reconciliation"]["unmatched_payload_layout_ids"] == ["p1-o002-figure:layout_id_mismatch"]
+    assert result["reconciliation"]["unmatched_payload_layout_ids"] == []
+    assert LayoutLedgerVLMClient.calls == 0
     assert result["layout"][2]["status"] == "EXTRACTED"
 
 
@@ -1665,9 +1656,13 @@ def test_table_math_never_pairs_across_cells_or_tables(monkeypatch):
 @pytest.mark.parametrize('cell,review', [('x_i$', False), ('unknown $', True)])
 def test_recovered_table_math_uses_same_boundary_and_quality_contract(monkeypatch, cell, review):
     table = f'<table><tr><td colspan="2">{cell}</td></tr></table>'
-    result = _run_layout_ledger_page(monkeypatch, _layout_raw([
-        {'label': 'table', 'bbox_2d': [10, 10, 90, 90], 'content': '<table><tr><td>'},
-    ]), recovered={'tables': [{'layout_id': 'p1-o001-table', 'markdown': table}]})
+    outcome = page_processor.build_layout_outcome(_layout_raw([
+        {'label': 'table', 'bbox_2d': [10,10,90,90], 'content': '<table><tr><td>'},
+    ]), 1, 100, 100)
+    page_processor.apply_recovered_payloads(outcome, {'tables': [{'layout_id': 'p1-o001-table', 'markdown': table}]})
+    elements = page_processor._build_layout_output_elements('', outcome['payloads'], 'glm_ocr_layout')
+    result = {'layout': outcome['layout'], 'elements': elements,
+              'reconciliation': page_processor.reconcile_layout(outcome['layout_status'], outcome['layout'], elements)}
     output = result['elements']['tables'][0]
     assert output['markdown'] == (table if review else table.replace('x_i$', '$x_i$'))
     assert output['original_content'] == table

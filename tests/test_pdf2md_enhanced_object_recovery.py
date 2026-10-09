@@ -519,8 +519,7 @@ def test_extra_provider_fields_and_coordinates_do_not_escape_into_success_arrays
     assert payload["bbox"] == [0.1, 0.2, 0.9, 0.8]
 
 
-@pytest.mark.parametrize("crop_succeeds,ocr_recovers", [(True, False), (False, False), (True, True)])
-def test_real_local_upload_crop_and_client_parser_with_mocked_wire(monkeypatch, tmp_path, crop_succeeds, ocr_recovers):
+def test_real_local_upload_preserves_source_crop_and_task_readback_without_recovery(monkeypatch, tmp_path):
     from tests import test_pdf2md_enhanced_single_page_tools as protocol_fixtures
 
     server = protocol_fixtures.server
@@ -543,44 +542,15 @@ def test_real_local_upload_crop_and_client_parser_with_mocked_wire(monkeypatch, 
     def ocr_wire(self, path, **kwargs):
         image = fitz.Pixmap(path)
         ocr_calls.append((path, image.width, image.height))
-        if "layout-recovery-" not in path:
-            return raw
-        content = TABLE if ocr_recovers else PARTIAL
-        return {"md_results": content, "layout_details": [[{"label": "table", "content": content}]]}
+        return raw
 
-    monkeypatch.setattr(OCRClient, "_call_layout_parsing_raw", ocr_wire)
-    monkeypatch.setattr(processor, "OpenAICompatibleOcrClient", OCRClient)
-    monkeypatch.setattr(processor, "DynamicVLMClient", VLMClient)
-    responses = iter(([] if ocr_recovers else [
-        candidate(number=2, markdown=PARTIAL),
-        candidate(number=2, markdown=TABLE if crop_succeeds else PARTIAL),
-    ]) + [
-        candidate("formula", 3), candidate("figure", 4),
-    ])
-    wire_calls = []
-    text_calls = []
+    monkeypatch.setattr(OCRClient, '_call_layout_parsing_raw', ocr_wire)
+    monkeypatch.setattr(processor, 'OpenAICompatibleOcrClient', OCRClient)
+    monkeypatch.setattr(processor, 'DynamicVLMClient', VLMClient)
+    def forbidden(*args, **kwargs):
+        pytest.fail('upload conversion must not launch semantic or recovery calls')
+    monkeypatch.setattr(VLMClient, '_chat_completion_with_stream_fallback', forbidden)
 
-    def wire(self, **kwargs):
-        message = kwargs["messages"][0]["content"]
-        if all(part["type"] == "text" for part in message):
-            text_calls.append(message[0]["text"])
-            assert 'p1-o003-formula' in message[0]["text"]
-            assert 'Fixture page text' in message[0]["text"]
-            return json.dumps({"formulas": [{"object_ref": "formulas:0", "layout_id": "p1-o003-formula",
-                                             "description": "Relates the two specified quantities."}]}), "stream", "stop"
-        image = fitz.Pixmap(base64.b64decode(message[1]["image_url"]["url"].split(",", 1)[1]))
-        wire_calls.append({"budget": kwargs["max_tokens"], "size": [image.width, image.height],
-                           "prompt": message[0]["text"]})
-        if "Analyze ONLY the supplied OCR" in message[0]["text"]:
-            assert '"type": "formula"' not in message[0]["text"]  # formulas have a separate text-first semantic step
-            return json.dumps({"tables": [{"object_ref": "tables:0", "title": "Table 1 Measurements",
-                                           "description": "Compares measured quantities."}]}), "stream", "stop"
-        response = next(responses)
-        if "Return ONLY one complete valid HTML" in message[0]["text"]:
-            return response.get("markdown", ""), "stream", "stop"
-        return json.dumps(response), "stream", "stop"
-
-    monkeypatch.setattr(VLMClient, "_chat_completion_with_stream_fallback", wire)
     start = getattr(server.start_task, "fn", server.start_task)
     process = getattr(server.process_task_page, "fn", server.process_task_page)
     started = json.loads(asyncio.run(start(task_name="object-crop-local-e2e", file_path=str(source))))
@@ -592,37 +562,26 @@ def test_real_local_upload_crop_and_client_parser_with_mocked_wire(monkeypatch, 
                         "ocr_config": {"glm_ocr": {"enabled": True, "model": "glm-ocr",
                                                    "base_url": "http://127.0.0.1:1"}}},
     )))["page_result"]
-    assert len(text_calls) == 1
-    assert result["decision"]["formula_semantic_calls"] == {"text": 1, "image": 0}
-    assert result["elements"]["formulas"][0]["description"] == "Relates the two specified quantities."
-    assert len(ocr_calls) == (2 if ocr_recovers else 3)
-    assert len(wire_calls) == (3 if ocr_recovers else 5)
-    assert all(call["budget"] == 12000 for call in wire_calls)
-    assert all(w < 625 and h < 834 for w, h in (call["size"] for call in wire_calls[:-1]))
-    assert wire_calls[-1]["size"] == [1250, 1667]  # normal page semantic pass
+    assert len(ocr_calls) == 1
     assert ocr_calls[0][1:] == (1250, 1667)
-    assert ocr_calls[1][1] < 625 and ocr_calls[1][2] < 834  # actual 150 DPI crop
-    if not ocr_recovers:
-        assert ocr_calls[2][1] < ocr_calls[1][1] and ocr_calls[2][2] < ocr_calls[1][2]
-    assert all("SECRET_ORIGINAL_FRAGMENT" not in call["prompt"] for call in wire_calls)
-    assert result["elements"] == result["rag"]["elements"]
-    assert result["elements"]["tables"][0]["description"] == "Compares measured quantities."
-    if crop_succeeds:
-        assert result["elements"]["tables"][1]["semantic_status"] == "missing"
-    assert len(result["elements"]["tables"]) == (2 if crop_succeeds else 1)
-    assert len(result["elements"]["formulas"]) == len(result["elements"]["figures"]) == 1
-    assert result["reconciliation"]["complete"] is crop_succeeds
-    assert result["reconciliation"]["accounted_for"] is True
-    assert [item["reading_order"] for item in result["layout"]] == [1, 2, 3, 4]
-    assert result["layout"][1]["bbox"] == [0.1, 0.35, 0.9, 0.6]
-    saved = json.loads((tmp_path / "output" / "tasks" / started["task_id"] / "page_1.json").read_text())
-    assert saved["layout_recovery"] == result["layout_recovery"]
-    assert "SECRET" not in json.dumps(saved["layout_recovery"])
-    attempts = saved["layout_recovery"]["objects"][0]["attempts"]
-    assert attempts[0]["provider"] == "glm_ocr"
-    assert attempts[0]["reason"] == ("validated_object" if ocr_recovers else "table_html_unclosed")
-    if not ocr_recovers:
-        assert attempts[2]["provider"] == "vlm_ocr"
-        assert attempts[2]["finish_reason"] == "stop"
+    assert result['decision']['vlm_calls'] == 0
+    assert result['decision']['formula_semantic_calls'] == {'text': 0, 'image': 0}
+    assert result['elements'] == result['rag']['elements']
+    assert len(result['elements']['tables']) == 1
+    assert result['elements']['tables'][0]['markdown'] == TABLE
+    assert result['elements']['formulas'] == []
+    assert len(result['elements']['figures']) == 1
+    figure = result['elements']['figures'][0]
+    assert figure['description'] == ''
+    assert figure['image_asset']['status'] == 'available'
+    assert figure['image_asset']['data'].startswith('data:image/png;base64,')
+    assert result['reconciliation']['complete'] is False
+    assert result['reconciliation']['accounted_for'] is True
+    assert [item['reading_order'] for item in result['layout']] == [1,2,3,4]
+    assert result['layout'][1]['bbox'] == [0.1,0.35,0.9,0.6]
+    assert result['layout'][1]['content'] == PARTIAL
+    saved = json.loads((tmp_path / 'output' / 'tasks' / started['task_id'] / 'page_1.json').read_text())
+    assert saved['elements'] == result['elements']
+    assert saved['layout'] == result['layout']
     finalized = manager.finalize_task(started["task_id"], merge_mode="both")
     assert finalized["merged_rag"][0]["rag"]["elements"] == result["elements"]

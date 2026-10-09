@@ -406,7 +406,7 @@ def enhance_table(request, parse_grid, vlm_factory, vlm_config=None, description
                                    "reasons": [issue["reason"] for issue in issues]})
         stage = "strategy_validation"
         budget = request.get("max_model_calls", 0)
-        if type(budget) is not int or not 0 <= budget <= 2:
+        if type(budget) is not int or not 0 <= budget <= 1:
             raise ValueError("invalid_model_budget")
         strategy = str(request.get("query_strategy") or "").strip().lower()
         if strategy not in {"", "semantic_review", "model_required"}:
@@ -417,10 +417,13 @@ def enhance_table(request, parse_grid, vlm_factory, vlm_config=None, description
                                  and not deterministic_issues)
         if should_call_model:
             stage = "model_initialization"
-            config = {**(vlm_config or {}), "description_language": description_language, "max_retries": 0}
+            config = {**(vlm_config or {}), "description_language": description_language, "max_retries": 0,
+                      "_calculation_processing": "single_operation", "table_analysis_max_model_calls": 1,
+                      "table_analysis_max_physical_requests": 1}
             config["timeout_sec"] = max(1, min(int(config.get("timeout_sec", 60)), 60))
             prepared_image = _object_image_args(request)
             owned_image = prepared_image.pop("_owned_image_path", None)
+            client = None
             try:
                 try:
                     client = vlm_factory(config)
@@ -450,6 +453,7 @@ def enhance_table(request, parse_grid, vlm_factory, vlm_config=None, description
                         out["diagnostics"].append({"stage": "model_projection", "attempt": attempt + 1,
                                                    "reasons": ["model_call_failed"]})
             finally:
+                out["physical_requests"] = getattr(client, "physical_requests", 0)
                 if owned_image:
                     Path(owned_image).unlink(missing_ok=True)
         stage = "condition_validation"

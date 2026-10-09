@@ -132,3 +132,79 @@ def test_packaged_semantic_module_imports_without_source_checkout(tmp_path, dock
         "assert enhance_object_semantics({})['model_calls'] == 0", str(tmp_path)],
         cwd=tmp_path, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_object_semantics_uses_existing_physical_request_guard():
+    configs = []
+    provider = Provider('{"formulas":[{"element_id":"o1","semantic_desc":"对象说明"}]}')
+    def factory(config):
+        configs.append(config)
+        return provider
+    enhance_object_semantics(request(), {"max_retries": 4}, provider_factory=factory)
+    assert configs[0]["max_retries"] == 0
+    assert configs[0]["table_analysis_max_physical_requests"] == 1
+    assert configs[0]["_calculation_processing"]
+
+
+@pytest.mark.parametrize("tool", ["semantics", "query"])
+def test_single_tool_http_failure_never_sends_a_hidden_retry(monkeypatch, tool):
+    import httpx
+    import openai
+    from tests.test_pdf2md_enhanced_table_query import request as query_request, run
+    sent, clients = [], []
+    def handle(request):
+        sent.append(request)
+        return httpx.Response(503)
+    def factory(**kwargs):
+        client = httpx.Client(transport=httpx.MockTransport(handle), **kwargs)
+        clients.append(client)
+        return client
+    monkeypatch.setattr(openai, "DefaultHttpxClient", factory)
+    config = {"model": "fixture", "api_key": "fixture", "base_url": "https://fixture.invalid/v1", "max_retries": 9, "context_window": 32768}
+    try:
+        if tool == "semantics":
+            out = enhance_object_semantics(request(), config)
+        else:
+            req = query_request(); req.update(max_model_calls=1, query_strategy="semantic_review")
+            out = run(req, vlm_config=config)["query_enhancement"]
+        assert len(sent) == out["physical_requests"] == out["model_calls"] == 1
+    finally:
+        for client in clients:
+            client.close()
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_single_object_image_uses_one_call_and_cleans_transport(fails):
+    import base64
+    import io
+    from pathlib import Path
+    from PIL import Image
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), "white").save(buffer, format="PNG")
+    encoded = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
+    paths = []
+    class ImageProvider:
+        def _call_image_prompt(self, path, prompt, **kwargs):
+            assert Path(path).is_file()
+            assert "attached object image" in prompt
+            assert encoded not in prompt
+            paths.append(path)
+            if fails:
+                raise RuntimeError("private provider data")
+            return '{"figures":[{"element_id":"o1","semantic_desc":"示意图展示装置连接关系。"}]}'
+        def _call_text_prompt(self, *args, **kwargs):
+            pytest.fail("image must not be replaced by text")
+    result = enhance_object_semantics(request("figure"), image_data=encoded,
+                                     provider_factory=lambda cfg: ImageProvider())
+    assert result["model_calls"] == 1
+    assert len(paths) == 1 and not Path(paths[0]).exists()
+    assert result["status"] == ("failed" if fails else "complete")
+    if not fails:
+        assert result["quality"]["evidence_basis"] == "supplied_object_image"
+
+
+def test_invalid_object_image_never_calls_provider():
+    def forbidden(cfg):
+        pytest.fail("provider created for invalid image")
+    result = enhance_object_semantics(request("figure"), image_data="not-an-image", provider_factory=forbidden)
+    assert result["model_calls"] == 0
+    assert result["reason"] == "invalid_object_image"

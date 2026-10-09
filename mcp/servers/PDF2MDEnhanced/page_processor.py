@@ -2,11 +2,7 @@ from __future__ import annotations
 
 from .stage_timing import timed_stage, stage_identity
 
-from .calculation_sheet import (
-    METADATA_KEYS, apply_calculation_sheet, source_context,
-    table_content_quality, complete_calculation_batch, calculation_budget,
-    classification_failed,
-)
+from .calculation_sheet import METADATA_KEYS, apply_calculation_sheet, table_content_quality
 
 from .semantic_language import validate_descriptions, number_only as _number_only, valid_description as _valid_description
 
@@ -36,7 +32,6 @@ from .layout_ledger import (
     build_layout_outcome,
     failed_layout_outcome,
     reconcile_layout,
-    recovery_blocks,
     validate_recovered_object,
 )
 from .vlm_client import DynamicVLMClient
@@ -78,6 +73,10 @@ def process_page(
     prev_context: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     rc = _routing_defaults(routing_config)
+    # Conversion is one operation. Docs owns semantic completion and recovery.
+    rc.update(full_vlm_fallback_enabled=False, full_vlm_retry_markdown=False,
+              full_vlm_split_extract=False, render_cleanup_with_llm=False,
+              figure_semantic_description_required=False, large_table_placeholder_enabled=False)
     table_placeholders: list[str] = []
     source_page_no = int(rc.get("source_page_no", 0) or 0)
     display_page_no = source_page_no if source_page_no > 0 else int(page_no)
@@ -138,9 +137,11 @@ def process_page(
 
         description_language = str(rc.get("description_language") or "unknown")
         effective_vlm_config = dict(vlm_config or rc.get("vlm_ocr") or {})
-        effective_vlm_config["description_language"] = description_language
+        effective_vlm_config.update(description_language=description_language, max_retries=0,
+            _calculation_processing="single_operation", table_analysis_max_model_calls=1,
+            table_analysis_max_physical_requests=1)
         vlm = DynamicVLMClient(effective_vlm_config)
-        vlm.calculation_work_started = (routing_config or {}).get("__calculation_work_started")
+        vlm.conversion_only = True
         logger.info(
             "process_page vlm_client: enabled=%s provider=%s model=%s base_url=%s timeout=%s max_retries=%s",
             vlm.enabled,
@@ -151,36 +152,16 @@ def process_page(
             vlm.max_retries,
         )
         vlm_calls = 0
-        page_semantic_attempted = False
         glm_calls = 0
         glm_ocr_config = dict(rc.get("glm_ocr") or {})
-        glm_ocr_config["description_language"] = description_language
+        glm_ocr_config.update(description_language=description_language, max_retries=0)
         glm_ocr = OpenAICompatibleOcrClient(glm_ocr_config, source="glm_ocr")
-        if rc['calculation_transcription_mode'] == 'blocks' and not rc['render_rotate_deg']:
-            from .calculation_blocks import BudgetedCalculationOcr, transcribe_calculation_blocks
-            block_ocr = OpenAICompatibleOcrClient({**glm_ocr_config, 'max_retries': 0}, source='glm_ocr')
-            def transcribe_calculation(item):
-                nonlocal glm_calls, vlm_calls
-                with vlm.calculation_scope():
-                    result, manifest = transcribe_calculation_blocks(str(image_path),
-                        item.get('bbox') if item.get('bbox_space') == 'normalized_page' else None,
-                        BudgetedCalculationOcr(block_ocr, vlm), Path(work_dir)/'calculation_blocks', rc['render_dpi'],
-                        layout=(layout_outcome or {}).get('layout'), vlm=vlm)
-                glm_calls += manifest['logical_calls']
-                vlm_calls += manifest['vlm_calls']
-                return result, manifest
-            vlm.transcribe_calculation_blocks = transcribe_calculation
+        glm_ocr.request_guard = getattr(vlm, "_count_physical_request", None)
         layout_enabled = image_input or bool(rc.get("layout_ledger_enabled", True))
         layout_driven = False
         layout_outcome = None
 
         layout_probe = None
-        if rc.get("debug_layout_probe"):
-            try:
-                layout_probe = vlm.recognize_layout(str(image_path))
-            except Exception as exc:
-                layout_probe = {"error": str(exc)}
-
         if layout_enabled:
             if route_selected == "blank":
                 layout_outcome = blank_layout_outcome()
@@ -210,35 +191,11 @@ def process_page(
                         fallback_width,
                         fallback_height,
                     )
-                    layout_driven = layout_outcome["layout_status"] == "EXTRACTED"
-                    if layout_driven:
-                        vlm_calls += _recover_unbound_table_regions(image_path, Path(work_dir), layout_outcome,
-                            vlm, bool(rc.get("vlm_ocr_enabled") and vlm.enabled),
-                            rc["layout_recovery_max_objects"], rc["render_dpi"])
-                    pending_blocks = recovery_blocks(layout_outcome)
-                    if layout_driven and pending_blocks:
-                        recovery_glm_calls, recovery_vlm_calls, recovery_diagnostics = _recover_layout_objects(
-                            image_path=image_path,
-                            output_dir=Path(work_dir),
-                            layout_outcome=layout_outcome,
-                            pending_blocks=pending_blocks,
-                            vlm=vlm,
-                            vlm_enabled=bool(rc.get("vlm_ocr_enabled") and vlm.enabled),
-                            max_objects=rc["layout_recovery_max_objects"],
-                            padding_ratio=rc["layout_recovery_crop_padding_ratio"],
-                            glm=glm_ocr,
-                            source_dpi=rc["render_dpi"],
-                        )
-                        glm_calls += recovery_glm_calls
-                        vlm_calls += recovery_vlm_calls
-                        layout_outcome["recovery"] = recovery_diagnostics
+                    layout_driven = layout_outcome["layout_status"] == "EXTRACTED" or bool(layout_outcome.get("markdown"))
+                    if not layout_driven:
+                        raise ValueError("layout_conversion_incomplete")
                 except Exception as exc:
-                    layout_outcome = failed_layout_outcome("layout_analysis_failed")
-                    logger.warning(
-                        "layout analysis failed: sourcePageNo=%s error_type=%s",
-                        page_no,
-                        type(exc).__name__,
-                    )
+                    raise ValueError("layout_conversion_failed") from None
 
         if route_selected == "blank":
             markdown = ""
@@ -265,22 +222,9 @@ def process_page(
                 glm_result = glm_ocr.extract_page(str(image_path))
                 structured = _structured_from_ocr_result(glm_result, include_figures=False)
                 markdown = _merge_region_vlm_markdown(markdown, structured)
-                if _structured_insufficient_for_route(structured, route_selected, metrics):
-                    raise RuntimeError("glm_ocr_insufficient_structured_output")
-            except Exception as err:
-                if rc.get("vlm_ocr_enabled") and vlm.enabled:
-                    route_selected = "hybrid_vlm_ocr"
-                    route_decision["fallback_reason"] = str(err)
-                    structured = _normalize_structured(vlm.extract_region_structured(str(image_path)))
-                    vlm_calls += 1
-                    markdown = _merge_region_vlm_markdown(markdown, structured)
-                else:
-                    route_decision["fallback_reason"] = str(err)
-                    structured = {"formulas": [], "tables": [], "figures": []}
+            except Exception:
+                raise ValueError("ocr_conversion_failed") from None
         elif route_selected == "full_glm_ocr":
-            glm_markdown_candidate = ""
-            glm_rag_page_text = ""
-            glm_structured_candidate = {"formulas": [], "tables": [], "figures": []}
             try:
                 glm_calls += 1
                 glm_result = glm_ocr.extract_page(str(image_path))
@@ -288,95 +232,25 @@ def process_page(
                 rag_page_text = glm_result.page_text
                 structured = _structured_from_ocr_result(glm_result, include_figures=False)
                 if _glm_ocr_markdown_bad(markdown):
-                    raise RuntimeError("glm_ocr_bad_markdown")
-                glm_markdown_candidate = markdown
-                glm_rag_page_text = rag_page_text
-                glm_structured_candidate = structured
-                if _structured_insufficient_for_route(structured, route_selected, metrics):
-                    raise RuntimeError("glm_ocr_insufficient_structured_output")
-                if (
-                    route_decision["signals"].get("has_meaningful_figures")
-                    and rc.get("figure_semantic_description_required")
-                    and rc.get("vlm_ocr_enabled")
-                    and vlm.enabled
-                ):
-                    figure_structured = _normalize_structured(vlm.extract_region_structured(str(image_path)))
-                    structured["figures"] = figure_structured.get("figures") or []
-                    vlm_calls += 1
-            except Exception as err:
-                if rc.get("full_vlm_fallback_enabled") and rc.get("vlm_ocr_enabled") and vlm.enabled:
-                    route_selected = "full_vlm_ocr"
-                    route_decision["fallback_reason"] = str(err)
-                    rag_page_text = ""
-                    vlm_calls += 1
-                    try:
-                        page_semantic_attempted = True
-                        dual = vlm.full_page_dual_output(str(image_path))
-                        markdown = _clean_markdown(dual.get("render") or "")
-                        rag_obj = dual.get("rag") or {}
-                        rag_page_text = str(rag_obj.get("page_text") or "").strip()
-                        structured = _normalize_structured(rag_obj.get("elements"))
-                        if not markdown.strip():
-                            raise RuntimeError("full_vlm_empty_render")
-                    except Exception as vlm_err:
-                        route_decision["fallback_reason"] = str(vlm_err)
-                        if glm_markdown_candidate:
-                            route_selected = "full_glm_ocr"
-                            markdown = glm_markdown_candidate
-                            rag_page_text = glm_rag_page_text
-                            structured = glm_structured_candidate
-                            logger.warning(
-                                "full VLM fallback failed; preserving usable GLM markdown: error_type=%s",
-                                type(vlm_err).__name__,
-                            )
-                        elif rc.get("full_vlm_retry_markdown", False):
-                            markdown = _clean_markdown(vlm.full_page_markdown(str(image_path)))
-                            vlm_calls += 1
-                            structured = {"formulas": [], "tables": [], "figures": []}
-                            if not markdown.strip():
-                                raise RuntimeError("full_vlm_empty_render")
-                        else:
-                            raise
-                else:
-                    raise
+                    raise ValueError("invalid_ocr_source")
+            except Exception:
+                raise ValueError("ocr_conversion_failed") from None
         elif route_selected == "hybrid_vlm_ocr" and (not rc.get("vlm_ocr_enabled") or not vlm.enabled):
             markdown = _build_direct_markdown(page)
             structured = {"formulas": [], "tables": [], "figures": []}
             rag_page_text = ""
         elif mode == "FULL_VLM":
-            rag_page_text = ""
             try:
+                vlm_calls += 1
                 dual = vlm.full_page_dual_output(str(image_path))
                 markdown = _clean_markdown(dual.get("render") or "")
                 rag_obj = dual.get("rag") or {}
                 rag_page_text = str(rag_obj.get("page_text") or "").strip()
                 structured = _normalize_structured(rag_obj.get("elements"))
-                vlm_calls += 1
-                # Some models return syntactically valid dual JSON but empty render.
-                # Treat as recoverable and trigger markdown fallback when enabled.
                 if not markdown.strip():
-                    if rc.get("full_vlm_retry_markdown", False):
-                        markdown = _clean_markdown(vlm.full_page_markdown(str(image_path)))
-                        vlm_calls += 1
-                    if not markdown.strip():
-                        raise RuntimeError("full_vlm_empty_render")
-            except Exception as err:
-                logger.warning("FULL_VLM dual-output failed, fallback to split calls: %r", err)
-                # Default strategy: one VLM call per page in FULL_VLM.
-                # If dual-output parsing fails, avoid second VLM call by default.
-                markdown = ""
-                if rc.get("full_vlm_retry_markdown", False):
-                    markdown = _clean_markdown(vlm.full_page_markdown(str(image_path)))
-                    vlm_calls += 1
-                # Optional legacy split behavior for debugging only.
-                if rc.get("full_vlm_split_extract", False):
-                    structured = vlm.extract_region_structured(str(image_path))
-                    vlm_calls += 1
-                else:
-                    structured = {"formulas": [], "tables": [], "figures": []}
-                # Do not silently return empty success pages.
-                if not markdown.strip():
-                    raise RuntimeError("full_vlm_no_render_recovered")
+                    raise ValueError("empty_source")
+            except Exception:
+                raise ValueError("ocr_conversion_failed") from None
         else:  # REGION_VLM
             markdown = _build_direct_markdown(page)
             structured = _normalize_structured(vlm.extract_region_structured(str(image_path)))
@@ -395,36 +269,7 @@ def process_page(
         formula_body_text = _unique_keep_order(formula_body_text)
         semantic_page_text = _append_formula_body_text(rag_page_text, [markdown, *formula_body_text])
         formula_semantic_calls = {"text": 0, "image": 0}
-        # OCR owns structure; every OCR table/formula gets its normal VLM semantic pass.
-        # This is before output validation and never loops on missing semantic fields.
-        if route_selected in {"hybrid_glm_ocr", "full_glm_ocr"}:
-            vlm_calls += _enrich_upload_semantics(
-                vlm, str(image_path), structured,
-                layout_outcome.get("payloads") if layout_driven else None,
-                bool(rc.get("vlm_ocr_enabled") and vlm.enabled and not page_semantic_attempted),
-                page_text=semantic_page_text, formula_semantic_calls=formula_semantic_calls,
-                source_store=(routing_config or {}).get("__calculation_source_store"),
-            )
-
-        elif rc.get("vlm_ocr_enabled") and vlm.enabled:
-            # Direct VLM responses may contain classification without item extraction.
-            table_payloads = (layout_outcome.get("payloads", {}).get("tables", []) if layout_driven
-                              else [{**metadata, "markdown": content} for content, metadata in
-                                    structured.get("table_metadata", {}).items()])
-            extra_calls = complete_calculation_batch(vlm, str(image_path),
-                [(item, item.get("markdown", ""), f"tables:{index}")
-                 for index, item in enumerate(table_payloads)], 1,
-                source_store=(routing_config or {}).get("__calculation_source_store"))
-            vlm_calls += extra_calls
-            if not layout_driven:
-                for item in table_payloads:
-                    structured["table_metadata"][item["markdown"]].update(
-                        {key: item[key] for key in METADATA_KEYS if key in item})
-
-        number_formulas = (layout_outcome.get("payloads", {}).get("formulas", []) if layout_driven
-                           else list((structured.get("formula_metadata") or {}).values()))
-        formula_number_ocr = _recover_formula_numbers(glm_ocr, str(image_path), number_formulas)
-        glm_calls += formula_number_ocr["calls"]
+        formula_number_ocr = {"calls": 0, "status": "not_requested"}
         cell_figures = []
         if not layout_driven:
             for content, metadata in structured.get("table_metadata", {}).items():
@@ -434,14 +279,6 @@ def process_page(
         for index, table in enumerate(image_payloads.get("tables", [])):
             if reliable_normalized_bbox(table):
                 table.setdefault("layout_id", f"p{display_page_no}-table-{index}")
-        ig, iv, image_recovery = _recover_missing_table_images(
-            image_path, Path(work_dir), image_payloads, vlm, bool(rc.get("vlm_ocr_enabled") and vlm.enabled),
-            rc["layout_recovery_max_objects"], rc["render_dpi"],
-            previous=layout_outcome.get("recovery") if layout_driven else None)
-        glm_calls += ig
-        vlm_calls += iv
-        if layout_driven:
-            layout_outcome["recovery"] = image_recovery
         if layout_driven:
             attach_object_relationships(layout_outcome["payloads"], display_page_no)
             _attach_figure_assets(image_path, layout_outcome["payloads"], display_page_no, source_dpi=rc["render_dpi"])
@@ -453,23 +290,9 @@ def process_page(
             _attach_figure_assets(image_path, {"tables": tables, "figures": cell_figures},
                                   display_page_no, source_dpi=rc["render_dpi"])
 
-        if rc.get("figure_semantic_description_required"):
-            figure_payloads = layout_outcome["payloads"] if layout_driven else {"tables": tables, "figures": cell_figures}
-            remaining = max(0, rc["layout_recovery_max_objects"] - image_recovery.get("attempted", 0))
-            vlm_calls += _recover_cell_figure_semantics(image_path, Path(work_dir), figure_payloads,
-                vlm, bool(rc.get("vlm_ocr_enabled") and vlm.enabled), remaining, rc["render_dpi"])
-
     doc.close()
 
     markdown = _rebuild_render_tables_from_structured(markdown, structured)
-    if rc.get("render_cleanup_with_llm", True) and _has_table_residual_noise(markdown) and vlm.enabled:
-        try:
-            cleaned = _clean_markdown(vlm.cleanup_markdown_table_noise(markdown))
-            if cleaned and _extract_markdown_tables(cleaned):
-                markdown = cleaned
-                vlm_calls += 1
-        except Exception as exc:
-            logger.warning("render cleanup with llm failed: %r", exc)
     markdown = _append_formula_body_text(markdown, formula_body_text)
     markdown, table_placeholders = _replace_large_tables_with_placeholders(markdown, display_page_no, rc)
     current_section = _extract_section(markdown) or (prev_context or {}).get("current_section")
@@ -575,6 +398,14 @@ def process_page(
         )
         semantic_status["reason"] = semantic_status.get("reason") or "object_semantic_fields_missing"
 
+    for table in output_elements.get("tables", []):
+        for key in ("table_kind", "table_classification", "calculation_sheet", "calculation_source", "continuation"):
+            table.pop(key, None)
+    if any(output_elements.get(group) for group in ("tables", "formulas", "figures")):
+        semantic_status["complete"] = False
+        if not semantic_status.get("reason") or semantic_status["reason"] == "object_semantic_fields_missing":
+            semantic_status["reason"] = "docs_semantics_pending"
+
     rag_obj = {
         "content": rag_content,
         "page_text": _append_formula_body_text(
@@ -600,6 +431,7 @@ def process_page(
             "reasons": reasons,
             "metrics": metrics,
             "vlm_calls": vlm_calls,
+            "physical_requests": getattr(vlm, "physical_requests", 0),
             "formula_semantic_calls": formula_semantic_calls,
             "formula_number_ocr": formula_number_ocr,
             "glm_calls": glm_calls,
@@ -1096,96 +928,6 @@ def _render_page_image(
     return out
 
 
-@timed_stage("page_processor._recover_unbound_table_regions")
-def _recover_unbound_table_regions(image_path, output_dir, outcome, vlm, enabled, limit, source_dpi):
-    """Visually verify orphan captions, then reuse object recovery before replacing any members."""
-    if not enabled or limit <= 0 or not callable(getattr(vlm, 'recognize_layout', None)):
-        return 0
-    layout = outcome.get("layout", [])
-    def caption(block):
-        text = _figure_plain_text(block.get("content"))
-        return block.get("type") == "text" and re.match(r"^(?:Table\s+[A-Za-z0-9]|表\s*[A-Za-z0-9０-９])", text, re.I)
-    candidates = []
-    for index, block in enumerate(layout):
-        if not caption(block) or not reliable_normalized_bbox(block):
-            continue
-        bound = False
-        for following in layout[index + 1:]:
-            if following.get("type") == "table":
-                b, t = block["bbox"], following.get("bbox", [])
-                bound = len(t) == 4 and b[3] <= t[1] and min(b[2], t[2]) > max(b[0], t[0])
-                break
-            if following.get("type") != "text" or caption(following):
-                break
-        if not bound:
-            candidates.append(block)
-    if not candidates:
-        return 0
-    candidates = candidates[:limit]
-    context = {"candidates": [{"layout_id": b["layout_id"], "bbox": b["bbox"],
-                              "caption": _figure_plain_text(b.get("content"))[:500]} for b in candidates],
-               "blocks": [{k: b.get(k) for k in ("layout_id", "type", "bbox")} for b in layout]}
-    diagnostics = outcome.setdefault("missing_table_recovery", {"objects": []})
-    calls = 1
-    if callable(getattr(vlm, 'calculation_work_started', None)):
-        vlm.calculation_work_started(1)
-    try:
-        response = vlm.recognize_layout(str(image_path), table_context=context)
-        regions = response.get("missing_tables") if isinstance(response, dict) else None
-        if not isinstance(regions, list) or len(regions) > len(candidates):
-            diagnostics['reason'] = 'invalid_region_response'
-            return calls
-    except Exception:
-        diagnostics['reason'] = 'region_provider_failed'
-        return calls
-    by_id = {b['layout_id']: b for b in candidates}
-    used = set()
-    for region in regions:
-        if not isinstance(region, dict):
-            continue
-        anchor = region.get('caption_layout_id')
-        bbox = region.get('bbox')
-        members = region.get('member_layout_ids')
-        valid = (isinstance(anchor, str) and anchor in by_id and anchor not in used
-                 and reliable_normalized_bbox({'bbox': bbox, 'bbox_space': 'normalized_page'})
-                 and isinstance(members, list) and all(isinstance(x, str) for x in members)
-                 and len(set(members)) == len(members) and anchor in members)
-        if not valid:
-            diagnostics['objects'].append({'reason': 'invalid_region_identity'})
-            continue
-        overlaps = []
-        for block in outcome['layout']:
-            b = block.get('bbox', [])
-            if len(b) != 4 or min(b[2], bbox[2]) <= max(b[0], bbox[0]) or min(b[3], bbox[3]) <= max(b[1], bbox[1]):
-                continue
-            overlaps.append(block)
-        if (set(members) != {b['layout_id'] for b in overlaps}
-                or any(b.get('type') not in ('text', 'formula') or not
-                    (bbox[0] <= b['bbox'][0] and bbox[1] <= b['bbox'][1]
-                     and bbox[2] >= b['bbox'][2] and bbox[3] >= b['bbox'][3]) for b in overlaps)
-                or any(caption(b) and b['layout_id'] != anchor for b in overlaps)):
-            diagnostics['objects'].append({'caption_layout_id': anchor, 'reason': 'region_overlap_or_members_mismatch'})
-            continue
-        entry = {**by_id[anchor], 'layout_id': anchor + '-table-region', 'type': 'table',
-                 'bbox': bbox, 'status': 'FAILED', 'content': '', 'absorbed_layout_ids': members,
-                 'title': _figure_plain_text(by_id[anchor].get('content')).splitlines()[0]}
-        temporary = {'layout': [entry], 'payloads': {'tables': [], 'formulas': [], 'figures': []}}
-        if callable(getattr(vlm, 'calculation_work_started', None)):
-            vlm.calculation_work_started(2)
-        _, extra, detail = _recover_layout_objects(image_path, output_dir, temporary, [entry], vlm,
-            True, 1, padding_ratio=0, source_dpi=source_dpi, max_model_calls=2)
-        calls += extra
-        diagnostics['objects'].extend(detail['objects'])
-        if entry['status'] != 'EXTRACTED':
-            continue
-        used.add(anchor)
-        outcome['layout'] = sorted([b for b in outcome['layout'] if b['layout_id'] not in members] + [entry],
-                                  key=lambda b: b['reading_order'])
-        for collection, values in outcome['payloads'].items():
-            if isinstance(values, list):
-                outcome['payloads'][collection] = [v for v in values if v.get('layout_id') not in members]
-        outcome['payloads']['tables'].extend(temporary['payloads']['tables'])
-    return calls
 
 
 @timed_stage("page_processor._recover_layout_objects")
@@ -2268,8 +2010,7 @@ def _semantic_status(
             else:
                 reason = fallback_reason or "table_extraction_unavailable"
     if (
-        rc.get("figure_semantic_description_required")
-        and metrics.get("has_meaningful_figures")
+        metrics.get("has_meaningful_figures")
         and not structured.get("figures")
     ):
         missing.append("figure_description")
@@ -2341,63 +2082,6 @@ def _set_object_semantics(item: Dict[str, Any], metadata: Dict[str, Any], name_k
     validate_descriptions(item, language)
 
 
-def _recover_formula_numbers(ocr: Any, image_path: str, formulas: list[Dict[str, Any]]) -> Dict[str, Any]:
-    def missing():
-        return [{"layout_id": f.get("layout_id"), "missing_fields": ["formula_no"]}
-                for f in formulas if not f.get("formula_no")]
-    stats = {"calls": 0, "status": "not_needed", "missing_objects": missing()}
-    if not stats["missing_objects"]:
-        return stats
-    if not getattr(ocr, "supports_number_ocr", False):
-        stats["status"] = "unavailable"
-        return stats
-    try:
-        pix = fitz.Pixmap(image_path)
-        width, height = pix.width, pix.height
-        stats["calls"] = 1
-        data = ocr.extract_number_lines(image_path)
-        candidates: Dict[int, list[str]] = {}
-        for row in data.get("words_result") or []:
-            if not isinstance(row, dict):
-                continue
-            text = str(row.get("words") or "").strip()
-            # Require an equation-line suffix, never a prose reference or a number alone.
-            match = re.search(r"[（(]\s*([A-Za-z]?\s*[-.]?\s*\d+(?:\s*[-.]\s*\d+)*)\s*[）)]$", text)
-            if not match or re.search(r"[\u4e00-\u9fff]", text[:match.start()]):
-                continue
-            prefix = text[:match.start()]
-            if "=" not in prefix and re.sub(r"[\s.…·_—-]", "", prefix):
-                continue
-            loc = row.get("location") or {}
-            values = [loc.get(k) for k in ("left", "top", "width", "height")]
-            if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in values):
-                continue
-            left, top, w, h = values
-            if w <= 0 or h <= 0 or left < 0 or top < 0 or left+w > width or top+h > height:
-                continue
-            matches = []
-            for i, formula in enumerate(formulas):
-                box = formula.get("bbox") or []
-                if len(box) != 4:
-                    continue
-                x0, y0, x1, y1 = box[0]*width, box[1]*height, box[2]*width, box[3]*height
-                overlap = min(top+h, y1) - max(top, y0)
-                if left+w > x1 and y1 > y0 and overlap >= .5 * min(h, y1-y0):
-                    matches.append(i)
-            if len(matches) == 1:
-                candidates.setdefault(matches[0], []).append(re.sub(r"\s+", "", match.group(1)))
-        for i, numbers in candidates.items():
-            number = numbers[0]
-            if (not formulas[i].get("formula_no") and len(set(numbers)) == 1
-                    and sum(number in values for values in candidates.values()) == 1
-                    and not any(f.get("formula_no") == number for f in formulas)):
-                formulas[i]["formula_no"] = number
-        stats["status"] = "completed"
-    except Exception as exc:
-        stats["status"] = "failed"
-        stats["error_type"] = type(exc).__name__
-    stats["missing_objects"] = missing()
-    return stats
 
 
 def _merge_table_image_metadata(table: Dict[str, Any], candidate: Dict[str, Any]) -> None:
@@ -2434,130 +2118,6 @@ def _merge_table_image_metadata(table: Dict[str, Any], candidate: Dict[str, Any]
                     target[key] = cell[key]
 
 
-@timed_stage("page_processor._enrich_upload_semantics")
-def _enrich_upload_semantics(
-    vlm: DynamicVLMClient, image_path: str, structured: Dict[str, Any],
-    payloads: Optional[Dict[str, Any]], enabled: bool,
-    page_text: str = "", formula_semantic_calls: Optional[Dict[str, int]] = None, source_store=None,
-) -> int:
-    targets = []
-    destinations = {}
-    for collection, content_key, metadata_key in (
-        ("tables", "markdown", "table_metadata"), ("formulas", "latex", "formula_metadata")
-    ):
-        values = (payloads.get(collection) if payloads is not None else structured.get(collection)) or []
-        for index, value in enumerate(values):
-            if payloads is not None:
-                metadata = value
-                content = str(value.get(content_key) or "")
-            else:
-                content = str(value)
-                metadata = structured.setdefault(metadata_key, {}).setdefault(content, {})
-            if collection == "formulas" and _number_only(str(metadata.get("formula_name") or "")):
-                metadata["formula_no"] = metadata.get("formula_no") or metadata["formula_name"]
-                metadata["formula_name"] = ""
-            ref = f"{collection}:{index}"
-            target = {key: metadata[key] for key in (
-                "layout_id", "bbox", "bbox_space", "title", "formula_name", "formula_no", "variables", "context"
-            ) if metadata.get(key) is not None}
-            target.update({"object_ref": ref, "type": collection[:-1], content_key: content})
-            if collection == "tables":
-                # Prior generated context is not source evidence for classification.
-                target.pop("context", None)
-                target["calculation_source"] = source_context(content, evidence=True, source_title=metadata.get("title"))
-            targets.append(target)
-            destinations[ref] = (collection, content, metadata)
-            # OCR descriptions are not evidence of a completed VLM semantic pass.
-            metadata.pop("description", None)
-            metadata.pop("semantic_confidence", None)
-            metadata.pop("semantic_confidence_source", None)
-            if collection == "formulas":
-                structured.setdefault("formula_descriptions", {}).pop(content, None)
-    if not targets or not enabled:
-        return 0
-
-    def merge(response: Any, allowed_targets: list[Dict[str, Any]]) -> None:
-        if not isinstance(response, dict):
-            return
-        allowed_refs = {target["object_ref"] for target in allowed_targets}
-        for collection in ("tables", "formulas"):
-            candidates = response.get(collection) or []
-            if not isinstance(candidates, list):
-                continue
-            refs = [item.get("object_ref") for item in candidates if isinstance(item, dict)]
-            for candidate in candidates:
-                if not isinstance(candidate, dict):
-                    continue
-                ref = candidate.get("object_ref")
-                if not isinstance(ref, str) or ref not in allowed_refs or refs.count(ref) != 1:
-                    continue
-                expected_collection, content, metadata = destinations[ref]
-                if collection != expected_collection:
-                    continue
-                if candidate.get("layout_id") and candidate["layout_id"] != metadata.get("layout_id"):
-                    continue
-                for key in ("title", "formula_name", "formula_no", "description", "variables", "context"):
-                    value = candidate.get(key)
-                    if isinstance(value, str) and value.strip():
-                        if key in {"title", "formula_name", "formula_no"} and metadata.get(key):
-                            continue
-                        metadata[key] = value.strip()
-                if collection == "tables":
-                    _merge_table_image_metadata(metadata, candidate)
-                    apply_calculation_sheet(metadata, candidate, content, getattr(vlm, "description_language", "unknown"))
-                # Confidence describes this response, not an earlier text attempt.
-                metadata.pop("semantic_confidence", None)
-                metadata.pop("semantic_confidence_source", None)
-                _copy_semantic_confidence(metadata, candidate)
-                if collection == "formulas" and metadata.get("description"):
-                    structured.setdefault("formula_descriptions", {})[content] = metadata["description"]
-
-    calls = 0
-    table_targets = [target for target in targets if target["type"] == "table"]
-    formula_targets = [target for target in targets if target["type"] == "formula"]
-    table_calls = 0
-    if table_targets and calculation_budget(vlm) > 0:
-        calls += 1
-        table_calls += 1
-        try:
-            response = vlm.extract_region_structured(image_path, semantic_objects=table_targets)
-            if getattr(vlm, "last_call_info", {}).get("finish_reason") not in {"length", "content_filter", "tool_calls"}:
-                merge(response, table_targets)
-            else:
-                for target in table_targets:
-                    _, content, metadata = destinations[target['object_ref']]
-                    classification_failed(metadata, 'table_classification_response_incomplete', content)
-        except Exception as exc:
-            logger.warning("upload table semantics unavailable: error_type=%s", type(exc).__name__)
-            for target in table_targets:
-                _, content, metadata = destinations[target['object_ref']]
-                classification_failed(metadata, 'source_image_unavailable' if isinstance(exc, FileNotFoundError)
-                                      else 'calculation_provider_failed', content)
-    calls += complete_calculation_batch(vlm, image_path,
-        [(destinations[target['object_ref']][2], destinations[target['object_ref']][1], target['object_ref'])
-         for target in table_targets], table_calls, source_store=source_store)
-    if formula_targets:
-        calls += 1
-        if formula_semantic_calls is not None:
-            formula_semantic_calls["text"] += 1
-        try:
-            merge(vlm.describe_formulas_text(page_text, formula_targets), formula_targets)
-        except Exception as exc:
-            logger.warning("upload formula text semantics unavailable: error_type=%s", type(exc).__name__)
-        failed = []
-        for target in formula_targets:
-            metadata = destinations[target["object_ref"]][2]
-            if not _valid_description(metadata.get("description"), str(metadata.get("formula_name") or "")):
-                failed.append({**target, **{key: metadata[key] for key in ("formula_name", "formula_no") if metadata.get(key)}})
-        if failed:
-            calls += 1
-            if formula_semantic_calls is not None:
-                formula_semantic_calls["image"] += 1
-            try:
-                merge(vlm.extract_region_structured(image_path, semantic_objects=failed), failed)
-            except Exception as exc:
-                logger.warning("upload formula image semantics unavailable: error_type=%s", type(exc).__name__)
-    return calls
 
 
 def _append_formula_body_text(text: str, fragments: list[str]) -> str:
@@ -3931,40 +3491,6 @@ def _attach_figure_assets(image_path, payloads, page_no, source_dpi=150):
             table["manualReviewRequired"] = True
 
 
-@timed_stage("page_processor._recover_cell_figure_semantics")
-def _recover_cell_figure_semantics(image_path, output_dir, payloads, vlm, enabled, limit, source_dpi):
-    """Run late-created cell figures through the existing identity-bound object recovery."""
-    figures = [figure for figure in payloads.get("figures", [])
-               if figure.get("cell_image_source") and not _figure_plain_text(figure.get("description"))
-               and reliable_normalized_bbox(figure)]
-    if not figures:
-        return 0
-    blocks = [{**figure, "type": "figure", "status": "FAILED", "reading_order": index}
-              for index, figure in enumerate(figures)]
-    outcome = {"layout": blocks, "payloads": {"figures": [dict(figure) for figure in figures]}}
-    if enabled and limit > 0 and callable(getattr(vlm, 'calculation_work_started', None)):
-        vlm.calculation_work_started(2 * min(len(figures), limit))
-    _, calls, diagnostics = _recover_layout_objects(image_path, output_dir, outcome, blocks, vlm,
-        enabled, limit, padding_ratio=0, source_dpi=source_dpi, max_model_calls=2 * limit)
-    recovered = {figure["layout_id"]: figure for figure in outcome["payloads"]["figures"]}
-    for figure, diagnostic in zip(figures, diagnostics["objects"]):
-        figure["semantic_recovery"] = diagnostic
-        candidate = recovered[figure["layout_id"]]
-        if diagnostic["outcome"] == "recovered":
-            for key in ("description", "caption", "source", "semantic_reason"):
-                if key in candidate:
-                    figure[key] = candidate[key]
-            figure.pop("content_status", None)
-            figure["semantic_status"] = "complete"
-            figure["missing_fields"] = []
-        else:
-            parent = figure["cell_image_source"]["table_layout_id"]
-            for table in payloads.get("tables", []):
-                if table.get("layout_id") == parent:
-                    table.setdefault("image_unresolved", []).append({
-                        "reason": "missing_cell_image_semantics", "layout_id": figure["layout_id"]})
-                    table["manualReviewRequired"] = True
-    return calls
 
 
 def _attach_cell_image_figures(payloads, page_no):
