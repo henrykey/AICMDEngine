@@ -2464,7 +2464,7 @@ def _enrich_upload_semantics(
             if collection == "tables":
                 # Prior generated context is not source evidence for classification.
                 target.pop("context", None)
-                target["calculation_source"] = source_context(content)
+                target["calculation_source"] = source_context(content, evidence=True, source_title=metadata.get("title"))
             targets.append(target)
             destinations[ref] = (collection, content, metadata)
             # OCR descriptions are not evidence of a completed VLM semantic pass.
@@ -2773,6 +2773,8 @@ def _normalize_structured(value: Any) -> Dict[str, Any]:
         _copy_semantic_confidence(metadata, item if isinstance(item, dict) else {})
         if isinstance(item, dict) and "table_classification" not in item:
             apply_calculation_sheet(metadata, item, table_value)
+        if isinstance(item, dict) and "table_classification" in item and item.get("table_kind") != "calculation_sheet":
+            metadata["table_kind"] = "data_table"
         for key in (
             *METADATA_KEYS,
             "columns",
@@ -2794,7 +2796,9 @@ def _normalize_structured(value: Any) -> Dict[str, Any]:
             metadata['table_kind_source'] = 'automatic'
         if 'continuation' in metadata:
             # Generic model output has no validated Membership identity/context.
-            metadata['continuation'] = {'status': 'pending', 'reason': 'adjacent_context_required'}
+            metadata['continuation'] = ({'status': 'pending', 'reason': 'adjacent_context_required'}
+                                        if metadata.get('table_kind') == 'calculation_sheet'
+                                        else {'status': 'none', 'reason': 'data_table_default'})
         if metadata:
             for table in normalized_tables:
                 table_metadata[table] = metadata

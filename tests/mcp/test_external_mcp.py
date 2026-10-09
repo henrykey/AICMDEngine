@@ -574,3 +574,17 @@ class TestExternalMCPIntegration:
             pass  # 预期会失败
         finally:
             await mcp.close()
+
+@pytest.mark.parametrize('timeout,expected', [(30,25000), (600,60000)])
+def test_calculation_wait_respects_transport_timeout_and_keeps_logs_quiet(timeout, expected, caplog):
+    server = ExternalMCPServer('pdf2md-enhanced', transport='http', url='http://localhost:9010', timeout=timeout)
+    args = {'routing_config': {'calculation_poll': True, 'calculation_wait_ms': 60000}}
+    async def send(request):
+        assert request['params']['arguments']['routing_config']['calculation_wait_ms'] == expected
+        return {'result': {'content': [{'type': 'text', 'text': '{"status":"processing"}'}]}}, None
+    server._send_http_request = send
+    with caplog.at_level(logging.INFO):
+        result = asyncio.run(server._execute_tool_http('process_task_page', args))
+    assert not result.is_error
+    assert args['routing_config']['calculation_wait_ms'] == 60000
+    assert not any('Executing HTTP tool' in r.message or 'result length' in r.message for r in caplog.records)

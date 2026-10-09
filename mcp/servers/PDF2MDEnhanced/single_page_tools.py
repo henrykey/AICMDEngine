@@ -3,7 +3,7 @@ from __future__ import annotations
 from .calculation_sheet import (
     METADATA_KEYS, apply_calculation_sheet, classification_prompt,
     source_context, table_content_quality, complete_calculation_batch, calculation_budget,
-    classification_failed,
+    classification_failed, calculation_transcription_quality,
 )
 
 from .semantic_language import detect_description_language, normalize_language, validate_descriptions
@@ -137,7 +137,7 @@ def _process_calculation_request(context, hint, mode, describe, vlm_config, lang
         return result_for(item, reason="classification_not_run")
     try:
         vlm = DynamicVLMClient({**(vlm_config or {}), "description_language": language,
-                                "_calculation_processing": mode})
+                                "_calculation_processing": "transcription" if request.get("stage") == "transcription" else mode})
     except Exception as exc:
         return result_for(item, reason='invalid_physical_model_budget' if isinstance(exc, ValueError)
                           and str(exc) == 'invalid_physical_model_budget' else "calculation_provider_unavailable")
@@ -149,8 +149,11 @@ def _process_calculation_request(context, hint, mode, describe, vlm_config, lang
     if block_mode not in ('whole', 'blocks'):
         return result_for(item, reason='invalid_calculation_transcription_mode')
     block_manifest = None
+    source_quality = {}
+    whole_ocr_calls = 0
+    quality_calls = 0
     def transcribe(image, target):
-        nonlocal block_manifest
+        nonlocal block_manifest, source_quality, whole_ocr_calls, quality_calls
         # One bounded OCR request; no automatic VLM fallback on failure.
         cfg = dict((ocr_config or {}).get('glm_ocr') or {})
         cfg.update(max_retries=0)
@@ -159,23 +162,54 @@ def _process_calculation_request(context, hint, mode, describe, vlm_config, lang
             raise ValueError('calculation_ocr_unavailable')
         if isinstance(image, list):
             raise ValueError('calculation_ocr_single_image_required')
-        if block_mode == 'blocks':
+        def recover_blocks():
+            nonlocal block_manifest
             from .calculation_blocks import BudgetedCalculationOcr, transcribe_calculation_blocks
             with vlm.calculation_scope():
-                text, block_manifest = transcribe_calculation_blocks(image, [0, 0, 1, 1],
-                    BudgetedCalculationOcr(ocr, vlm), Path(image).parent / 'calculation_blocks', vlm=vlm)
-            # This request already supplies an object crop. Never claim page coordinates.
+                replacement, block_manifest = transcribe_calculation_blocks(image, [0, 0, 1, 1],
+                    BudgetedCalculationOcr(ocr, vlm), Path(image).parent / 'calculation_blocks', vlm=vlm,
+                    review_evidence=source_quality.get('evidence'))
+            # The caller supplies an object crop, not a full page.
             for block in block_manifest['blocks']:
                 block['bbox_space'] = 'normalized_object'
+            return replacement
+        if block_mode == 'blocks':
+            text = recover_blocks()
             if text is not None:
                 vlm.last_call_info = {}
                 return {**target, 'source_text': text}
         from .calculation_blocks import BudgetedCalculationOcr
         with vlm.calculation_scope():
+            whole_ocr_calls += 1
             result = BudgetedCalculationOcr(ocr, vlm).extract_page(image)
         text = result.markdown or result.page_text
         if not isinstance(text, str) or not text.strip():
             raise ValueError('calculation_transcription_empty')
+        source_quality = calculation_transcription_quality(text)
+        if block_manifest is None and not source_quality and vlm.enabled:
+            from .calculation_sheet import source_context
+            source_quality = {'status': 'uncertain', 'evidence': ['content_review_unavailable']}
+            try:
+                vlm.reserve_automatic_calculation_calls(1)
+                quality_calls += 1
+                reviewed = vlm.extract_region_structured(image, semantic_objects=[{
+                    'object_ref': 'tables:0', 'type': 'table', 'markdown': text,
+                    'bbox': [0, 0, 1, 1], 'bbox_space': 'normalized_object',
+                    'calculation_source': source_context(text, evidence=True)}])
+                candidates = [entry for entry in reviewed.get('tables', [])
+                              if isinstance(entry, dict) and entry.get('object_ref') == 'tables:0']
+                quality = candidates[0].get('transcription_quality') if len(candidates) == 1 else None
+                if (isinstance(quality, dict) and quality.get('status') in
+                        ('reliable', 'uncertain', 'missing', 'truncated', 'misaligned', 'incomplete')
+                        and isinstance(quality.get('evidence'), list)):
+                    source_quality = calculation_transcription_quality(text, quality)
+            except Exception:
+                # A failed quality review must not discard usable OCR source.
+                pass
+        if block_manifest is None and source_quality.get('status') in ('missing', 'truncated', 'misaligned', 'incomplete'):
+            replacement = recover_blocks()
+            if replacement is not None:
+                text = replacement
         vlm.last_call_info = {}
         return {**target, 'source_text': text}
     if calculation_budget(vlm) == 0:
@@ -239,13 +273,20 @@ def _process_calculation_request(context, hint, mode, describe, vlm_config, lang
             except Exception:
                 return result_for(item, reason="source_image_unavailable")
     table = result['items'][0]
-    if block_manifest is not None:
-        table.setdefault('calculation_source', {})['block_transcription'] = block_manifest
-        count = block_manifest['logical_calls'] + (0 if block_manifest['status'] == 'complete' else 1)
+    if source_quality:
+        table.setdefault('calculation_source', {})['transcription_quality'] = source_quality
+    if block_manifest is not None or quality_calls:
+        source = table.setdefault('calculation_source', {})
+        if block_manifest is not None:
+            source['block_transcription'] = block_manifest
+            source['layout_status'] = 'logical_reordered' if block_manifest['status'] == 'complete' else 'needs_review'
+        ocr_count = whole_ocr_calls + (block_manifest or {}).get('logical_calls', 0)
+        vlm_count = quality_calls + (block_manifest or {}).get('vlm_calls', 0)
         previous_count = result.get('model_calls', {}).get('glm_ocr', 0)
-        result.setdefault('model_calls', {})['glm_ocr'] = count
-        result.setdefault('budget', {})['logical_calls'] = result.get('budget', {}).get('logical_calls', 0) + count - previous_count
-        table['calculation_source'].setdefault('pipeline', {}).setdefault('transcription', {})['logical_calls'] = count
+        result.setdefault('model_calls', {})['glm_ocr'] = ocr_count
+        result['model_calls']['vlm_ocr'] = result['model_calls'].get('vlm_ocr', 0) + vlm_count
+        result.setdefault('budget', {})['logical_calls'] = result.get('budget', {}).get('logical_calls', 0) + ocr_count + vlm_count - previous_count
+        source.setdefault('pipeline', {}).setdefault('transcription', {})['logical_calls'] = ocr_count + vlm_count
     if table.get('table_kind') == 'data_table' and table.get('markdown') and result['status'] != 'failed':
         table.update(_normalize_table_contract(table['markdown'], 'structured_json'))
         table.pop('lookup_status', None)
@@ -2152,7 +2193,7 @@ def _prompt_table_metadata(items: List[Dict[str, Any]], page_text: str, descript
                 "index": idx,
                 "bbox": item.get("bbox"),
                 "bbox_space": item.get("bbox_space"),
-                "calculation_source": source_context(str(item.get("raw_html") or item.get("markdown") or "")),
+                "calculation_source": source_context(str(item.get("raw_html") or item.get("markdown") or ""), evidence=True, source_title=item.get("title")),
                 "existing_title": str(item.get("title") or "")[:120],
                 "columns": [str(col) for col in columns[:12]],
                 "sample_rows": rows[:3],

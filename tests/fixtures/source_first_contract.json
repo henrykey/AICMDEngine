@@ -1,0 +1,120 @@
+{
+  "contract_version": 1,
+  "optional_json_fixture": "calculation_processing_contract.json",
+  "cases": [
+    {
+      "name": "whole_markdown",
+      "payload": {
+        "table_id": "t1",
+        "layout_id": "layout-1",
+        "table_kind": "calculation_sheet",
+        "content_format": "markdown",
+        "semantic_desc": "Force check under positive pressure.",
+        "lookup_status": "unavailable",
+        "calculation_source": {
+          "original_content": "## Check\n\nWhen $p>0$, $F=pA$.\n\nNote: use area A.",
+          "format": "markdown",
+          "content_sha256": "65d4337a0b8289c252c86fa473c7f209de321e67ea890fd41311e8ecfd63d191",
+          "layout_status": "original",
+          "quality_status": "needs_review",
+          "semantic_status": "available",
+          "pipeline": {
+            "semantic": {
+              "status": "not_requested"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "whole_html",
+      "payload": {
+        "table_id": "t1",
+        "layout_id": "layout-1",
+        "table_kind": "calculation_sheet",
+        "content_format": "html",
+        "semantic_desc": "Force check under positive pressure.",
+        "lookup_status": "unavailable",
+        "calculation_source": {
+          "original_content": "<table><tr><th colspan=\"2\">Check</th></tr><tr><td>$p>0$</td><td>$F=pA$</td></tr></table>",
+          "format": "html",
+          "content_sha256": "cbdeb1c9c820bf843a5f4cf28da04844ec20884ceeb3a8dfc5e5c64070db9608",
+          "layout_status": "original",
+          "quality_status": "needs_review",
+          "semantic_status": "available",
+          "pipeline": {
+            "semantic": {
+              "status": "not_requested"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "logical_reordered",
+      "payload": {
+        "table_id": "t1",
+        "layout_id": "layout-1",
+        "table_kind": "calculation_sheet",
+        "content_format": "markdown",
+        "semantic_desc": "Force check under positive pressure.",
+        "lookup_status": "unavailable",
+        "calculation_source": {
+          "original_content": "## Check\n\nWhen $p>0$:\n\n$F=pA$.\n\nNote: use area A.",
+          "format": "markdown",
+          "content_sha256": "67012cf3ab73165a8af60c48f5b6faaaf6751ddfc458a0bde8d81d7d8da33681",
+          "layout_status": "logical_reordered",
+          "quality_status": "needs_review",
+          "semantic_status": "available",
+          "pipeline": {
+            "semantic": {
+              "status": "not_requested"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "partial",
+      "payload": {
+        "table_id": "t1",
+        "layout_id": "layout-1",
+        "table_kind": "calculation_sheet",
+        "content_format": "markdown",
+        "semantic_desc": "",
+        "lookup_status": "unavailable",
+        "calculation_source": {
+          "original_content": "## Check\n\n$p>0$\n\nUnclear relation: review source image.",
+          "format": "markdown",
+          "content_sha256": "a43ea86e44c062f884e1c2773ed07dd59d2cd6323f731cb868f727f717b44043",
+          "layout_status": "needs_review",
+          "quality_status": "needs_review",
+          "semantic_status": "missing",
+          "pipeline": {
+            "semantic": {
+              "status": "not_requested"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "ordinary_table",
+      "payload": {
+        "table_id": "t1",
+        "table_kind": "data_table",
+        "columns": [
+          "Name",
+          "Value"
+        ],
+        "raw_array": [
+          [
+            "A",
+            "2"
+          ]
+        ],
+        "semantic_desc": "Parameter values."
+      }
+    }
+  ]
+}

@@ -1007,7 +1007,17 @@ class ExternalMCPServer(BaseMCPServer):
                 }
             }
 
-            logger.info(f"Executing HTTP tool '{tool_name}'")
+            waiting = (self.name == "pdf2md-enhanced" and tool_name == "process_task_page"
+                       and arguments.get("routing_config", {}).get("calculation_poll") is True)
+            if waiting:
+                arguments = dict(arguments)
+                routing = dict(arguments.get("routing_config") or {})
+                # Leave transport headroom even for endpoints configured below 60s.
+                routing["calculation_wait_ms"] = min(int(routing.get("calculation_wait_ms", 0)),
+                                                     max(0, int((self.timeout - 5) * 1000)))
+                arguments["routing_config"] = routing
+                request["params"]["arguments"] = arguments
+            (logger.debug if waiting else logger.info)("Executing HTTP tool '%s'", tool_name)
 
             # 根据协议模式选择发送方式
             if self.sse_mode:
@@ -1070,7 +1080,7 @@ class ExternalMCPServer(BaseMCPServer):
                     )
                     return ToolResult.error(embedded_error, error_code="TOOL_ERROR")
 
-                logger.info(
+                logger.debug(
                     "Tool '%s' result length: %s characters",
                     tool_name,
                     len(combined_text),

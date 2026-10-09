@@ -341,7 +341,9 @@ class MCPProtocolHandler:
                     or identity.get("tenant_id") != str(tenant_id)):
                 raise ValueError("source_identity_tenant_mismatch")
 
-        logger.info(f"Executing tool: {mcp_name}.{tool_name}")
+        waiting = (mcp_name == "pdf2md-enhanced" and tool_name == "process_task_page"
+                   and arguments.get("routing_config", {}).get("calculation_poll") is True)
+        (logger.debug if waiting else logger.info)("Executing tool: %s.%s", mcp_name, tool_name)
 
         # ===== Membership API 推送的系统服务 token 处理 =====
         # 如果 Membership API 推送了 system_service_token，缓存到 MembershipMCPServer
@@ -355,7 +357,7 @@ class MCPProtocolHandler:
                 # Issue #3 fix: Validate tenant claims consistency before caching
                 if self._validate_system_token_claims(system_service_token, pushed_tenant_id):
                     membership_mcp._audit_system_tokens[pushed_tenant_id] = system_service_token
-                    logger.info(
+                    logger.debug(
                         f"Cached system service token for tenant {pushed_tenant_id} "
                         f"(pushed by Membership API, 24h validity, claims validated)"
                     )

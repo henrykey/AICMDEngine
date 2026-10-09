@@ -122,7 +122,7 @@ class BudgetedCalculationOcr:
         return self._call(self.ocr.parse_layout, path)
 
 
-def transcribe_calculation_blocks(image_path, bbox, ocr, directory, dpi=300, layout=None, vlm=None):
+def transcribe_calculation_blocks(image_path, bbox, ocr, directory, dpi=300, layout=None, vlm=None, review_evidence=None):
     from PIL import Image
     from .page_processor import _crop_layout_block_image
     from .layout_ledger import build_layout_outcome
@@ -173,6 +173,7 @@ def transcribe_calculation_blocks(image_path, bbox, ocr, directory, dpi=300, lay
             # Full-image context lets VLM recover content beyond a clipped OCR box.
             result = vlm.calculation_sections(str(image_path), target_bbox=bbox)
             proposed, regions = normalize_calculation_regions(result, image.size)
+            manifest.update(proposed_bbox=proposed, proposed_sections=regions)
             intersection = max(0,min(bbox[2],proposed[2])-max(bbox[0],proposed[0])) * max(0,min(bbox[3],proposed[3])-max(bbox[1],proposed[1]))
             area = lambda b: (b[2]-b[0])*(b[3]-b[1])
             if intersection / area(bbox) < .8 or area(proposed) > 2*area(bbox):
@@ -190,21 +191,32 @@ def transcribe_calculation_blocks(image_path, bbox, ocr, directory, dpi=300, lay
             known = {'section_response_truncated', 'section_response_invalid', 'unknown_coordinate_space',
                      'invalid_section_geometry', 'section_target_mismatch', 'section_target_overlap'}
             manifest['reason'] = str(exc) if type(exc) is ValueError and str(exc) in known else 'section_detection_failed'
-            return None, manifest
+            boxes = []
     else:
         manifest['layout_source'] = 'ocr'
-    if not boxes:
+    if not boxes or any(boundary_intersects_content(image, box) for box in boxes):
+        if boxes or manifest['layout_reason'] == 'block_boundary_intersects_content':
+            manifest['reason'] = 'block_boundary_intersects_content'
         if clipped:
             manifest['reason'] = 'object_boundary_intersects_content'
-        elif manifest['layout_reason'] == 'block_boundary_intersects_content':
-            manifest['reason'] = 'block_boundary_intersects_content'
-        return None, manifest
+        if (clipped or vlm is None or not vlm.enabled
+                or not callable(getattr(vlm, 'transcribe_calculation_block', None))):
+            return None, manifest
+        # Ignore untrusted proposed regions; recover the caller's safe original object once.
+        manifest.update(mode='whole_recovery', recovery_reason=manifest['reason'])
+        effective = list(bbox)
+        boxes = [effective]
     manifest['effective_bbox'] = effective
-    if any(boundary_intersects_content(image, box) for box in boxes):
-        manifest['reason'] = 'block_boundary_intersects_content'
-        return None, manifest
     use_vlm = vlm is not None and vlm.enabled
     manifest['engine'] = 'vlm_blocks' if use_vlm else 'glm_ocr_blocks'
+    context_crop = None
+    if use_vlm and manifest['mode'] == 'blocks':
+        try:
+            context_crop, _ = _crop_layout_block_image(Path(image_path), {'bbox': effective}, directory,
+                                                       padding_ratio=0, source_dpi=dpi, max_dpi=None)
+        except Exception:
+            manifest['reason'] = 'object_crop_failed'
+            return None, manifest
     chunks = []
     for index, box in enumerate(boxes):
         block = {'id': f'b{index+1}', 'bbox': box, 'bbox_space': 'normalized_page', 'status': 'pending'}
@@ -217,7 +229,9 @@ def transcribe_calculation_blocks(image_path, bbox, ocr, directory, dpi=300, lay
             if use_vlm:
                 vlm.reserve_automatic_calculation_calls(1)
                 manifest['vlm_calls'] += 1
-                text = vlm.transcribe_calculation_block(str(crop))
+                text = vlm.transcribe_calculation_block(str(crop), logical_reorder=True,
+                    **({'context_image': str(context_crop)} if context_crop else {}),
+                    **({'review_evidence': review_evidence} if review_evidence else {}))
             else:
                 manifest['logical_calls'] += 1
                 result = ocr.extract_page(str(crop))

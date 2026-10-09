@@ -72,20 +72,16 @@ def test_invalid_or_exhausted_budget_is_explicit(budget):
     assert not vlm.calls
 
 
-def test_joint_review_recovers_starting_type_and_never_copies_previous_content():
-    req = request(); obj = adjacent(req)
+def test_uncertain_type_does_not_start_joint_review():
+    req = request(); adjacent(req)
     first = response(req['identity'], kind='uncertain')
-    second = response(req['identity']); second['continuation'] = {'status': 'proposed', 'predecessor': obj['identity']}
-    second['reviewed_objects'] = [{'identity': obj['identity'], 'table_kind': 'calculation_sheet',
-                                  'classification_evidence': [obj['source_text']]}]
-    vlm = Provider(first, second)
+    vlm = Provider(first)
     out = cp.process_request(req, 'auto', 'auto', vlm, 'current.png', ['previous.png'])
-    assert out['table_kind'] == 'calculation_sheet'
-    assert out['continuation']['predecessor'] == obj['identity']
-    assert out['continuation']['reviewed_objects'][0]['table_kind'] == 'calculation_sheet'
-    assert 'previous page' not in json.dumps(out['calculation_sheet'])
-    assert vlm.calls[1][0] == ['current.png', 'previous.png']
-    assert out['budget']['logical_calls'] == 2
+    assert out['table_kind'] == 'data_table'
+    assert out['markdown'] == first['source_text']
+    assert out['continuation']['status'] == 'none'
+    assert 'calculation_sheet' not in out
+    assert len(vlm.calls) == out['budget']['logical_calls'] == 1
 
 
 def test_different_table_number_does_not_link_even_when_model_proposes_it():
@@ -96,14 +92,15 @@ def test_different_table_number_does_not_link_even_when_model_proposes_it():
                   reviewed_objects=[{'identity': obj['identity'], 'table_kind': 'calculation_sheet',
                                      'classification_evidence': [obj['source_text']]}])
     out = cp.process_request(req, 'auto', 'auto', Provider(first, second), 'current', ['prev'])
-    assert out['continuation']['status'] == 'conflict'
+    assert out['continuation']['status'] == 'none'
+    assert out['budget']['logical_calls'] == 1
     assert 'predecessor' not in out['continuation']
 
 
 def test_context_request_is_pending_without_hidden_retry():
     req = request(); first = response(req['identity'], kind='uncertain'); vlm = Provider(first)
     out = cp.process_request(req, 'auto', 'auto', vlm, 'image')
-    assert out['continuation']['reason'] == 'adjacent_context_required'
+    assert out['continuation']['reason'] == 'data_table_default'
     assert len(vlm.calls) == 1
 
 
@@ -111,7 +108,7 @@ def test_joint_review_shares_budget():
     req = request(); adjacent(req); vlm = Provider(response(req['identity'], kind='uncertain'))
     vlm.table_analysis_max_model_calls = 1
     out = cp.process_request(req, 'auto', 'auto', vlm, 'image', ['previous'])
-    assert out['continuation']['reason'] == 'table_analysis_budget_exhausted'
+    assert out['continuation']['reason'] == 'data_table_default'
     assert len(vlm.calls) == 1
 
 
@@ -195,9 +192,10 @@ def test_forward_context_can_recover_start_and_propose_next_page_link():
         'classification_evidence': [obj['source_text']],
         'continuation': {'status': 'proposed', 'predecessor': req['identity']}}]
     out = cp.process_request(req, 'auto', 'auto', Provider(first, second), 'start', ['following'])
-    assert out['table_kind'] == 'calculation_sheet'
+    assert out['table_kind'] == 'data_table'
     assert out['continuation']['status'] == 'none'
-    assert out['continuation']['reviewed_objects'][0]['continuation']['predecessor'] == req['identity']
+    assert out['budget']['logical_calls'] == 1
+    assert 'reviewed_objects' not in out['continuation']
 
 
 @pytest.mark.parametrize('mutation', ['self', 'foreign', 'duplicate'])
@@ -209,8 +207,9 @@ def test_untrusted_joint_identity_fails_closed(mutation):
     if mutation == 'duplicate':
         second['reviewed_objects'] = [{'identity': obj['identity']}, {'identity': obj['identity']}]
     out = cp.process_request(req, 'auto', 'auto', Provider(response(req['identity'], kind='uncertain'), second), 'image', ['prev'])
-    assert out['status'] == 'failed'
-    assert out['reason'] == 'continuation_identity_mismatch'
+    assert out['table_kind'] == 'data_table'
+    assert out['budget']['logical_calls'] == 1
+    assert out['continuation']['status'] == 'none'
 
 
 def test_ordinary_formula_lookup_stays_on_grid_path(monkeypatch):
@@ -295,7 +294,7 @@ def test_legacy_classification_provider_failure_is_object_diagnostic():
             raise RuntimeError('private model response')
     payload = {'tables': [{'markdown': 'Pressure p = MPa'}]}
     pp._enrich_upload_semantics(Failed(), 'image', {}, payload, True)
-    assert payload['tables'][0]['table_kind'] == 'uncertain'
+    assert payload['tables'][0]['table_kind'] == 'data_table'
     assert payload['tables'][0]['table_classification']['reason'] == 'calculation_provider_failed'
 
 
@@ -322,7 +321,7 @@ def test_generic_model_cannot_claim_manual_origin_or_trusted_identity():
     metadata = next(iter(structured['table_metadata'].values()))
     assert 'calculation_identity' not in metadata
     assert metadata['table_kind_source'] == 'automatic'
-    assert metadata['continuation'] == {'status': 'pending', 'reason': 'adjacent_context_required'}
+    assert metadata['continuation'] == {'status': 'none', 'reason': 'data_table_default'}
 
 
 @pytest.mark.parametrize('kind', ['server_error', 'token_correction', 'redirect'])
@@ -898,7 +897,12 @@ def test_generic_pipeline_batch_failure_isolated_from_next_object(tmp_path):
     items = [{**CALCULATION_REGION, 'table_kind':'calculation_sheet',
               'calculation_sheet':{'validation_status':'unresolved'}} for _ in range(2)]
     vlm = Mixed()
-    count = cs.complete_calculation_batch(vlm, str(path), [(items[i], f'Value {i}.', f'tables:{i}') for i in range(2)], 1)
+    count = 0
+    for i, item in enumerate(items):
+        content = f'Value {i}.'
+        calls, _ = cp.structure_calculation_source(vlm, item, content,
+            {'object_ref': f'tables:{i}', 'source_sha256': cs.source_context(content)['sha256']}, 1)
+        count += calls
     assert count == 2
     assert items[0]['calculation_sheet']['coverage']['structured'] == 0
     assert items[1]['calculation_sheet']['coverage']['structured'] == 1
@@ -978,6 +982,11 @@ def test_image_math_wrapper_normalization_preserves_original_and_incomplete_math
 
 @pytest.mark.parametrize('host,model,calculation,expected', [
     ('dashscope.aliyuncs.com', 'qwen3-vl-flash', True, True),
+    ('dashscope.aliyuncs.com', 'qwen3.8-omni-flash', True, True),
+    ('dashscope.aliyuncs.com', 'qwen3.8-omni-flash', False, False),
+    ('other.example', 'qwen3.8-omni-flash', True, False),
+    ('dashscope.aliyuncs.com', 'qwen3-omni-flash', True, False),
+
     ('dashscope-intl.aliyuncs.com', 'qwen3-vl-plus', True, True),
     ('dashscope.aliyuncs.com', 'qwen3-vl-flash', False, False),
     ('other.example', 'qwen3-vl-flash', True, False),
@@ -1702,9 +1711,11 @@ def test_dedicated_classifier_has_small_json_contract_and_one_object(monkeypatch
     assert captured[0][2]['json_object'] is True
     assert 'table-one' in captured[0][1]
     assert 'Do not transcribe' in captured[0][1]
+    assert 'Read the current object title FIRST' in captured[0][1]
+    assert 'not only the title' not in captured[0][1]
 
 
-def test_auto_object_recovers_missing_evidence_before_source_first_handoff():
+def test_auto_object_missing_evidence_defaults_without_source_first_handoff():
     req = request(); req['stage'] = 'transcription'
     first = response(req['identity']); first.pop('classification_evidence')
     class RepairProvider(Provider):
@@ -1713,11 +1724,12 @@ def test_auto_object_recovers_missing_evidence_before_source_first_handoff():
             return {'table_kind': 'calculation_sheet', 'classification_evidence': [target['source_text']]}
     provider = RepairProvider(first)
     out = cp.process_request(req, 'auto', 'auto', provider, 'one.png')
-    assert out['table_kind'] == 'calculation_sheet'
-    assert out['table_classification']['repair_attempts'] == 1
-    assert out['budget']['logical_calls'] == 2
-    assert out['calculation_source']['pipeline']['semantic']['reason'] == 'source_persistence_required'
-    assert len(provider.calls) == 2
+    assert out['table_kind'] == 'data_table'
+    assert out['table_classification']['reason'] == 'classification_evidence_missing'
+    assert 'repair_attempts' not in out['table_classification']
+    assert out['budget']['logical_calls'] == 1
+    assert 'semantic' not in out['calculation_source']['pipeline']
+    assert len(provider.calls) == 1
 
 
 @pytest.mark.parametrize('text,expected_latex,missing', [
@@ -1792,3 +1804,220 @@ def test_manual_default_ocr_has_no_vlm_transcription_fallback(monkeypatch, avail
     else:
         assert not calls
         assert out['reason'] == 'calculation_ocr_unavailable'
+
+
+def test_staged_auto_classification_prioritizes_title_in_real_prompt(monkeypatch):
+    client = DynamicVLMClient(None)
+    captured = []
+    def call(image, prompt, **kwargs):
+        captured.append(prompt)
+        return '{"source_text":"Parameter p","table_title":"应力计算表","table_kind":"calculation_sheet","classification_evidence":["应力计算表"]}'
+    monkeypatch.setattr(client, '_call_image_prompt', call)
+    client._staged_calculation('synthetic.png', {'calculation_stage': 'classification_transcription'})
+    assert '标题为首要分类证据' in captured[0]
+    assert '不得只引用标题' not in captured[0]
+
+
+@pytest.mark.parametrize('quality', [None,
+    {'status': 'misaligned', 'evidence': ['Synthetic subscript mismatch']}])
+def test_transcription_quality_remains_independent_of_classification(quality):
+    req = request(); req['stage'] = 'transcription'
+    candidate = response(req['identity'])
+    if quality is not None:
+        candidate['transcription_quality'] = copy.deepcopy(quality)
+    provider = Provider(candidate)
+    out = cp.process_request(req, 'auto', 'auto', provider, 'synthetic.png')
+    assert out['table_kind'] == 'calculation_sheet'
+    assert out['status'] == 'needs_review'
+    assert out.get('transcription_quality') == quality
+    assert out['items'][0].get('transcription_quality') == quality
+    assert out['calculation_source']['original_content'] == candidate['source_text']
+    assert out['calculation_source']['pipeline']['transcription']['status'] == 'complete'
+    assert 'calculation_sheet' not in out
+    assert len(provider.calls) == 1
+
+
+def test_partial_checkpoint_does_not_starve_pending_batch_and_survives_retry_failure():
+    from tests.test_pdf2md_calculation_sheet import framed_proposal
+    req = request()
+    req['existing_content'] = '\n'.join(f'$v_{n}={n}$' for n in range(45))
+    class Batched(Provider):
+        table_analysis_max_model_calls = 1
+        def extract_calculation_sheet(self, image, target):
+            self.calls.append(copy.deepcopy(target))
+            if self.responses:
+                raise self.responses.pop(0)
+            proposal = framed_proposal(target)
+            if target['source_sections'][0]['items'][0]['id'] == 's1-i1':
+                proposal['sections'][0]['items'].pop()
+            return proposal
+    first = cp.process_request(req, 'calculation_sheet', 'organize_existing', Batched())
+    req['calculation_resume'] = first['calculation_source']['pipeline']['semantic']
+    assert [b['status'] for b in req['calculation_resume']['batches']] == ['partial', 'pending']
+    retry = Batched()
+    second = cp.process_request(req, 'calculation_sheet', 'organize_existing', retry)
+    assert len(retry.calls) == 1
+    assert retry.calls[0]['source_sections'][0]['items'][0]['id'] == 's1-i41'
+    assert second['calculation_sheet']['coverage']['structured'] == 44
+    progress = second['calculation_source']['pipeline']['semantic']
+    assert [b['status'] for b in progress['batches']] == ['partial', 'complete']
+    assert 'result' in progress['batches'][0]
+    req['calculation_resume'] = progress
+    retry = Batched(TimeoutError())
+    third = cp.process_request(req, 'calculation_sheet', 'organize_existing', retry)
+    assert len(retry.calls) == 1
+    assert third['calculation_sheet']['coverage']['structured'] == 44
+    assert third['calculation_source']['original_content'] == req['existing_content']
+    progress = third['calculation_source']['pipeline']['semantic']
+    assert progress['batches'][0]['status'] == 'partial'
+    assert progress['batches'][0]['reason'] == 'calculation_provider_timeout'
+    assert progress['batches'][0]['result'] == req['calculation_resume']['batches'][0]['result']
+
+
+@pytest.mark.parametrize('field', ['object_ref', 'source_sha256', 'source_revision'])
+def test_partial_checkpoint_rejects_foreign_cached_result(field):
+    from tests.test_pdf2md_calculation_sheet import framed_proposal
+    req = request(); req['existing_content'] = '$x=1$'
+    class Partial(Provider):
+        def extract_calculation_sheet(self, image, target):
+            self.calls.append(target)
+            result = framed_proposal(target)
+            result['sections'][0]['items'] = []
+            return result
+    result = cp.process_request(req, 'calculation_sheet', 'organize_existing', Partial())
+    req['calculation_resume'] = result['calculation_source']['pipeline']['semantic']
+    checkpoint = req['calculation_resume']['batches'][0]
+    assert checkpoint['status'] == 'partial'
+    checkpoint['result'][field] = 'foreign'
+    client = Partial()
+    result = cp.process_request(req, 'calculation_sheet', 'organize_existing', client)
+    assert result['reason'] == 'calculation_resume_mismatch'
+    assert not client.calls
+
+
+def test_semantic_prompt_distinguishes_condition_headings_from_formula_branches(monkeypatch):
+    client = DynamicVLMClient(None)
+    captured = []
+    monkeypatch.setattr(client, '_call_text_prompt',
+                        lambda *args, **kw: captured.append(kw['system_prompt']) or '{}')
+    client._staged_calculation(None, {'calculation_stage': 'semantic', 'source_sections': []})
+    assert 'branch 表示带适用条件的公式分支，必须同时有本项 math 和原文条件' in captured[0]
+    assert '纯条件表头或工况标签使用 note' in captured[0]
+    assert '没有 math 的疑似公式仍保留待复核，不推测补写' in captured[0]
+
+
+@pytest.mark.parametrize('recovered', [True, False])
+def test_default_ocr_recovers_inconsistent_spans_once_and_preserves_source_on_failure(monkeypatch, recovered):
+    from tests.test_pdf2md_enhanced_single_page_tools import PNG_DATA
+    from types import SimpleNamespace
+    import importlib
+    blocks = importlib.import_module(sp.__package__ + '.calculation_blocks')
+    client = DynamicVLMClient(None)
+    monkeypatch.setattr(sp, 'DynamicVLMClient', lambda *_: client)
+    original = '<table><tr><td>A</td></tr><tr><td>B</td><td>C</td></tr></table>'
+    replacement = 'A\n\nB | C'
+    class OCR:
+        enabled = True
+        use_layout_parsing = False
+        def __init__(self, *args, **kwargs):
+            pass
+        def extract_page(self, image):
+            self.request_guard(None)
+            return SimpleNamespace(markdown=original, page_text='')
+    monkeypatch.setattr(sp, 'OpenAICompatibleOcrClient', OCR)
+    calls = []
+    def recover(*args, **kwargs):
+        calls.append(args)
+        return (replacement if recovered else None), {
+            'status': 'complete' if recovered else 'fallback', 'reason': None if recovered else 'block_transcription_failed',
+            'logical_calls': 0, 'vlm_calls': 2, 'engine': 'vlm_blocks',
+            'blocks': [{'id': 'b1', 'bbox_space': 'normalized_page'}]}
+    monkeypatch.setattr(blocks, 'transcribe_calculation_blocks', recover)
+    req = request(); req['stage'] = 'transcription'
+    out = json.loads(sp.extract_page_tables_direct(file_data=PNG_DATA, input_type='image',
+        table_kind_hint='calculation_sheet', processing_mode='reextract',
+        context={'object_crop': True, 'calculation_request': req}))
+    assert len(calls) == 1
+    source = out['calculation_source']
+    assert source['original_content'] == (replacement if recovered else original)
+    assert source['layout_status'] == ('logical_reordered' if recovered else 'needs_review')
+    assert source['block_transcription']['blocks'][0]['bbox_space'] == 'normalized_object'
+    assert source['transcription_quality']['status'] == 'misaligned'
+    assert out['model_calls']['glm_ocr'] == 1
+    assert out['model_calls']['vlm_ocr'] == 2
+    assert out['budget']['logical_calls'] == 3
+    assert source['pipeline']['transcription']['logical_calls'] == 3
+    assert 'calculation_sheet' not in out
+
+
+@pytest.mark.parametrize('processing,limits,expands', [
+    ('transcription', {}, True),
+    ('transcription', {'table_analysis_max_physical_requests': 1}, False),
+    ('transcription', {'table_analysis_max_model_calls': 2}, False),
+    ('reextract', {}, False),
+    ('organize_existing', {}, False),
+])
+def test_source_only_budget_reserves_concrete_work_without_overriding_explicit_caps(processing, limits, expands):
+    client = DynamicVLMClient({'_calculation_processing': processing, **limits})
+    initial = client.physical_request_limit
+    client.reserve_automatic_calculation_calls(3)
+    assert client.physical_request_limit == initial + (6 if expands else 0)
+    for _ in range(client.physical_request_limit):
+        client._count_physical_request(None)
+    with pytest.raises(Exception, match='table_analysis_physical_budget_exhausted'):
+        client._count_physical_request(None)
+
+
+def test_source_only_request_selects_transcription_budget(monkeypatch):
+    captured = []
+    def factory(config):
+        captured.append(config)
+        return DynamicVLMClient(config)
+    monkeypatch.setattr(sp, 'DynamicVLMClient', factory)
+    req = request(); req['stage'] = 'transcription'
+    sp._process_calculation_request({'calculation_request': req}, 'calculation_sheet', 'reextract',
+        True, {'table_analysis_max_physical_requests': 0}, 'en', None, None, None, 1, 'image', {}, None)
+    assert captured[0]['_calculation_processing'] == 'transcription'
+
+
+@pytest.mark.parametrize('quality,recovery', [('incomplete', True), ('reliable', False), ('error', False), ('foreign', False)])
+def test_object_ocr_reuses_content_review_before_optional_recovery(monkeypatch, quality, recovery):
+    from tests.test_pdf2md_enhanced_single_page_tools import PNG_DATA
+    from types import SimpleNamespace
+    import importlib
+    blocks = importlib.import_module(sp.__package__ + '.calculation_blocks')
+    client = DynamicVLMClient(None); client.enabled = True
+    monkeypatch.setattr(sp, 'DynamicVLMClient', lambda *_: client)
+    original = '<table><tr><td>$S$</td></tr></table>'
+    class OCR:
+        enabled = True
+        use_layout_parsing = False
+        def __init__(self, *args, **kwargs): pass
+        def extract_page(self, image):
+            self.request_guard(None)
+            return SimpleNamespace(markdown=original, page_text='')
+    monkeypatch.setattr(sp, 'OpenAICompatibleOcrClient', OCR)
+    reviews = []
+    def review(image, semantic_objects):
+        reviews.append(semantic_objects)
+        if quality == 'error': raise TimeoutError()
+        return {'tables': [{'object_ref': 'foreign' if quality == 'foreign' else 'tables:0',
+                           'transcription_quality': {'status': quality, 'evidence': ['missing superscript']}}]}
+    monkeypatch.setattr(client, 'extract_region_structured', review)
+    calls = []
+    def recover(*args, **kwargs):
+        assert kwargs['review_evidence'] == ['missing superscript']
+        calls.append(1)
+        return '$S^t$', {'status':'complete', 'blocks':[], 'logical_calls':0, 'vlm_calls':2}
+    monkeypatch.setattr(blocks, 'transcribe_calculation_blocks', recover)
+    req = request(); req['stage'] = 'transcription'
+    out = json.loads(sp.extract_page_tables_direct(file_data=PNG_DATA, input_type='image',
+        table_kind_hint='calculation_sheet', processing_mode='reextract',
+        context={'object_crop':True, 'calculation_request':req}))
+    assert len(reviews) == 1, out
+    assert reviews[0][0]['markdown'] == original
+    assert bool(calls) == recovery
+    assert out['calculation_source']['original_content'] == ('$S^t$' if recovery else original)
+    assert out['calculation_source']['transcription_quality']['status'] == (quality if quality in ('incomplete','reliable') else 'uncertain')
+    assert out['model_calls']['vlm_ocr'] == (3 if recovery else 1)
+    assert out['budget']['logical_calls'] == (4 if recovery else 2)

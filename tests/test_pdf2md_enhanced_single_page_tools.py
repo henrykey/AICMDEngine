@@ -1954,6 +1954,7 @@ def test_task_ocr_table_elements_preserve_source_cell_geometry_additively():
         "figures": [],
         "table_metadata": {
             "| 牌号 | 状态 | 规格 |\n| --- | --- | --- |\n| 20 | 正火 | ≤M22 |\n| 20 | 正火 | M24~M48 |": {
+                "table_kind": "data_table",
                 "table_classification": {"status": "not_run", "reason": "classification_not_run"},
                 "bbox": [0.05, 0.10, 0.95, 0.80],
                 "bbox_space": "normalized_page",
@@ -2631,3 +2632,59 @@ def test_calculation_page_poll_missing_handle_never_restarts(monkeypatch):
     result = json.loads(asyncio.run(fn(task_id='missing-handle', page_no=1,
         routing_config={'calculation_async': True, 'calculation_poll': True})))
     assert result['error'] == 'calculation_page_execution_missing'
+
+
+@pytest.mark.parametrize("cancel_wait", [False, True])
+def test_calculation_wait_returns_completion_without_restarting_or_cancelling_worker(cancel_wait, monkeypatch):
+    monkeypatch.setattr(server.manager, "validate_source_identity", lambda task_id, source_identity: None)
+    fn = getattr(server.process_task_page, 'fn', server.process_task_page)
+    async def run():
+        key = ('bounded-wait-test', 1)
+        release = asyncio.Event()
+        async def work():
+            await release.wait()
+            return json.dumps({'task_id': key[0], 'page_no': 1, 'page_result': {'kept': True}})
+        operation = asyncio.create_task(work())
+        started = asyncio.Event()
+        started.set()
+        server._calculation_page_operations[key] = (operation, started)
+        try:
+            args = dict(task_id=key[0], page_no=1, routing_config={
+                'calculation_async': True, 'calculation_poll': True, 'calculation_wait_ms': 60000})
+            waiter = asyncio.create_task(fn(**args))
+            await asyncio.sleep(.01)
+            assert not waiter.done()
+            if cancel_wait:
+                waiter.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await waiter
+                assert not operation.cancelled()
+                waiter = asyncio.create_task(fn(**args))
+            release.set()
+            result = json.loads(await asyncio.wait_for(waiter, .2))
+            assert result['page_result'] == {'kept': True}
+        finally:
+            release.set()
+            await operation
+            server._calculation_page_operations.pop(key, None)
+    asyncio.run(run())
+
+
+def test_calculation_wait_expiry_preserves_worker(monkeypatch):
+    monkeypatch.setattr(server.manager, "validate_source_identity", lambda task_id, source_identity: None)
+    fn = getattr(server.process_task_page, 'fn', server.process_task_page)
+    async def run():
+        key = ('wait-expiry-test', 1)
+        operation = asyncio.create_task(asyncio.sleep(10))
+        started = asyncio.Event(); started.set()
+        server._calculation_page_operations[key] = (operation, started)
+        try:
+            result = json.loads(await fn(task_id=key[0], page_no=1, routing_config={
+                'calculation_async': True, 'calculation_poll': True, 'calculation_wait_ms': 10}))
+            assert result['status'] == 'processing'
+            assert not operation.done()
+        finally:
+            operation.cancel()
+            with pytest.raises(asyncio.CancelledError): await operation
+            server._calculation_page_operations.pop(key, None)
+    asyncio.run(run())

@@ -56,7 +56,7 @@ def validate_request(request, hint, mode):
 
 def initial_item(request, hint, mode):
     identity = request.get('identity', {}) if isinstance(request, dict) else {}
-    item = {'table_kind': hint if hint != 'auto' else 'uncertain',
+    item = {'table_kind': hint if hint != 'auto' else 'data_table',
             'table_kind_source': 'manual' if hint != 'auto' else 'automatic',
             'processing_mode': mode, 'manualReviewRequired': True, 'degraded': True,
             'lookup_status': 'unavailable', 'lookup_sections': [],
@@ -269,6 +269,7 @@ def structure_calculation_source(vlm, item, content, target, available_calls, re
     progress = [{'id': index + 1, 'source_item_ids': [u['id'] for s in batch for u in s['items']],
                  'status': 'pending'} for index, batch in enumerate(batches)]
     previous = {}
+    saved_status = {}
     if resume is not None:
         if (not isinstance(resume, dict) or resume.get('source_revision') != ctx['source_revision']
                 or resume.get('identity') != identity or not isinstance(resume.get('batches'), list)
@@ -279,18 +280,27 @@ def structure_calculation_source(vlm, item, content, target, available_calls, re
                     or saved.get('source_item_ids') != expected['source_item_ids']
                     or saved.get('status') not in ('pending', 'complete', 'partial', 'failed')):
                 return 0, 'calculation_resume_mismatch'
-            if saved['status'] == 'complete':
-                if not isinstance(saved.get('result'), dict):
+            saved_status[expected['id']] = saved['status']
+            if saved['status'] == 'complete' or (saved['status'] == 'partial' and 'result' in saved):
+                result = saved.get('result')
+                if (not isinstance(result, dict) or not isinstance(result.get('sections'), list)
+                        or result.get('object_ref') != target['object_ref']
+                        or result.get('source_sha256') != target['source_sha256']
+                        or result.get('source_revision', ctx['source_revision']) != ctx['source_revision']):
                     return 0, 'calculation_resume_mismatch'
-                previous[expected['id']] = saved['result']
-    planned_calls = min(available_calls, sum(p['id'] not in previous for p in progress))
+                previous[expected['id']] = result
+    # Attempt untouched batches before retrying partial results; assemble in source order.
+    unfinished = [p['id'] for p in progress if saved_status.get(p['id']) != 'complete']
+    unfinished.sort(key=lambda key: {'pending': 0, 'failed': 1, 'partial': 2}.get(saved_status.get(key), 0))
+    selected = set(unfinished[:available_calls])
+    planned_calls = len(selected)
     if planned_calls > 0 and callable(getattr(vlm, 'calculation_work_started', None)):
         vlm.calculation_work_started(planned_calls)
     calls = 0
     for batch, checkpoint in zip(batches, progress):
         cached = previous.get(checkpoint['id'])
         code = None
-        if cached is None and calls >= available_calls:
+        if cached is None and checkpoint['id'] not in selected:
             code = 'table_analysis_budget_exhausted'
         elif cached is None and getattr(vlm, 'physical_request_limit', None) is not None and vlm.physical_requests >= vlm.physical_request_limit:
             code = 'table_analysis_physical_budget_exhausted'
@@ -316,7 +326,7 @@ def structure_calculation_source(vlm, item, content, target, available_calls, re
         batch_target.pop('calculation_source', None)
         batch_target.pop('adjacent_objects', None)
         try:
-            if cached is None:
+            if checkpoint['id'] in selected:
                 calls += 1
                 raw = vlm.extract_calculation_sheet(None, batch_target)
                 code = response_error(vlm)
@@ -353,10 +363,9 @@ def structure_calculation_source(vlm, item, content, target, available_calls, re
                               and batch_sheet.get('semantic_status') != 'missing'
                               and batch_sheet['coverage']['needs_review'] == 0)
             checkpoint['status'] = 'complete' if batch_complete else 'partial'
-            if batch_complete:
-                checkpoint['result'] = {key: deepcopy(raw[key]) for key in (
-                    'object_ref', 'source_sha256', 'source_revision', 'sections', 'semantic_desc',
-                    'unresolved', 'image_discrepancies', 'inputs', 'output', 'steps') if key in raw}
+            checkpoint['result'] = {key: deepcopy(raw[key]) for key in (
+                'object_ref', 'source_sha256', 'source_revision', 'sections', 'semantic_desc',
+                'unresolved', 'image_discrepancies', 'inputs', 'output', 'steps') if key in raw}
             combined['sections'].extend(raw['sections'])
             for field in ('unresolved', 'image_discrepancies'):
                 if raw.get(field) != []:
@@ -377,6 +386,15 @@ def structure_calculation_source(vlm, item, content, target, available_calls, re
             errors.append(str(exc) if isinstance(exc, ValueError) and str(exc) in RESPONSE_CODES
                           else 'calculation_provider_failed')
             checkpoint.update(status='failed', reason=errors[-1])
+        if checkpoint['status'] == 'failed' and cached is not None:
+            # A failed retry must not erase a previously saved partial result.
+            checkpoint.update(status=saved_status[checkpoint['id']], result=deepcopy(cached))
+            combined['sections'].extend(deepcopy(cached['sections']))
+            for field in ('unresolved', 'image_discrepancies'):
+                if cached.get(field) != []:
+                    combined[field].append({'reason': 'model_reported_unresolved'})
+            if isinstance(cached.get('semantic_desc'), str) and cached['semantic_desc'].strip():
+                descriptions.append(cached['semantic_desc'])
     combined['semantic_desc'] = '\n'.join(descriptions)
     sheet = parse_calculation_sheet(combined, ctx, item)
     for unit in invalid_units:
@@ -611,6 +629,10 @@ def process_request(request, hint, mode, vlm, image_path=None, adjacent_images=N
             item['table_title'] = title.strip()
             item['tableTitle'] = title.strip()
             item['calculation_source']['table_title'] = title.strip()
+
+        if item['table_kind'] != 'calculation_sheet':
+            item['continuation'] = {'status': 'none', 'reason': 'data_table_default'}
+            return finish()
 
         if mode == 'organize_existing':
             item['continuation'] = {'status': 'none', 'reason': 'not_assessed_text_only'}

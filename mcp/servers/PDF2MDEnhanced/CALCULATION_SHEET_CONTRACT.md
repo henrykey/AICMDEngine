@@ -6,17 +6,24 @@ left and right panels merely because text shares a vertical coordinate.
 
 ## Routing and calls
 
-The existing VLM table semantic response now carries `table_kind`:
-`data_table`, `calculation_sheet`, `mixed`, or `uncertain`, plus exact source quotes
-in `classification_evidence`. The image supplies type evidence; a title or the
-presence of one formula alone is insufficient. Invalid/foreign/ambiguous source
-quotes downgrade the classification to uncertain.
+The existing VLM table semantic response carries `table_kind` proposals:
+`data_table`, `calculation_sheet`, `mixed`, or `uncertain`, plus source evidence.
+Only an explicit, evidence-validated `calculation_sheet` enters calculation enhancement.
+A clear current object title identifying a calculation sheet is sufficient evidence;
+otherwise classification uses its body. An isolated formula does not establish the type.
 
-The existing semantic call classifies tables. A validated `calculation_sheet`
-classification dispatches current object-scoped OCR content to the shared text-only semantic stage.
-Source persistence precedes model organization. Human image transcription uses the selected engine
-and the existing source-first contract; its source is checked before `parse_calculation_sheet`.
-Already source-validated proposals need no additional extraction.
+All other proposals, missing/invalid kinds, invalid/foreign/ambiguous evidence, and
+classification failures use effective `table_kind=data_table`. Keep the original proposal,
+evidence and failure reason in `table_classification`; these diagnostics do not trigger
+classification repair, joint adjacent-page review, partitioning or calculation transcription.
+Preserve ordinary source text, rows, columns, cell geometry, image information and lookup handling.
+Shared table semantics/image processing and standalone formula handling remain unchanged.
+Calculation-specific formula/glyph review applies only after clearly identifying a calculation sheet,
+within the existing semantic call; no extra classification call is introduced.
+
+A validated calculation sheet retains the source-first enhancement. Readable source
+is preserved independently of optional calculation JSON; automatic completion does not
+request JSON organization. Bounded transcription recovery remains calculation-only.
 
 An explicitly configured `vlm_config.table_analysis_max_model_calls` remains a
 shared per-page logical analysis budget (integers 0..8, zero disables analysis).
@@ -50,7 +57,8 @@ Integrated entry points:
   input; OCR supports classification, while object-image transcription supplies the calculation source.
 - Single-page GLM extraction with descriptions enabled: defer grid normalization
   until the existing metadata call classifies the table. Data tables then use the
-  existing normalization; calculation/mixed/uncertain objects retain original text.
+  existing normalization, including uncertain/mixed classification fallbacks; only
+  calculation sheets bypass the grid.
 - Direct VLM table, compact, region, layout-structured and dual-output responses:
   additive classification instructions and validated metadata survive normalization;
   incomplete calculation proposals enter the same budgeted dedicated completion.
@@ -100,7 +108,7 @@ calculation sheets retain `quality_status=needs_review`, `image_verified=false`,
 conflicts yield `validation_status=unresolved`. `table_content_quality` is separate
 from name/description `semantic_status` and layout `EXTRACTED`/recovery status.
 
-Calculation/mixed/uncertain objects carry empty `lookup_sections`, unavailable lookup
+Confirmed calculation objects carry empty `lookup_sections`, unavailable lookup
 status, and review flags. Single-page grid output fields remain empty. Query enhancement
 rejects these types before pandas or provider construction. Consumers must propagate
 `table_kind`; dropping it defeats the additive guard. Do not publish this two-column
@@ -108,8 +116,8 @@ view through a legacy consumer that treats any nonempty table rows as queryable.
 
 Bounds: at most 100000 source characters, 200000 serialized proposal characters,
 100 sections, 500 items, 50 source quotes per item, and 20 classification quotes.
-Uncertain/mixed objects preserve source and require review; automatic mixed-region
-partitioning remains out of scope. The explicit processing extension below supplies
+Uncertain/mixed proposals preserve source and ordinary data-table handling; automatic
+mixed-region partitioning is not performed. The explicit processing extension below supplies
 bounded cross-page proposals without database writes.
 
 ## Explicit processing extension (2026-09-13)
@@ -121,12 +129,10 @@ and the shared `tests/fixtures/calculation_processing_contract.json` fixture.
 
 `organize_existing` uses only supplied text and one explicit text-model call.
 `reextract` reads one isolated object image, with a manual type constraint.
-`auto` performs image classification and item extraction; uncertain/continuation
-results may receive one joint review with at most one object from each adjacent
-page, using base64 `image_data`. Both calls share the existing logical budget.
-Without context or remaining budget the relation stays pending. Legacy upload and
-single-page semantic responses can request this follow-up through `continuation`;
-Membership must provide identities/context and perform the automatic scheduling.
+`auto` classifies the current object and enhances it only when it is a confirmed
+calculation sheet. Uncertain/mixed/missing/invalid classification defaults to data-table
+normalization without further classification or adjacent-page calls. Confirmed calculation
+sheets retain bounded continuation metadata and their existing source/semantic budget.
 
 The current image is either a caller-authorized object crop (`object_crop=true`)
 or a region (`calculation_request.bbox`) cropped from a full PDF whose SHA-256 and

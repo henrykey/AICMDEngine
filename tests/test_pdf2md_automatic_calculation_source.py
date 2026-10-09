@@ -27,15 +27,16 @@ def test_automatic_ocr_is_saved_before_text_semantics(persistence_failure):
             raise OSError('synthetic failure')
         return {'artifact_id': 'saved-ocr'}
     cs.complete_calculation_batch(VLM(), 'unused', [(item, source, 'tables:0')], 1, source_store=save)
-    assert events == (['save'] if persistence_failure else ['save', 'semantic'])
+    assert events == ['save']
     if persistence_failure:
-        assert item['calculation_source']['pipeline']['semantic']['reason'] == 'calculation_source_persistence_failed'
+        assert item['calculation_source']['reason'] == 'calculation_source_persistence_failed'
     else:
-        assert item['calculation_sheet']['coverage']['needs_review'] == 0
+        assert item['calculation_source']['pipeline']['semantic']['status'] == 'not_requested'
+        assert 'calculation_sheet' not in item
 
 
 @pytest.mark.parametrize('content,budget,reason', [('', 2, 'calculation_source_missing'),
-    ('$q=x$', 0, 'table_analysis_budget_exhausted')])
+    ('$q=x$', 0, None)])
 def test_empty_source_or_budget_never_triggers_image_fallback(content, budget, reason):
     class VLM:
         table_analysis_max_model_calls = budget
@@ -43,7 +44,8 @@ def test_empty_source_or_budget_never_triggers_image_fallback(content, budget, r
             pytest.fail('No model call allowed')
     item = {'table_kind': 'calculation_sheet'}
     assert cs.complete_calculation_batch(VLM(), 'unused', [(item, content, 'tables:0')], 0) == 0
-    assert {'reason': reason} in item['calculation_sheet']['unresolved']
+    assert item['calculation_source'].get('reason') == reason
+    assert 'calculation_sheet' not in item
 
 
 def test_ordinary_table_does_not_enter_calculation_image_source_path():
@@ -76,10 +78,11 @@ def test_default_automatic_budget_covers_each_object_and_actual_source_batches(t
               'bbox_space': 'normalized_page'} for y in (0, .5)]
     count = cs.complete_calculation_batch(client, str(image_path),
         [(item, '\n\n'.join(f'$q_{{{i}}}=a+{i}$' for i in range(45)), f'tables:{index}') for index, item in enumerate(items)], 1)
-    assert count == 4
-    assert calls == [(False, 'tables:0'), (False, 'tables:0'), (False, 'tables:1'), (False, 'tables:1')]
-    assert all(item['calculation_sheet']['coverage']['structured'] == 45 for item in items)
-    assert client.physical_request_limit == 12  # Shared classification allowance plus four semantic calls.
+    assert count == 0
+    assert calls == []
+    assert all(item['calculation_source']['original_content'].count('$q_') == 45 for item in items)
+    assert all('calculation_sheet' not in item for item in items)
+    assert client.physical_request_limit is None
 
 
 @pytest.mark.parametrize('config', [

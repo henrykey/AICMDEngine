@@ -32,3 +32,13 @@ def test_provider_thinking_reaches_image_and_text_requests(monkeypatch, tmp_path
     for request in requests:
         assert request['model'] == 'qwen3.8-27b'
         assert request.get('extra_body', {}) == expected
+
+
+@pytest.mark.parametrize("base_url,model,mode", [
+    ("https://coding.dashscope.aliyuncs.com/v1", "qwen3.8-27b", "low"),
+    ("https://api.z.ai/v1", "glm-5.2", "low"),
+    ("https://api.moonshot.ai/v1", "kimi-k3", "disabled"),
+])
+def test_unsupported_mcp_thinking_uses_default(base_url, model, mode):
+    client = DynamicVLMClient({"base_url": base_url, "model": model, "thinking_mode": mode})
+    assert client.thinking_parameters == {}

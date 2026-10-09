@@ -19,9 +19,10 @@ def test_block_source_persisted_before_structuring(monkeypatch,engine,origin):
         assert item['calculation_source']['artifact']=={'id':'saved'}
         events.append('structure');return 0,None
     monkeypatch.setattr(cp,'structure_calculation_source',structure)
-    item={'table_kind':'calculation_sheet'}
+    item={'table_kind':'calculation_sheet', 'transcription_quality': {'status': 'incomplete'}}
     mod.extract_calculation_items(Provider(),'image.png',item,'old OCR','tables:0',source_store=store)
-    assert events==['ocr','persist','structure']
+    assert events==['ocr','persist']
+    assert 'calculation_sheet' not in item
 
 
 def test_unexpected_block_failure_preserves_original_ocr_before_structuring(monkeypatch):
@@ -41,7 +42,8 @@ def test_unexpected_block_failure_preserves_original_ocr_before_structuring(monk
         events.append('structure')
         return 0,None
     monkeypatch.setattr(cp,'structure_calculation_source',structure)
-    item={'table_kind':'calculation_sheet'}
+    item={'table_kind':'calculation_sheet', 'transcription_quality': {'status': 'incomplete'}}
     mod.extract_calculation_items(Provider(),'image.png',item,'original OCR','tables:0',source_store=store)
-    assert events==['persist','structure']
+    assert events==['persist']
+    assert 'calculation_sheet' not in item
     assert item['calculation_source']['block_transcription']['status']=='fallback'

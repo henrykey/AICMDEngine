@@ -67,7 +67,7 @@ class _SourceText(HTMLParser):
             self.append('\n')
 
 
-def source_context(content, structural=False):
+def source_context(content, structural=False, evidence=False, source_title=None):
     """No grid inference: preserve text, math and sequence even for broken spans."""
     if not isinstance(content, str) or len(content) > 100000:
         return {'status': 'input_budget_exceeded', 'text': ''}
@@ -134,7 +134,18 @@ def source_context(content, structural=False):
         cells = [{'source_range': span, 'text': normalized[slice(*span)]} for span in cells if span]
         if cells:
             rows.append({'source_range': [cells[0]['source_range'][0], cells[-1]['source_range'][1]], 'cells': cells})
-    return {'status': 'available', **({'title': title} if title and len(title) <= 500 else {}), 'sha256': hashlib.sha256(content.encode()).hexdigest(),
+    evidence_fields = {}
+    if evidence:
+        try:
+            blocks = [unit for section in calculation_source_sections(normalized) for unit in section['items']]
+        except ValueError:
+            blocks = []
+        if isinstance(source_title, str) and source_title.strip():
+            blocks.append({'id': 'title', 'source_field': 'title', 'text': source_title,
+                           'source_range': [0, len(source_title)],
+                           'source_sha256': hashlib.sha256(source_title.encode()).hexdigest()})
+        evidence_fields['evidence_blocks'] = blocks
+    return {**evidence_fields, 'status': 'available', **({'title': title} if title and len(title) <= 500 else {}), 'sha256': hashlib.sha256(content.encode()).hexdigest(),
             'text': normalized, **({'table_rows': rows} if structural and rows else {}), 'source_revision': hashlib.sha256(('calculation-source-v2\0' + content).encode()).hexdigest(),
             'text_sha256': hashlib.sha256(normalized.encode()).hexdigest(),
             'range_unit': 'unicode_codepoint', 'range_scope': 'text', 'normalization': transform}
@@ -145,29 +156,41 @@ def classification_prompt(include_items=True):
         ' Blank input/result slots are intentional in calculation templates; do not fill them or mark them omitted. '
         'A continuation containing only symbols or acceptance criteria can belong to a calculation sheet. '
         'Return continuation_required=true when the image has a continuation marker or type needs adjacent context. '
-        'Fixed-axis formula lookup tables remain data_table even if the title says calculation. '
-        'Normative requirements, applicability rules, material categories and prescribed temperature/time '
+        'Read the current object title FIRST, in any language. An unambiguous title identifying a calculation table or stress calculation is sufficient classification evidence; do not require additional formula evidence. '
+        'Only when the title is absent or ambiguous, inspect the body: normative requirements, applicability rules, material categories and prescribed temperature/time '
         'records remain data_table when their columns organize requirements or lookup values. '
         'Conditional prose, units, limits and cross-references alone do not establish a calculation process. '
-        'Use calculation_sheet only when the object organizes parameterized mathematical evaluation '
+        'For an absent or ambiguous title, use calculation_sheet when the object organizes parameterized mathematical evaluation '
         'or is a clearly identified continuation of that process. '
     )
     classification = (
         " Classify each table from the IMAGE as table_kind=data_table|calculation_sheet|mixed|uncertain. "
-        "Return classification_evidence as exact unique quotes from calculation_source.text only. "
+        "Return classification_evidence as [{block_id,source_sha256}] using calculation_source.evidence_blocks. Use the block source_sha256 when present, otherwise calculation_source.sha256. Copy IDs, not formulas. Evidence IDs locate source text; they do not prove the classification. If no preassigned blocks are supplied, quote the newly transcribed source text or the exact current object title. "
         "Calculation sheets organize parameters, formulas, branches and checks; panels are not cross-indexed "
-        "data records. A title or isolated formula is insufficient. Never quote prior generated descriptions. "
-        "In this classification call do not extract calculation items; a dedicated call handles them. "
+        "data records. A clear current object title is sufficient; an isolated formula under an ambiguous title is not. Never quote prior generated descriptions. "
+        "In this classification call do not extract calculation items; a dedicated call handles them only when requested. "
+        "Return description for the whole table independently of calculation items. "
+        "Only after clearly classifying this object as calculation_sheet, compare the supplied OCR "
+        "against the image and return transcription_quality={status:reliable|uncertain|missing|truncated|misaligned|incomplete, "
+        "evidence:[brief observed layout or content discrepancies]}. Do not treat merged cells or HTML as failure. "
+        "Compare every formula and acceptance-check cell against image pixels, including every superscript, subscript, "
+        "Greek versus Latin letter, accent, sign, unit, note marker and branch-column association. "
+        "Never excuse glyph substitutions or missing indices as normalization or mathematical equivalence. "
+        "Missing visible indices or formulas require incomplete; wrong glyphs or cell associations require misaligned. "
+        "Use uncertain when a glyph cannot be resolved; reliable requires checking these details, not merely matching row counts. "
+        "Report concrete source-versus-image discrepancies in evidence without rewriting the supplied source. "
+        "For data_table, mixed, uncertain or an unclassified object, keep ordinary table semantics and source; "
+        "do not perform this calculation-specific formula/glyph review or request calculation recovery. "
     )
     if not include_items:
         return classification + guidance
     return guidance + (
         ' For each table also return table_kind=data_table|calculation_sheet|mixed|uncertain, '
-        'classification_evidence=[exact quotes from calculation_source.text]. Classify using the IMAGE: '
+        'classification_evidence=[{block_id,source_sha256}] from supplied calculation_source.evidence_blocks; only when no blocks are supplied, quote newly transcribed source text or the exact current object title. Classify using the IMAGE: '
         'a calculation_sheet organizes inputs, formulas, branches, checks and references; rules and '
-        'side-by-side panels are layout, NOT cross-indexed records. A formula in a data cell or a title '
-        'alone is not sufficient evidence. For mixed/uncertain preserve the source and request review. '
-        'Never quote a prior description, title or context unless it occurs literally in calculation_source.text. '
+        'side-by-side panels are layout, NOT cross-indexed records. A clear current object title is sufficient evidence. '
+        'For mixed/uncertain preserve the source and ordinary data-table structure; do not extract calculation items. Use each evidence block source_sha256 when present, otherwise calculation_source.sha256. '
+        'Never quote a prior generated description or context as classification evidence. '
         'A calculation_sheet response without sections/items is incomplete: do not return only descriptions. '
         'For calculation_sheet ONLY, return calculation_sheet={sections:[{title:"",items:[{'
         'kind:"input|formula|branch|check|reference|note",name:"",sources:["exact unique source quote"],'
@@ -225,44 +248,78 @@ def _render(sections, language="en"):
 def apply_calculation_sheet(item, candidate, content, description_language="unknown"):
     """Validate a single identity-matched VLM proposal; no model calls or source writes."""
     if 'table_kind' not in candidate:
+        item['table_kind'] = 'data_table'
         item.setdefault('table_classification', {'status': 'not_run', 'reason': 'classification_not_run'})
         return
-    ctx = source_context(content)
+    ctx = source_context(content, evidence=True, source_title=item.get('title') or item.get('table_title')
+                         or candidate.get('title') or candidate.get('table_title'))
     ctx['description_language'] = description_language
     text = ctx['text']
     kind = candidate.get('table_kind')
     evidence = candidate.get('classification_evidence')
     reason = None
-    try:
-        if ctx['status'] != 'available':
-            raise ValueError(ctx['status'])
-        if not isinstance(kind, str) or kind not in KINDS:
-            raise ValueError('classification_kind_invalid')
-        if not isinstance(evidence, list) or not 1 <= len(evidence) <= 20:
-            raise ValueError('classification_evidence_missing')
-        for quote in evidence:
-            if not isinstance(quote, str) or not quote.strip() or quote not in text:
-                raise ValueError('classification_evidence_mismatch')
-            if text.count(quote) != 1:
-                raise ValueError('classification_evidence_ambiguous')
-    except ValueError as exc:
-        reason = str(exc)
+    located = []
+    judgment = 'unresolved' if kind == 'uncertain' else 'model_proposed'
+    if not isinstance(kind, str) or kind not in KINDS:
+        reason = 'classification_kind_invalid'
+        judgment = 'response_invalid'
+    elif ctx['status'] != 'available':
+        reason = ctx['status']
+    elif kind != 'uncertain' or evidence:
+        try:
+            if not isinstance(evidence, list) or not 1 <= len(evidence) <= 20:
+                raise ValueError('classification_evidence_missing')
+            blocks = {block['id']: block for block in ctx['evidence_blocks']}
+            for reference in evidence:
+                if isinstance(reference, dict):
+                    block_id = reference.get('block_id')
+                    block = blocks.get(block_id) if isinstance(block_id, str) else None
+                    if block is None or reference.get('source_sha256') != block.get('source_sha256', ctx['sha256']):
+                        raise ValueError('classification_evidence_mismatch')
+                    located.append({'block_id': block['id'], 'source_sha256': block.get('source_sha256', ctx['sha256']),
+                                    'source_range': block['source_range'], 'text': block['text'],
+                                    **({'source_field': block['source_field']} if block.get('source_field') else {})})
+                else:
+                    # Image transcription creates its source in the same response, before IDs exist.
+                    title_block = blocks.get('title')
+                    if isinstance(reference, str) and title_block and reference == title_block['text']:
+                        located.append({'block_id': 'title', **{key: title_block[key] for key in
+                                        ('source_sha256', 'source_range', 'text', 'source_field')}})
+                        continue
+                    if not isinstance(reference, str) or not reference.strip() or reference not in text:
+                        raise ValueError('classification_evidence_mismatch')
+                    if text.count(reference) != 1:
+                        raise ValueError('classification_evidence_ambiguous')
+                    start = text.index(reference)
+                    located.append({'source_sha256': ctx['sha256'],
+                                    'source_range': [start, start + len(reference)], 'text': reference})
+        except ValueError as exc:
+            reason = str(exc)
+    if reason:
         kind = 'uncertain'
-    item['table_kind'] = kind
+    quality = candidate.get('transcription_quality')
+    if isinstance(quality, dict) and quality.get('status') in {
+            'reliable', 'uncertain', 'missing', 'truncated', 'misaligned', 'incomplete'}:
+        quality_evidence = quality.get('evidence')
+        if isinstance(quality_evidence, list) and len(quality_evidence) <= 8 and all(
+                isinstance(value, str) and 0 < len(value) <= 500 for value in quality_evidence):
+            if quality['status'] in {'reliable', 'uncertain'} or quality_evidence:
+                item['transcription_quality'] = {'status': quality['status'], 'evidence': list(quality_evidence)}
+    item['table_kind'] = 'calculation_sheet' if kind == 'calculation_sheet' else 'data_table'
     item['table_kind_source'] = 'automatic'
-    item['table_classification'] = {'kind': kind, 'status': 'response_invalid' if reason else ('unresolved' if kind == 'uncertain' else 'model_proposed'),
-                                    'evidence': deepcopy(evidence) if kind != 'uncertain' else [],
+    item['table_classification'] = {'kind': kind, 'status': ('response_invalid' if judgment == 'response_invalid' else 'evidence_unresolved') if reason else judgment,
+                                    'judgment_status': judgment,
+                                    'evidence_status': 'unresolved' if reason else ('located' if located else 'not_supplied'),
+                                    'evidence': located,
                                     'proposed_kind': candidate.get('table_kind') if isinstance(candidate.get('table_kind'), str) and len(candidate['table_kind']) <= 32 else None,
                                     'source_sha256': ctx.get('sha256')}
     if reason or kind == 'uncertain':
         item['table_classification']['reason'] = reason or 'classification_model_uncertain'
-    if candidate.get('continuation_required') is True or (kind == 'uncertain' and not reason):
+    if kind == 'calculation_sheet' and candidate.get('continuation_required') is True:
         item['continuation'] = {'status': 'pending', 'reason': 'adjacent_context_required'}
-    if kind == 'data_table':
+    if kind != 'calculation_sheet':
         return
     item.update(lookup_status='unavailable', manualReviewRequired=True, degraded=True)
-    if kind == 'uncertain':
-        return
     item['lookup_sections'] = []
     for key in ('contained_formulas', 'contained_formula_sources', 'contained_formula_quality'):
         item.pop(key, None)
@@ -271,11 +328,6 @@ def apply_calculation_sheet(item, candidate, content, description_language="unkn
             item[key] = []
     if 'tableRowsContent' in item:
         item['tableRowsContent'] = ''
-    if kind != 'calculation_sheet':
-        if kind == 'mixed':
-            item['table_classification']['reason'] = 'mixed_requires_partition'
-        return
-
     item['content_format'] = 'calculation_sheet_json'
     item['calculation_sheet'] = parse_calculation_sheet(candidate.get('calculation_sheet'), ctx, item)
     if item['calculation_sheet'].get('semantic_desc'):
@@ -539,32 +591,37 @@ def _calculation_steps(raw, sheet, text, language, issue):
             sheet.setdefault('rejected_steps', []).append({'reason': str(exc), 'candidate': deepcopy(step)})
 
 def classification_failed(item, reason, content=None):
-    """Failed automatic classification cannot silently become a queryable legacy table."""
+    """Keep failed classification diagnostics while retaining ordinary table handling."""
     if item.get('table_kind_source') == 'manual':
         return
     apply_calculation_sheet(item, {'table_kind': 'uncertain', 'classification_evidence': []},
                             content if content is not None else str(item.get('raw_html') or item.get('markdown') or ''))
-    item['table_classification']['reason'] = reason
+    item['table_classification'].update(status='response_invalid', judgment_status='response_invalid',
+                                        evidence_status='not_supplied', reason=reason)
     item.pop('calculation_sheet', None)
-    item.pop('content_format', None)
 
 
 def repair_table_classification(vlm, image_path, item, content, object_ref, available_calls):
     """One object-only format repair, charged to the existing shared call budget."""
     classification = item.get('table_classification', {})
-    if (item.get('table_kind_source') == 'manual'
-            or classification.get('status') not in ('response_invalid', 'not_run')
+    if (item.get('table_kind') != 'calculation_sheet'
+            or item.get('table_kind_source') == 'manual'
+            or classification.get('judgment_status') == 'unresolved'
+            or classification.get('status') not in ('response_invalid', 'not_run', 'evidence_unresolved')
             or classification.get('repair_attempts', 0)):
-        return 0
-    if available_calls <= 0:
-        classification['repair_reason'] = 'table_analysis_budget_exhausted'
         return 0
     if not callable(getattr(vlm, 'classify_table', None)):
         return 0
-    ctx = source_context(content)
+    if 'table_kind' not in item:
+        classification_failed(item, 'classification_kind_invalid', content)
+        classification = item['table_classification']
+    if available_calls <= 0:
+        classification['repair_reason'] = 'table_analysis_budget_exhausted'
+        return 0
+    ctx = source_context(content, evidence=True, source_title=item.get('title'))
     if ctx['status'] != 'available':
         return 0
-    target = {'object_ref': object_ref, 'source_sha256': ctx['sha256'], 'source_text': ctx['text']}
+    target = {'object_ref': object_ref, 'source_sha256': ctx['sha256'], 'source_text': ctx['text'], 'evidence_blocks': ctx['evidence_blocks']}
     for key in ('bbox', 'bbox_space', 'layout_id'):
         if item.get(key) is not None:
             target[key] = item[key]
@@ -578,7 +635,7 @@ def repair_table_classification(vlm, image_path, item, content, object_ref, avai
             raise ValueError('table_classification_response_incomplete')
         # Missing kind is a failed response, not a successful legacy default.
         apply_calculation_sheet(item, {**candidate, 'table_kind': candidate.get('table_kind')}, content)
-        if not item['table_classification'].get('proposed_kind'):
+        if item['table_classification'].get('proposed_kind') not in KINDS:
             item['table_classification']['proposed_kind'] = classification.get('proposed_kind')
         if item['table_kind'] == 'data_table':
             for key in ('manualReviewRequired', 'degraded', 'lookup_status'):
@@ -600,14 +657,54 @@ def table_content_quality(items):
     return {'complete': not reviews, 'objects': reviews}
 
 
+def calculation_transcription_quality(content, quality=None):
+    """Check source geometry independently of the model's content-quality judgment."""
+    quality = deepcopy(quality) if isinstance(quality, dict) else {}
+    if not isinstance(content, str) or not re.search(r'<table\b', content, re.I):
+        return quality
+    # Inspect source spans only; calculation sources must bypass lookup-grid conversion.
+    from lxml import html as lxml_html
+    if len(content) > 200000:
+        return quality
+    mismatch = False
+    root = lxml_html.fragment_fromstring(content, create_parent='div')
+    for table in root.xpath('.//table[not(ancestor::table)]'):
+        rows = table.xpath('./tr | ./thead/tr | ./tbody/tr | ./tfoot/tr')
+        widths = [0] * len(rows)
+        for index, row in enumerate(rows):
+            for cell in row.xpath('./td | ./th'):
+                try:
+                    rowspan, colspan = int(cell.get('rowspan', '1')), int(cell.get('colspan', '1'))
+                    if rowspan == 0:
+                        siblings = row.getparent().xpath('./tr')
+                        rowspan = len(siblings) - siblings.index(row)
+                    if not 1 <= rowspan <= len(rows) - index or not 1 <= colspan <= 100:
+                        raise ValueError('invalid_source_span')
+                except ValueError:
+                    mismatch = True
+                    continue
+                for covered in range(index, index + rowspan):
+                    widths[covered] += colspan
+        mismatch = mismatch or len(set(widths)) > 1
+    if mismatch:
+        evidence = quality.get('evidence')
+        quality.update(status='misaligned', evidence=(list(evidence) if isinstance(evidence, list) else [])
+                       + ['html_table_inconsistent_span_coverage'])
+    return quality
+
+
 def extract_calculation_items(vlm, image_path, item, content, object_ref, available_calls=1, source_store=None):
-    """Persist the current OCR source before text-only calculation structuring."""
-    from .calculation_processing import structure_calculation_source
+    """Persist independently usable transcription; organization is a separate review request."""
+    if item.get('table_kind') != 'calculation_sheet':
+        return 0
 
     source = item.setdefault('calculation_source', {})
     block_manifest = None
     transcribe = getattr(vlm, 'transcribe_calculation_blocks', None)
-    if callable(transcribe):
+    quality = calculation_transcription_quality(content, item.get('transcription_quality'))
+    recovery_needed = (not isinstance(content, str) or not content.strip()
+                       or quality.get('status') in {'missing', 'truncated', 'misaligned', 'incomplete'})
+    if recovery_needed and callable(transcribe):
         try:
             replacement, block_manifest = transcribe(item)
             if replacement is not None:
@@ -616,6 +713,9 @@ def extract_calculation_items(vlm, image_path, item, content, object_ref, availa
             block_manifest = {'status': 'fallback', 'reason': 'block_transcription_failed',
                               'logical_calls': 0, 'blocks': []}
     source.update(origin='existing_ocr', original_content=content)
+    if isinstance(content, str):
+        source['content_sha256'] = hashlib.sha256(content.encode()).hexdigest()
+    source['transcription_quality'] = deepcopy(quality)
     if block_manifest is not None:
         source['block_transcription'] = block_manifest
         if block_manifest['status'] == 'complete':
@@ -637,31 +737,29 @@ def extract_calculation_items(vlm, image_path, item, content, object_ref, availa
             source['artifact'] = source_store(object_ref, item, content)
         except Exception:
             reason = 'calculation_source_persistence_failed'
-    ctx = source_context(content)
-    target = {'object_ref': object_ref, 'source_sha256': ctx.get('sha256')}
-    extra, stage_reason = structure_calculation_source(
-        vlm, item, content, target, 0 if reason else available_calls - calls,
-        automatic=not reason and getattr(vlm, 'automatic_calculation_budget', False))
-    calls += extra
+    source['format'] = 'html' if isinstance(content, str) and re.search(r'<(?:table|div|p|h[1-6])\b', content, re.I) else 'markdown'
+    source['status'] = 'failed' if reason else 'available'
+    source['quality_status'] = 'needs_review'
+    source['layout_status'] = ('logical_reordered' if block_manifest and block_manifest.get('status') == 'complete'
+                               else 'needs_review' if recovery_needed else 'original')
+    source['pipeline']['semantic'] = {'status': 'not_requested'}
     if reason:
-        sheet = item.setdefault('calculation_sheet', parse_calculation_sheet({}, ctx, item))
-        sheet['validation_status'] = 'unresolved'
-        sheet['unresolved'] = [issue for issue in sheet['unresolved']
-                               if issue.get('reason') != 'table_analysis_budget_exhausted']
-        sheet['unresolved'].append({'reason': reason})
-        semantic = source['pipeline'].setdefault('semantic', {})
-        semantic.update(status='partial', reason=reason)
-        for batch in semantic.get('batches', []):
-            batch['reason'] = reason
-    elif stage_reason and 'calculation_sheet' in item:
-        item['calculation_sheet']['validation_status'] = 'unresolved'
-    if item.get('semantic_desc'):
-        item['description'] = item['semantic_desc']
+        source['reason'] = reason
+    description = item.get('semantic_desc') or item.get('description') or ''
+    description = valid_description(description, item.get('title', '')) if isinstance(description, str) else ''
+    source['semantic_status'] = 'available' if description else 'missing'
+    if description:
+        item['semantic_desc'] = description
+        item['description'] = description
+    item.pop('calculation_sheet', None)
+    item.update(content_format=source['format'], lookup_status='unavailable', lookup_sections=[],
+                manualReviewRequired=True)
     return calls
 
 
 def needs_calculation_call(item):
     return (item.get('table_kind') == 'calculation_sheet'
+            and item.get('calculation_source', {}).get('pipeline', {}).get('semantic', {}).get('status') != 'not_requested'
             and ('pipeline' not in item.get('calculation_source', {})
                  or item.get('calculation_sheet', {}).get('validation_status') != 'source_validated'))
 
@@ -675,8 +773,8 @@ def complete_calculation_batch(vlm, image_path, targets, used_calls, source_stor
     """Share one analysis budget across all tables, including the classification call."""
     additional = 0
     for item, content, object_ref in targets:
-        additional += repair_table_classification(vlm, image_path, item, content, object_ref,
-                                                  calculation_budget(vlm) - used_calls - additional)
+        if 'table_kind' not in item:
+            apply_calculation_sheet(item, {}, content)
         if not needs_calculation_call(item):
             continue
         available = calculation_budget(vlm) - used_calls - additional

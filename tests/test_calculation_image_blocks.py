@@ -206,7 +206,7 @@ def test_clipped_ocr_box_relocated_on_original_image_before_vlm_transcription(tm
             assert target_bbox == [0,0,1,.5]
             return {'coordinate_space':'normalized_1000','object_bbox':[0,0,1000,750],
                     'sections':[{'bbox':[100,50,900,200]}, {'bbox':[100,450,900,700]}]}
-        def transcribe_calculation_block(self,crop):
+        def transcribe_calculation_block(self,crop, **kwargs):
             calls.append(Image.open(crop).size)
             return '$S_{bi}$' if len(calls)==1 else '$S_{bo}$'
     text,manifest=b.transcribe_calculation_blocks(str(path),[0,0,1,.5],object(),tmp_path/'out',vlm=Vlm())
@@ -242,7 +242,7 @@ def test_good_ocr_layout_is_used_without_vlm_layout_call(tmp_path):
         def reserve_automatic_calculation_calls(self,n): pass
         def calculation_sections(self,*args,**kwargs):
             raise AssertionError('reliable OCR layout must be reused')
-        def transcribe_calculation_block(self,path):return '$x=1$'
+        def transcribe_calculation_block(self,path, **kwargs):return '$x=1$'
     layout=[{'type':'formula','bbox':[.1,.15,.8,.28]}, {'type':'formula','bbox':[.1,.44,.8,.89]}]
     text,manifest=b.transcribe_calculation_blocks(str(path),[.05,.05,.95,.95],object(),tmp_path/'out',layout=layout,vlm=Vlm())
     assert manifest['status']=='complete' and manifest['layout_source']=='ocr'
@@ -255,7 +255,7 @@ def test_vlm_block_failure_preserves_partial_evidence_and_falls_back(tmp_path):
         enabled=True
         calls=0
         def reserve_automatic_calculation_calls(self,n): pass
-        def transcribe_calculation_block(self,path):
+        def transcribe_calculation_block(self,path, **kwargs):
             self.calls+=1
             if self.calls==2:raise TimeoutError()
             return '$x=1$'
@@ -278,3 +278,86 @@ def test_vlm_block_preserves_markdown_and_latex_without_json_escaping(monkeypatc
 def test_touching_regions_are_not_overlapping():
     regions=[{'bbox':[0,0,1,.5]}, {'bbox':[0,.5,1,1]}]
     assert b.calculation_block_boxes(regions,[0,0,1,1]) == [[0,0,1,.5],[0,.5,1,1]]
+
+
+@pytest.mark.parametrize('mismatch', [False, True])
+def test_unsafe_internal_split_recovers_whole_object_without_clipping(tmp_path, mismatch):
+    path = tmp_path / 'internal.png'
+    image = Image.new('RGB', (600, 800), 'white')
+    ImageDraw.Draw(image).rectangle((60, 390, 530, 410), fill='black')
+    image.save(path)
+    calls = []
+    class Vlm:
+        enabled = True
+        def reserve_automatic_calculation_calls(self, count):
+            pass
+        def calculation_sections(self, image_path, target_bbox=None):
+            return {'coordinate_space': 'normalized', 'object_bbox': [.2, .2, .8, .8] if mismatch else [0, 0, 1, 1],
+                    'sections': [{'bbox': [.1, .1, .9, .3]}, {'bbox': [.1, .7, .9, .9]}]}
+        def transcribe_calculation_block(self, crop, logical_reorder=False):
+            assert logical_reorder, 'Unreliable layout must use explicit logical transcription'
+            calls.append(Image.open(crop).size)
+            return 'Heading\n$x_{i}=1$\nNote A'
+    text, manifest = b.transcribe_calculation_blocks(str(path), [0, 0, 1, 1], object(), tmp_path/'blocks', vlm=Vlm())
+    assert text == 'Heading\n$x_{i}=1$\nNote A'
+    assert calls == [(600, 800)]
+    assert manifest['mode'] == 'whole_recovery'
+    assert manifest['recovery_reason'] == ('section_target_mismatch' if mismatch else 'block_boundary_intersects_content')
+    assert manifest['status'] == 'complete'
+    assert manifest['vlm_calls'] == 2
+    assert manifest['blocks'][0]['bbox'] == [0, 0, 1, 1]
+
+
+def test_section_prompt_uses_one_coordinate_scale_for_target_and_response(monkeypatch):
+    from tests.test_pdf2md_calculation_processing import DynamicVLMClient
+    client = DynamicVLMClient(None)
+    prompts = []
+    def call(image, prompt, **kwargs):
+        prompts.append(prompt)
+        return '{"coordinate_space":"normalized_1000","object_bbox":[100,200,900,800],"sections":[]}'
+    monkeypatch.setattr(client, '_call_image_prompt', call)
+    result = client.calculation_sections('unused.png', [.1, .2, .9, .8])
+    assert '[100.0, 200.0, 900.0, 800.0]' in prompts[0]
+    assert 'normalized 0-1' not in prompts[0]
+    assert result['object_bbox'] == [100, 200, 900, 800]
+
+
+def test_block_transcription_supplies_object_context_without_duplicating_rows(monkeypatch):
+    from tests.test_pdf2md_calculation_processing import DynamicVLMClient
+    client = DynamicVLMClient(None)
+    calls = []
+    monkeypatch.setattr(client, '_call_image_prompt', lambda paths, prompt, **kwargs: calls.append((paths, prompt)) or '$x=1$')
+    assert client.transcribe_calculation_block('block.png', logical_reorder=True, context_image='object.png') == '$x=1$'
+    paths, prompt = calls[0]
+    assert paths == ['block.png', 'object.png']
+    assert 'Only transcribe rows visible in the FIRST image' in prompt
+    assert 'SECOND image' in prompt and 'column' in prompt
+
+
+def test_each_block_receives_same_complete_object_context(tmp_path):
+    path = image_fixture(tmp_path)
+    calls = []
+    class Vlm:
+        enabled = True
+        def reserve_automatic_calculation_calls(self, n): pass
+        def transcribe_calculation_block(self, crop, logical_reorder=False, context_image=None):
+            calls.append((Image.open(crop).size, Image.open(context_image).size if context_image else None, logical_reorder))
+            return '$x=1$'
+    layout = [{'type':'formula','bbox':[.1,.15,.8,.28]}, {'type':'formula','bbox':[.1,.44,.8,.89]}]
+    _, manifest = b.transcribe_calculation_blocks(str(path), [.05,.05,.95,.95], object(), tmp_path/'out', layout=layout, vlm=Vlm())
+    assert manifest['status'] == 'complete'
+    assert len(calls) == 2
+    assert all(context == (540,720) and logical for crop, context, logical in calls)
+    assert all(crop[1] < context[1] for crop, context, logical in calls)
+
+
+def test_recovery_uses_review_evidence_as_untrusted_comparison_data(monkeypatch):
+    from tests.test_pdf2md_calculation_processing import DynamicVLMClient
+    client = DynamicVLMClient(None)
+    calls = []
+    monkeypatch.setattr(client, '_call_image_prompt', lambda paths, prompt, **kwargs: calls.append(prompt) or '$x$')
+    client.transcribe_calculation_block('block.png', logical_reorder=True, context_image='object.png',
+                                       review_evidence=['missing superscript'])
+    assert 'missing superscript' in calls[0]
+    assert 'Verify these observations against pixels' in calls[0]
+    assert 'Start with the exact table title' not in calls[0]

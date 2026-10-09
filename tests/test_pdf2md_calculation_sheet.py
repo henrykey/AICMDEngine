@@ -47,7 +47,7 @@ def test_ambiguous_classification_quote_has_own_diagnostic():
 def test_legacy_classification_is_not_reported_as_success():
     item = {}
     cs.apply_calculation_sheet(item, {}, 'Pressure')
-    assert 'table_kind' not in item
+    assert item['table_kind'] == 'data_table'
     assert item['table_classification']['reason'] == 'classification_not_run'
 
 
@@ -118,10 +118,11 @@ def test_rejects_omissions_and_rewrites(mutation, reason):
 
 
 @pytest.mark.parametrize('kind', ['mixed', 'uncertain', 'unknown'])
-def test_unsupported_type_is_review_only(kind):
+def test_unsupported_type_defaults_to_data_table(kind):
     item = {'markdown': HTML}; p = proposal(); p['table_kind'] = kind
     cs.apply_calculation_sheet(item, p, HTML)
-    assert item['manualReviewRequired'] is True
+    assert item['table_kind'] == 'data_table'
+    assert 'manualReviewRequired' not in item
     assert not item.get('calculation_sheet', {}).get('sections')
 
 
@@ -142,7 +143,7 @@ def framed_proposal(target):
         'unresolved': [], 'image_discrepancies': []}
 
 
-def test_upload_reuses_ocr_for_framed_semantics_and_survives_normalization(calculation_image):
+def test_upload_reuses_source_without_structuring_and_survives_normalization(calculation_image):
     calls = []
     class VLM:
         table_analysis_max_model_calls = 3
@@ -157,13 +158,14 @@ def test_upload_reuses_ocr_for_framed_semantics_and_survives_normalization(calcu
             return framed_proposal(target)
     item = {**CALCULATION_REGION, 'markdown': HTML, 'layout_id':'p1-t1'}
     payloads = {'tables': [item]}
-    assert pp._enrich_upload_semantics(VLM(), calculation_image, {}, payloads, True) == 2
-    assert len(calls) == 2
+    assert pp._enrich_upload_semantics(VLM(), calculation_image, {}, payloads, True) == 1
+    assert len(calls) == 1
     assert item['table_kind'] == 'calculation_sheet'
     normalized = pp._normalize_structured(payloads)
     out = pp._build_output_elements('', normalized, 'full_glm_ocr')['tables'][0]
-    assert out['calculation_sheet']['validation_status'] == 'source_validated'
-    assert out['calculation_source']['pipeline']['semantic']['status'] == 'complete'
+    assert 'calculation_sheet' not in out
+    assert out['calculation_source']['original_content'] == HTML
+    assert out['calculation_source']['pipeline']['semantic']['status'] == 'not_requested'
 
 
 
@@ -206,12 +208,13 @@ def test_single_page_glm_classifies_before_any_grid_call(monkeypatch, calculatio
     out = json.loads(sp.extract_page_tables_direct(file_data=base64.b64encode(Path(calculation_image).read_bytes()).decode(), input_type='image',
         ocr_config={'glm_ocr': {'enabled':True, 'model':'stub', 'api_key':'stub', 'base_url':'http://stub'}},
         vlm_config={'model':'stub', 'api_key':'stub', 'base_url':'http://stub'}))
-    assert out['model_calls'] == {'glm_ocr':1, 'vlm_ocr':2}
+    assert out['model_calls'] == {'glm_ocr':1, 'vlm_ocr':1}
     assert out['table_kind'] == 'calculation_sheet'
     assert out['columns'] == [] and out['normalized_rows'] == []
     assert out['tableRowsContent'] == ''
     assert '_pending_grid' not in out['tables'][0]
-    assert out['calculation_sheet']['validation_status'] == 'source_validated'
+    assert 'calculation_sheet' not in out
+    assert out['calculation_source']['original_content'] == HTML
 
 
 def test_single_page_vlm_calculation_response_bypasses_grid(monkeypatch):
@@ -257,7 +260,7 @@ def test_malformed_calculation_response_fails_closed(value):
 def test_no_title_only_classification_or_foreign_source():
     item={};p=proposal();p['classification_evidence']=['not in source']
     cs.apply_calculation_sheet(item,p,HTML)
-    assert item['table_kind'] == 'uncertain'
+    assert item['table_kind'] == 'data_table'
 
 
 def test_render_escapes_markup_and_pipes():
@@ -272,7 +275,7 @@ def test_missing_items_and_generated_evidence_cannot_report_success():
     assert item['calculation_sheet']['validation_status'] == 'unresolved'
     p['classification_evidence']=['This worksheet calculates pressure.']
     item={};cs.apply_calculation_sheet(item,p,HTML)
-    assert item['table_kind'] == 'uncertain'
+    assert item['table_kind'] == 'data_table'
 
 
 def test_upload_truncated_response_not_accepted():
@@ -323,7 +326,7 @@ def test_item_geometry_distinct_from_table_geometry():
     assert source['location_scope']=='item'
 
 
-@pytest.mark.parametrize('budget,expected_calls', [(0,0),(1,1),(2,2)])
+@pytest.mark.parametrize('budget,expected_calls', [(0,0),(1,1),(2,1)])
 def test_two_stage_upload_has_shared_budget(budget, expected_calls, calculation_image):
     events=[]
     class VLM:
@@ -341,12 +344,10 @@ def test_two_stage_upload_has_shared_budget(budget, expected_calls, calculation_
     payload={'tables':[{**CALCULATION_REGION, 'markdown':HTML}]}
     assert pp._enrich_upload_semantics(VLM(),calculation_image,{},payload,True)==expected_calls
     assert len(events)==expected_calls
-    if budget==2:
-        assert events==['classify','extract']
-        assert payload['tables'][0]['calculation_source']['origin']=='existing_ocr'
-        assert payload['tables'][0]['calculation_sheet']['coverage']['structured']>0
-    elif budget==1:
-        assert {'reason':'table_analysis_budget_exhausted'} in payload['tables'][0]['calculation_sheet']['unresolved']
+    if budget:
+        assert events == ['classify']
+        assert payload['tables'][0]['calculation_source']['origin'] == 'existing_ocr'
+        assert 'calculation_sheet' not in payload['tables'][0]
 
 
 
@@ -361,9 +362,9 @@ def test_two_tables_do_not_each_receive_a_fresh_budget(calculation_image):
             events.append(target['object_ref'])
             return {**target, 'source_text': HTML}
     payload={'tables':[{**CALCULATION_REGION, 'markdown':HTML},{**CALCULATION_REGION, 'markdown':HTML}]}
-    assert pp._enrich_upload_semantics(VLM(),calculation_image,{},payload,True)==2
-    assert events==['tables:0']
-    assert {'reason':'table_analysis_budget_exhausted'} in payload['tables'][1]['calculation_sheet']['unresolved']
+    assert pp._enrich_upload_semantics(VLM(),calculation_image,{},payload,True)==1
+    assert events == []
+    assert all(t['calculation_source']['original_content'] == HTML for t in payload['tables'])
 
 
 
@@ -375,7 +376,10 @@ def test_dedicated_parser_checks_identity_and_provider_failure(mode,reason, calc
             if mode=='failure':raise RuntimeError('private provider details')
             return {'object_ref':'wrong' if mode=='wrong_id' else target['object_ref'],
                     'source_sha256':target['source_sha256'],**proposal()['calculation_sheet']}
-    item=dict(CALCULATION_REGION);cs.extract_calculation_items(VLM(),calculation_image,item,HTML,'tables:0')
+    cp = importlib.import_module(cs.__package__ + '.calculation_processing')
+    item = dict(CALCULATION_REGION)
+    cp.structure_calculation_source(VLM(), item, HTML,
+        {'object_ref': 'tables:0', 'source_sha256': cs.source_context(HTML)['sha256']}, 1)
     assert {'reason':reason} in item['calculation_sheet']['unresolved']
     assert item['calculation_sheet']['coverage']['represented'] > 0
     assert item['calculation_sheet']['coverage']['structured'] == 0
@@ -667,11 +671,11 @@ def test_upload_saves_source_before_semantics_and_never_structures_unsaved_sourc
         return {'artifact_id': 'saved-source', 'task_id': 'task', 'page_no': 1}
     item = {**CALCULATION_REGION, 'markdown': HTML, 'layout_id': 'region-a'}
     pp._enrich_upload_semantics(VLM(), calculation_image, {}, {'tables': [item]}, True, source_store=save)
-    assert events == (['classify', 'save'] if persistence_failure else ['classify', 'save', 'semantic'])
+    assert events == ['classify', 'save']
     assert item['calculation_source']['original_content'] == HTML
     if persistence_failure:
-        assert item['calculation_source']['pipeline']['semantic']['reason'] == 'calculation_source_persistence_failed'
-        assert item['calculation_sheet']['coverage']['structured'] == 0
+        assert item['calculation_source']['reason'] == 'calculation_source_persistence_failed'
+        assert 'calculation_sheet' not in item
     else:
         assert item['calculation_source']['artifact']['artifact_id'] == 'saved-source'
 
@@ -710,32 +714,22 @@ def test_upload_task_wires_durable_source_before_semantic_model(monkeypatch, tmp
     response = json.loads(asyncio.run(server.process_task_page(started.task_id, 1)))
     item = response['page_result']['elements']['tables'][0]
     assert item['calculation_source']['artifact']['task_id'] == started.task_id
-    assert item['calculation_source']['pipeline']['semantic']['status'] == 'complete'
+    assert item['calculation_source']['pipeline']['semantic']['status'] == 'not_requested'
     assert manager.get_task(started.task_id).pages[1].result['elements']['tables'][0] == item
 
 
 @pytest.mark.parametrize('kind', ['data_table', 'calculation_sheet'])
-def test_missing_evidence_is_response_failure_and_recovers_once(kind):
+def test_missing_evidence_defaults_without_repair(kind):
     item = {'markdown': HTML, 'columns': ['A'], 'normalized_rows': [['1']]}
     cs.apply_calculation_sheet(item, {'table_kind': kind}, HTML)
-    assert item['table_classification']['status'] == 'response_invalid'
+    assert item['table_classification']['status'] == 'evidence_unresolved'
     class VLM:
-        table_analysis_max_model_calls = 2
-        last_call_info = {}
-        calls = 0
-        def classify_table(self, image, target):
-            self.calls += 1
-            assert target['source_text'] == cs.source_context(HTML)['text']
-            assert target['object_ref'] == 'tables:0'
-            return {'table_kind': kind, 'classification_evidence': ['Force $F=pA$ N']}
-    vlm = VLM()
-    assert cs.repair_table_classification(vlm, 'page.png', item, HTML, 'tables:0', 1) == 1
-    assert item['table_kind'] == kind
-    assert item['table_classification']['status'] == 'model_proposed'
-    if kind == 'data_table':
-        assert item['columns'] == ['A'] and item['normalized_rows'] == [['1']]
-    assert cs.repair_table_classification(vlm, 'page.png', item, HTML, 'tables:0', 1) == 0
-    assert vlm.calls == 1
+        def classify_table(self, *args):
+            pytest.fail('missing evidence must not trigger another model call')
+    assert cs.repair_table_classification(VLM(), 'page.png', item, HTML, 'tables:0', 1) == 0
+    assert item['table_kind'] == 'data_table'
+    assert item['table_classification']['proposed_kind'] == kind
+    assert item['columns'] == ['A'] and item['normalized_rows'] == [['1']]
 
 
 def test_classification_repair_preserves_proposal_budget_and_manual_decision():
@@ -749,14 +743,14 @@ def test_classification_repair_preserves_proposal_budget_and_manual_decision():
             return {'table_kind': 'data_table'}
     vlm = VLM()
     assert cs.repair_table_classification(vlm, 'page.png', item, HTML, 'one', 0) == 0
-    assert item['table_classification']['repair_reason'] == 'table_analysis_budget_exhausted'
-    assert cs.repair_table_classification(vlm, 'page.png', item, HTML, 'one', 1) == 1
-    assert item['table_kind'] == 'uncertain'
+    assert 'repair_reason' not in item['table_classification']
+    assert cs.repair_table_classification(vlm, 'page.png', item, HTML, 'one', 1) == 0
+    assert item['table_kind'] == 'data_table'
     assert item['table_classification']['proposed_kind'] == 'data_table'
     assert cs.repair_table_classification(vlm, 'page.png', item, HTML, 'one', 1) == 0
     manual = {'table_kind': 'calculation_sheet', 'table_kind_source': 'manual'}
     assert cs.repair_table_classification(vlm, 'page.png', manual, HTML, 'two', 1) == 0
-    assert vlm.calls == 1
+    assert vlm.calls == 0
 
 
 def test_semantically_uncertain_classification_is_not_format_retry():
@@ -780,11 +774,11 @@ def test_classification_repair_shares_budget_without_cross_object_results():
             self.calls.append(target['object_ref'])
             return {'table_kind': 'data_table', 'classification_evidence': [target['source_text']]}
     vlm = VLM()
-    assert cs.complete_calculation_batch(vlm, 'page.png', objects, 1) == 1
-    assert vlm.calls == ['first']
+    assert cs.complete_calculation_batch(vlm, 'page.png', objects, 1) == 0
+    assert vlm.calls == []
     assert objects[0][0]['table_kind'] == 'data_table'
-    assert objects[1][0]['table_kind'] == 'uncertain'
-    assert objects[1][0]['table_classification']['repair_reason'] == 'table_analysis_budget_exhausted'
+    assert objects[1][0]['table_kind'] == 'data_table'
+    assert 'repair_reason' not in objects[1][0]['table_classification']
 
 
 @pytest.mark.parametrize('response', [
@@ -798,6 +792,167 @@ def test_repair_never_accepts_other_object_or_unbound_evidence(response):
         last_call_info = {}
         def classify_table(self, *_):
             return response
-    assert cs.repair_table_classification(VLM(), 'page.png', item, HTML, 'this', 1) == 1
-    assert item['table_kind'] == 'uncertain'
-    assert item['table_classification']['status'] == 'response_invalid'
+    assert cs.repair_table_classification(VLM(), 'page.png', item, HTML, 'this', 1) == 0
+    assert item['table_kind'] == 'data_table'
+    assert item['table_classification']['status'] == 'evidence_unresolved'
+
+
+@pytest.mark.parametrize('title', ['管板应力计算表', 'Stress Calculation'])
+def test_title_is_independent_source_evidence_without_changing_body(title):
+    body = 'Parameter p'
+    ctx = cs.source_context(body, evidence=True, source_title=title)
+    base = cs.source_context(body, evidence=True)
+    assert ctx['text'] == base['text'] and ctx['sha256'] == base['sha256']
+    block = next(b for b in ctx['evidence_blocks'] if b.get('source_field') == 'title')
+    item = {'title': title}
+    cs.apply_calculation_sheet(item, {'table_kind': 'calculation_sheet',
+        'classification_evidence': [{'block_id': block['id'], 'source_sha256': block['source_sha256']}]}, body)
+    assert item['table_kind'] == 'calculation_sheet'
+    assert item['table_classification']['evidence_status'] == 'located'
+    assert item['table_classification']['evidence'][0]['source_field'] == 'title'
+    other = {'title': 'Another table'}
+    cs.apply_calculation_sheet(other, {'table_kind': 'calculation_sheet',
+        'classification_evidence': [{'block_id': block['id'], 'source_sha256': block['source_sha256']}]}, body)
+    assert other['table_classification']['reason'] == 'classification_evidence_mismatch'
+
+
+def test_image_transcription_can_quote_current_title_but_not_generated_description():
+    item = {'title': 'Stress Calculation', 'description': 'Generated formula summary'}
+    cs.apply_calculation_sheet(item, {'table_kind': 'calculation_sheet',
+        'classification_evidence': ['Stress Calculation']}, 'Parameter p')
+    assert item['table_classification']['evidence_status'] == 'located'
+    cs.apply_calculation_sheet(item, {'table_kind': 'calculation_sheet',
+        'classification_evidence': ['Generated formula summary']}, 'Parameter p')
+    assert item['table_classification']['reason'] == 'classification_evidence_mismatch'
+
+
+@pytest.mark.parametrize('field', ['title', 'table_title'])
+def test_new_image_title_can_be_cited_without_replacing_existing_title(field):
+    candidate = {field: '应力计算表', 'table_kind': 'calculation_sheet',
+                 'classification_evidence': ['应力计算表']}
+    item = {}
+    cs.apply_calculation_sheet(item, candidate, 'Parameter p')
+    assert item['table_classification']['evidence_status'] == 'located'
+    existing = {'title': 'Different object'}
+    cs.apply_calculation_sheet(existing, candidate, 'Parameter p')
+    assert existing['table_classification']['reason'] == 'classification_evidence_mismatch'
+
+
+def test_unclassified_title_does_not_trigger_repair_and_keeps_quality():
+    class VLM:
+        last_call_info = {}
+        def classify_table(self, image, target):
+            block = next(b for b in target['evidence_blocks'] if b.get('source_field') == 'title')
+            return {'object_ref': target['object_ref'], 'source_sha256': target['source_sha256'],
+                    'table_kind': 'calculation_sheet', 'classification_evidence': [
+                        {'block_id': block['id'], 'source_sha256': block['source_sha256']}]}
+    item = {'title': 'Stress Calculation', 'transcription_quality': {'status': 'incomplete'},
+            'table_classification': {'status': 'evidence_unresolved', 'judgment_status': 'model_proposed'}}
+    assert cs.repair_table_classification(VLM(), None, item, 'Parameter p', 'table:0', 1) == 0
+    assert item['table_classification']['status'] == 'evidence_unresolved'
+    assert item['transcription_quality']['status'] == 'incomplete'
+
+
+def test_single_page_prompt_supplies_independent_title_block():
+    prompt = sp._prompt_table_metadata([{'title': '管板计算表', 'markdown': 'Parameter p'}], '')
+    assert 'source_field' in prompt and '管板计算表' in prompt
+
+
+@pytest.mark.parametrize('candidate', [
+    {}, {'table_kind': None}, {'table_kind': 'invalid'},
+    {'table_kind': 'uncertain'}, {'table_kind': 'mixed', 'classification_evidence': ['Inputs']},
+    {'table_kind': 'data_table', 'classification_evidence': ['Inputs']},
+    {'table_kind': 'calculation_sheet', 'classification_evidence': ['foreign']},
+])
+def test_only_confirmed_calculation_enters_enhancement(candidate):
+    original = {'markdown': HTML, 'raw_html': HTML, 'columns': ['A'],
+                'normalized_rows': [['1']], 'source_cells': [{'row': 0, 'col': 0}],
+                'cell_status': ['ok'], 'tableRowsContent': '1', 'content_format': 'html',
+                'images': [{'image_path': 'source.png'}], 'lookup_sections': [{'title': 'A'}]}
+    item = copy.deepcopy(original)
+    candidate = {**candidate, 'transcription_quality': {'status': 'incomplete', 'evidence': ['missing index']}}
+    cs.apply_calculation_sheet(item, candidate, HTML)
+    class Provider:
+        def classify_table(self, *args):
+            pytest.fail('fallback must not retry classification')
+        def transcribe_calculation_blocks(self, *args):
+            pytest.fail('fallback must not transcribe calculation blocks')
+    assert cs.complete_calculation_batch(Provider(), 'page.png', [(item, HTML, 'tables:0')], 1) == 0
+    assert item['table_kind'] == 'data_table'
+    assert {key: item[key] for key in original} == original
+    assert 'calculation_source' not in item
+    assert 'manualReviewRequired' not in item
+
+
+def test_failed_classification_preserves_original_data_table_format():
+    item = {'markdown': HTML, 'content_format': 'html', 'columns': ['A'], 'normalized_rows': [['1']]}
+    original = copy.deepcopy(item)
+    cs.classification_failed(item, 'provider_failed')
+    assert item['table_kind'] == 'data_table'
+    assert {key: item[key] for key in original} == original
+    assert item['table_classification']['reason'] == 'provider_failed'
+
+
+def test_mixed_page_enhances_only_confirmed_calculation():
+    items = []
+    for kind in ('data_table', 'mixed', 'uncertain', 'calculation_sheet'):
+        item = {'markdown': HTML, 'columns': ['A'], 'normalized_rows': [['1']]}
+        cs.apply_calculation_sheet(item, {'table_kind': kind, 'classification_evidence': ['Inputs'],
+            'transcription_quality': {'status': 'incomplete', 'evidence': ['missing formula']}}, HTML)
+        items.append((item, HTML, kind))
+    calls = []
+    class Provider:
+        def classify_table(self, *args):
+            pytest.fail('no classification repair')
+        def transcribe_calculation_blocks(self, item):
+            calls.append(item)
+            return 'Recovered source', {'status': 'complete', 'reason': None, 'logical_calls': 1, 'blocks': []}
+    cs.complete_calculation_batch(Provider(), 'page.png', items, 1)
+    assert calls == [items[-1][0]]
+    assert items[-1][0]['calculation_source']['original_content'] == 'Recovered source'
+    assert all('calculation_source' not in item for item, _, _ in items[:-1])
+
+
+@pytest.mark.parametrize('entrypoint', ['upload', 'single_page'])
+@pytest.mark.parametrize('outcome', ['data_table', 'uncertain', 'mixed', 'missing', 'invalid', 'failure', 'truncated'])
+def test_table_entrypoints_fallback_keeps_structure_and_one_semantic_call(entrypoint, outcome):
+    from types import SimpleNamespace
+    item = {'markdown': HTML, 'columns': ['A'], 'normalized_rows': [['1']],
+            'source_cells': [{'row': 0, 'col': 0, 'text': '1'}],
+            'contains_images': True, 'image_unresolved': False}
+    original = copy.deepcopy(item)
+    candidate = {'classification_evidence': ['Inputs'], 'continuation_required': True,
+                 'transcription_quality': {'status': 'incomplete', 'evidence': ['missing index']}}
+    if outcome != 'missing':
+        candidate['table_kind'] = outcome
+    class Provider:
+        enabled = True
+        max_tokens = 4096
+        last_call_info = {'finish_reason': 'length' if outcome == 'truncated' else 'stop'}
+        calls = 0
+        def answer(self):
+            self.calls += 1
+            if outcome == 'failure':
+                raise RuntimeError('stub failure')
+            return {'tables': [{'object_ref': 'tables:0', 'index': 0, **candidate}]}
+        def extract_region_structured(self, *args, **kwargs):
+            return self.answer()
+        def _call_image_prompt(self, *args, **kwargs):
+            return json.dumps(self.answer())
+        def classify_table(self, *args):
+            pytest.fail('no extra classification request')
+        def transcribe_calculation_blocks(self, *args):
+            pytest.fail('no calculation recovery on fallback')
+    vlm = Provider()
+    if entrypoint == 'upload':
+        assert pp._enrich_upload_semantics(vlm, 'unused', {}, {'tables': [item]}, True) == 1
+    else:
+        calls = {'vlm_ocr': 0}
+        sp._enrich_table_metadata_with_vlm(SimpleNamespace(image_path='unused', page_text=''),
+            vlm, [item], True, calls, [], 'en')
+        assert calls['vlm_ocr'] == 1
+    assert vlm.calls == 1
+    assert item['table_kind'] == 'data_table'
+    assert {key: item[key] for key in original} == original
+    assert 'calculation_source' not in item
+    assert 'continuation' not in item

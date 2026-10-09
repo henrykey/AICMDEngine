@@ -129,6 +129,12 @@ async def process_task_page(
             await asyncio.wait((operation, notification), return_when=asyncio.FIRST_COMPLETED)
         finally:
             notification.cancel()
+    if (routing_config or {}).get("calculation_poll") and not operation.done():
+        wait_ms = min(60000, max(0, int((routing_config or {}).get("calculation_wait_ms", 0))))
+        if wait_ms:
+            # Wait for completion, not repeated status checks. A disconnected observer
+            # must never cancel the existing extraction or start a replacement.
+            await asyncio.wait({operation}, timeout=wait_ms / 1000)
     if operation.done():
         # Ordinary pages retain their synchronous lifecycle and response shape.
         if not started.is_set():

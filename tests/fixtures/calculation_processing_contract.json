@@ -140,7 +140,31 @@
                   "source_item_ids": [
                     "s1-i1"
                   ],
-                  "status": "partial"
+                  "status": "partial",
+                  "result": {
+                    "object_ref": "p2-o001-table",
+                    "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "sections": [
+                      {
+                        "title": "Pressure",
+                        "items": [
+                          {
+                            "kind": "input",
+                            "name": "Pressure",
+                            "symbol": "p",
+                            "unit": "MPa",
+                            "sources": [
+                              "Pressure p = MPa"
+                            ],
+                            "source_item_id": "s1-i1"
+                          }
+                        ]
+                      }
+                    ],
+                    "unresolved": [],
+                    "image_discrepancies": [],
+                    "source_revision": "3dd2aa25a2f9a5b59da7e33de8ae8b289275ed732e6087b871d16b052e5416e3"
+                  }
                 }
               ]
             },
@@ -293,7 +317,31 @@
                   "source_item_ids": [
                     "s1-i1"
                   ],
-                  "status": "partial"
+                  "status": "partial",
+                  "result": {
+                    "object_ref": "p2-o001-table",
+                    "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "sections": [
+                      {
+                        "title": "Pressure",
+                        "items": [
+                          {
+                            "kind": "input",
+                            "name": "Pressure",
+                            "symbol": "p",
+                            "unit": "MPa",
+                            "sources": [
+                              "Pressure p = MPa"
+                            ],
+                            "source_item_id": "s1-i1"
+                          }
+                        ]
+                      }
+                    ],
+                    "unresolved": [],
+                    "image_discrepancies": [],
+                    "source_revision": "3dd2aa25a2f9a5b59da7e33de8ae8b289275ed732e6087b871d16b052e5416e3"
+                  }
                 }
               ]
             },
@@ -463,7 +511,31 @@
               "source_item_ids": [
                 "s1-i1"
               ],
-              "status": "partial"
+              "status": "partial",
+              "result": {
+                "object_ref": "p2-o001-table",
+                "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "sections": [
+                  {
+                    "title": "Pressure",
+                    "items": [
+                      {
+                        "kind": "input",
+                        "name": "Pressure",
+                        "symbol": "p",
+                        "unit": "MPa",
+                        "sources": [
+                          "Pressure p = MPa"
+                        ],
+                        "source_item_id": "s1-i1"
+                      }
+                    ]
+                  }
+                ],
+                "unresolved": [],
+                "image_discrepancies": [],
+                "source_revision": "3dd2aa25a2f9a5b59da7e33de8ae8b289275ed732e6087b871d16b052e5416e3"
+              }
             }
           ]
         },
