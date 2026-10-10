@@ -1,5 +1,30 @@
 # Changelog
 
+## v1.2.5 - 2026-10-10
+
+### Added
+
+- Added source-bound calculation-sheet processing, explicit continuation, bounded block OCR/VLM transcription, optional per-formula semantics, and identity-bound PNG extraction.
+- Added source-bound complex table queries, evidence-validated object semantic completion, and shared Docs/MCP conversion contract fixtures.
+- Added Plan2 Thinking controls and safe provider diagnostics.
+
+### Changed
+
+- Returned classification, semantic orchestration, recovery selection, and request-budget ownership to Membership Docs; conversion tools preserve readable source without implicit business enrichment.
+- Made object semantic and table-query operations single-attempt; explicit recovery uses caller-selected regions and engines while preserving source identity, ordering, and complete source on failure.
+- Applied shared Thinking policy to MCP requests and retained source content when optional structured processing fails.
+
+### Fixed
+
+- Fixed formula-number and math-delimiter handling, table-cell image recovery, caption recovery, and incomplete-object evidence preservation.
+- Fixed MCP WebSocket concurrency and stale connection mapping cleanup, and PDF2MD image module packaging.
+
+### Integration and verification
+
+- Pair with Membership `v2.4-R0.4.0`; callers must explicitly orchestrate classification and semantic processing.
+- 943 targeted offline Python tests passed; existing HTTP transport failures and the remote manual script are excluded. Real-model/document, runtime UI, and deployment acceptance remain pending.
+- See [Release Notes — v1.2.5](RELEASE_NOTES_v1.2.5.md) for details and validation boundaries.
+
 ## v1.2.4 - 2026-09-03
 
 ### Added
