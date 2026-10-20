@@ -2,6 +2,7 @@
 from .calculation_input import math_spans
 from copy import deepcopy
 import re
+from time import monotonic
 
 from .calculation_sheet import (
     apply_calculation_sheet, calculation_budget, parse_calculation_sheet, source_context,
@@ -32,6 +33,8 @@ def validate_request(request, hint, mode):
         raise ValueError('calculation_identity_mismatch')
     if request.get('stage') is not None and (request['stage'] != 'transcription'
             or mode == 'organize_existing' or hint == 'data_table'):
+        raise ValueError('invalid_calculation_processing_stage')
+    if 'include_formula_descriptions' in request and type(request['include_formula_descriptions']) is not bool:
         raise ValueError('invalid_calculation_processing_stage')
     content = request.get('existing_content', '')
     if not isinstance(content, str) or len(content) > 100000:
@@ -418,12 +421,17 @@ def structure_calculation_source(vlm, item, content, target, available_calls, re
                             'logical_calls': calls, 'batch_count': len(batches),
                             'source_revision': ctx['source_revision'], 'identity': deepcopy(identity), 'batches': progress}
     pipeline['validation'] = {'status': 'complete' if complete else 'needs_review', **sheet['coverage']}
-    if callable(getattr(vlm, 'describe_calculation_formula', None)):
+    if target.get('include_formula_descriptions', True) and callable(getattr(vlm, 'describe_calculation_formula', None)):
+        optional_started = monotonic()
         optional_calls = complete_optional_formula_semantics(vlm, sheet)
         calls += optional_calls
         pipeline['optional_formula_semantics'] = {
             'logical_calls': optional_calls, 'timeout_sec': getattr(vlm, 'formula_semantic_timeout_sec', 15),
-            'required': False}
+            'required': False, 'duration_ms': round((monotonic() - optional_started) * 1000),
+            'completed': sum(bool(entry.get('semantic_desc')) for section in sheet['sections']
+                             for entry in section['items'] if entry.get('kind') in ('formula', 'branch', 'check') and entry.get('latex')),
+            'failed': sum(str(entry.get('semantic_status', '')).startswith('optional_') for section in sheet['sections']
+                          for entry in section['items'] if entry.get('kind') in ('formula', 'branch', 'check') and entry.get('latex'))}
         from .calculation_sheet import _render
         sheet['render_markdown'] = _render(sheet['sections'], ctx['description_language'])
     if getattr(vlm, 'physical_request_limit', None) is not None:
@@ -582,7 +590,8 @@ def process_request(request, hint, mode, vlm, image_path=None, adjacent_images=N
             return finish('table_analysis_budget_exhausted')
         target = {'object_ref': identity['layout_id'], 'source_sha256': identity['source_sha256'],
                   'processing_mode': mode, 'table_kind_hint': hint,
-                  'existing_content': request.get('existing_content', '')}
+                  'existing_content': request.get('existing_content', ''),
+                  'include_formula_descriptions': request.get('include_formula_descriptions', True)}
         if mode != 'organize_existing' and hint != 'data_table':
             target['calculation_stage'] = 'transcription' if hint == 'calculation_sheet' else 'classification_transcription'
             target.pop('existing_content', None)

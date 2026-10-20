@@ -2009,3 +2009,28 @@ def test_object_ocr_does_not_run_unrequested_content_review(monkeypatch, quality
     assert out['calculation_source']['original_content'] == original
     assert out['model_calls']['vlm_ocr'] == 0
     assert out['budget']['logical_calls'] == 1
+
+
+def test_structure_checkpoint_defers_optional_descriptions_to_separate_call():
+    from tests.test_pdf2md_calculation_sheet import framed_proposal
+    req = request(); req['existing_content'] = '$q=1$'
+    req['include_formula_descriptions'] = False
+    class BatchProvider(Provider):
+        def extract_calculation_sheet(self, image, target):
+            self.calls.append(copy.deepcopy(target))
+            return framed_proposal(target)
+        def describe_calculation_formula(self, item, context):
+            raise AssertionError('structure request must not describe formulas')
+    client = BatchProvider()
+    first = cp.process_request(req, 'calculation_sheet', 'organize_existing', client)
+    assert len(client.calls) == 1
+    progress = first['calculation_source']['pipeline']['semantic']
+    assert progress['status'] == 'complete'
+    assert 'optional_formula_semantics' not in first['calculation_source']['pipeline']
+    req['calculation_resume'] = progress
+    req['include_formula_descriptions'] = True
+    client = BatchProvider()
+    second = cp.process_request(req, 'calculation_sheet', 'organize_existing', client)
+    assert not client.calls
+    assert second['calculation_sheet']['coverage'] == first['calculation_sheet']['coverage']
+    assert second['calculation_source']['pipeline']['optional_formula_semantics']['required'] is False
