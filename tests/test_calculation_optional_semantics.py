@@ -74,3 +74,46 @@ def test_optional_request_uses_one_send_and_no_sdk_retry(monkeypatch):
             client.describe_calculation_formula({'latex':'a=b'}, {})
         assert client.physical_requests==1
     finally: client._client.close()
+
+
+@pytest.mark.parametrize('timeout', [False, True])
+def test_explicit_optional_rpc_describes_only_one_formula_and_never_restructures(timeout):
+    from tests.test_pdf2md_calculation_processing import request
+    req = request(); req.update(stage='formula_description', existing_content='$a=b$\n$c=d$',
+                                formula={'id': 'a', 'kind': 'formula', 'latex': 'a=b', 'sources': ['a=b']})
+    seen = []
+    class Provider:
+        table_analysis_max_model_calls = 8
+        def extract_calculation_sheet(self, *args): raise AssertionError('must not restructure')
+        def describe_calculation_formula(self, item, context):
+            seen.append(item['id'])
+            if timeout: raise TimeoutError()
+            return 'The relation defines a in terms of b.'
+    out = cp.process_request(req, 'calculation_sheet', 'organize_existing', Provider())
+    assert seen == ['a']
+    assert out['formula_description']['id'] == 'a'
+    assert out['formula_description']['semantic_status'] == ('optional_timeout' if timeout else 'model_proposed')
+    assert 'calculation_sheet' not in out
+
+
+def test_single_formula_stage_through_public_table_tool(monkeypatch):
+    import json
+    from tests.test_pdf2md_calculation_processing import request, sp
+    req = request()
+    req.update(stage='formula_description', existing_content='$a=b$',
+               formula={'id': 'a', 'kind': 'formula', 'latex': 'a=b', 'sources': ['a=b']})
+    seen = []
+    class Provider:
+        table_analysis_max_model_calls = 8
+        def extract_calculation_sheet(self, *args):
+            raise AssertionError('optional operation must not restructure')
+        def describe_calculation_formula(self, item, context):
+            seen.append(item['id'])
+            return 'Defines a in terms of b.'
+    monkeypatch.setattr(sp, 'DynamicVLMClient', lambda *_: Provider())
+    out = json.loads(sp.extract_page_tables_direct(processing_mode='organize_existing',
+                    table_kind_hint='calculation_sheet', context={'calculation_request': req}))
+    assert seen == ['a']
+    assert out['formula_description']['semantic_desc'] == 'Defines a in terms of b.'
+    assert out['calculation_identity'] == req['identity']
+    assert 'calculation_sheet' not in out

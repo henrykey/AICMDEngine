@@ -31,7 +31,14 @@ def validate_request(request, hint, mode):
         raise ValueError('manual_table_kind_required')
     if not isinstance(request, dict) or not valid_identity(request.get('identity')):
         raise ValueError('calculation_identity_mismatch')
-    if request.get('stage') is not None and (request['stage'] != 'transcription'
+    if request.get('stage') == 'formula_description':
+        formula = request.get('formula')
+        if (mode != 'organize_existing' or hint != 'calculation_sheet' or not isinstance(formula, dict)
+                or not isinstance(formula.get('id'), str) or not 0 < len(formula['id']) <= 256
+                or formula.get('kind') not in ('formula', 'branch', 'check')
+                or not isinstance(formula.get('latex'), str) or not 0 < len(formula['latex']) <= 10000):
+            raise ValueError('invalid_calculation_processing_stage')
+    elif request.get('stage') is not None and (request['stage'] != 'transcription'
             or mode == 'organize_existing' or hint == 'data_table'):
         raise ValueError('invalid_calculation_processing_stage')
     if 'include_formula_descriptions' in request and type(request['include_formula_descriptions']) is not bool:
@@ -581,6 +588,18 @@ def process_request(request, hint, mode, vlm, image_path=None, adjacent_images=N
     try:
         validate_request(request, hint, mode)
         identity = request['identity']
+        if request.get('stage') == 'formula_description':
+            formula = deepcopy(request['formula'])
+            sheet = {'semantic_desc': request.get('sheet_description', ''),
+                     'sections': [{'title': request.get('section_title', ''), 'items': [formula]}]}
+            calls = complete_optional_formula_semantics(vlm, sheet)
+            item['formula_description'] = {key: formula.get(key, '')
+                                           for key in ('id', 'semantic_desc', 'semantic_status')}
+            result = result_for(item, calls)
+            if getattr(vlm, 'physical_request_limit', None) is not None:
+                result['budget'].update(physical_requests=vlm.physical_requests,
+                                        physical_request_limit=vlm.physical_request_limit, sdk_retries=0)
+            return result
         title = request.get('table_title')
         if isinstance(title, str) and title.strip() and len(title) <= 500:
             item['table_title'] = title.strip()
