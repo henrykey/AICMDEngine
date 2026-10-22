@@ -191,10 +191,16 @@ async def _process_task_page(
             return artifact
         effective_routing_config["__calculation_source_store"] = save_source
         effective_routing_config["__calculation_work_started"] = reserve_work
-        work = loop.run_in_executor(None, process_page, task.source_path, page_no, policy,
-                                    effective_vlm_config, effective_routing_config, prev_context)
+        await loop.run_in_executor(None, manager.begin_page_worker, task_id, page_no)
+        try:
+            work = loop.run_in_executor(None, process_page, task.source_path, page_no, policy,
+                                        effective_vlm_config, effective_routing_config, prev_context)
+        except Exception:
+            await loop.run_in_executor(None, manager.finish_page_worker, task_id, page_no)
+            raise
+        work.add_done_callback(lambda _: manager.finish_page_worker(task_id, page_no))
         if calculation_started is None:
-            result = await asyncio.wait_for(work, timeout=page_timeout_sec)
+            result = await asyncio.wait_for(asyncio.shield(work), timeout=page_timeout_sec)
         else:
             # Each concrete transcription/semantic batch reserves one bounded request window.
             # The page is already durably EXTRACTING before any reservation is accepted.
@@ -238,7 +244,12 @@ async def _process_task_page(
         )
         res = {"task_id": task_id, "page_no": page_no, "error": msg, "vlm": vlm_used}
     except Exception as exc:
-        await loop.run_in_executor(None, manager.update_page_failed, task_id, page_no, str(exc))
+        try:
+            await loop.run_in_executor(None, manager.update_page_failed, task_id, page_no, str(exc))
+        except ValueError as state_error:
+            if str(state_error) == "document_run_already_finalized":
+                return json.dumps({"task_id": task_id, "page_no": page_no, "error": str(state_error)})
+            raise
         logger.exception("process_task_page failed: task_id=%s page_no=%s", task_id, page_no)
         res = {"task_id": task_id, "page_no": page_no, "error": str(exc), "vlm": vlm_used}
     return json.dumps(res, ensure_ascii=False)
@@ -599,6 +610,17 @@ async def finalize_task(task_id: str, merge_mode: str = "none", source_identity:
         for key, (operation, _) in list(_calculation_page_operations.items()):
             if key[0] == task_id and operation.done():
                 _calculation_page_operations.pop(key, None)
+    except Exception as exc:
+        res = {"error": str(exc)}
+    return json.dumps(res, ensure_ascii=False)
+
+
+@mcp.tool("finalize_document_run")
+async def finalize_document_run(task_id: str, source_identity: Dict[str, Any]) -> str:
+    loop = asyncio.get_event_loop()
+    try:
+        manager.validate_source_identity(task_id, source_identity)
+        res = await loop.run_in_executor(None, manager.finalize_document_run, task_id, source_identity)
     except Exception as exc:
         res = {"error": str(exc)}
     return json.dumps(res, ensure_ascii=False)
