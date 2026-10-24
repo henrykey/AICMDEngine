@@ -32,6 +32,7 @@ from .layout_ledger import (
     build_layout_outcome,
     failed_layout_outcome,
     reconcile_layout,
+    recovery_blocks,
     validate_recovered_object,
 )
 from .vlm_client import DynamicVLMClient
@@ -191,6 +192,27 @@ def process_page(
                         fallback_width,
                         fallback_height,
                     )
+                    pending_tables = [
+                        block for block in recovery_blocks(layout_outcome)
+                        if block.get("type") == "table"
+                        and any(
+                            item.get("layout_id") == block.get("layout_id")
+                            and (item.get("error") or {}).get("code") == "layout_table_content_incomplete"
+                            and (item.get("error") or {}).get("retryable") is True
+                            for item in layout_outcome.get("layout") or []
+                        )
+                    ]
+                    if pending_tables:
+                        recovery_glm_calls, recovery_vlm_calls, recovery = _recover_layout_objects(
+                            image_path, Path(work_dir), layout_outcome, pending_tables, vlm,
+                            bool(rc.get("vlm_ocr_enabled") and vlm.enabled),
+                            rc["layout_recovery_max_objects"],
+                            rc["layout_recovery_crop_padding_ratio"], glm=glm_ocr,
+                            source_dpi=rc["render_dpi"],
+                        )
+                        glm_calls += recovery_glm_calls
+                        vlm_calls += recovery_vlm_calls
+                        layout_outcome["recovery"] = recovery
                     layout_driven = layout_outcome["layout_status"] == "EXTRACTED" or bool(layout_outcome.get("markdown"))
                     if not layout_driven:
                         raise ValueError("layout_conversion_incomplete")

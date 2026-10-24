@@ -900,6 +900,8 @@ def test_finalize_markdown_excludes_bad_text_sample(tmp_path):
 class LayoutLedgerGLMOcrClient:
     raw = {}
     calls = []
+    crop_results = []
+    crop_calls = []
 
     def __init__(self, cfg, source="glm_ocr"):
         self.enabled = bool((cfg or {}).get("enabled"))
@@ -916,6 +918,11 @@ class LayoutLedgerGLMOcrClient:
     def extract_page(self, image_path):
         _ = image_path
         return OcrResult(markdown=str(self.raw.get("md_results") or ""))
+
+    def extract_table_html(self, image_path):
+        type(self).crop_calls.append(str(image_path))
+        self.last_object_call_info = {"finish_reason": "stop", "json_status": "html"}
+        return type(self).crop_results.pop(0) if type(self).crop_results else ""
 
 
 class LayoutLedgerVLMClient:
@@ -955,7 +962,7 @@ class LayoutLedgerVLMClient:
         return markdown_text
 
 
-def _run_layout_ledger_page(monkeypatch, raw, recovered=None):
+def _run_layout_ledger_page(monkeypatch, raw, recovered=None, recovery_max_objects=0, crop_results=None):
     page = FakePage(
         text="fixture text layer",
         blocks=[(0, 0, 100, 100, "fixture text layer", 0, 0)],
@@ -983,6 +990,8 @@ def _run_layout_ledger_page(monkeypatch, raw, recovered=None):
     monkeypatch.setattr(page_processor, "_shrink_recovery_image", lambda path, info, scale: (path, info))
     LayoutLedgerGLMOcrClient.raw = raw
     LayoutLedgerGLMOcrClient.calls = []
+    LayoutLedgerGLMOcrClient.crop_results = list(crop_results or [])
+    LayoutLedgerGLMOcrClient.crop_calls = []
     LayoutLedgerVLMClient.recovered = recovered or {"tables": [], "formulas": [], "figures": []}
     LayoutLedgerVLMClient.calls = 0
     LayoutLedgerVLMClient.last_blocks = []
@@ -1001,6 +1010,7 @@ def _run_layout_ledger_page(monkeypatch, raw, recovered=None):
                     "base_url": "local://fixture",
                 }
             },
+            "layout_recovery_max_objects": recovery_max_objects,
             "render_cleanup_with_llm": False,
         },
         prev_context=None,
@@ -1197,6 +1207,26 @@ def test_process_page_layout_uses_object_content_contract_for_original_layout_id
     assert item['content'] == incomplete
     assert [t['markdown'] for t in result['elements']['tables']] == [complete]
     assert result['reconciliation']['complete'] is False
+
+
+def test_process_page_recovers_successfully_parsed_incomplete_table_from_its_crop(monkeypatch):
+    incomplete = "<table><tr><td>参数</td></tr><tr><td>未闭合"
+    recovered = "<table><tr><td>参数</td></tr><tr><td>完整值</td></tr></table>"
+    raw = _layout_raw([
+        {"label": "table", "bbox_2d": [10, 20, 90, 90], "content": incomplete},
+    ], markdown="表8-5浮头法兰计算\n\n" + incomplete)
+    result = _run_layout_ledger_page(monkeypatch, raw, recovery_max_objects=1,
+                                     crop_results=[recovered])
+
+    assert len(LayoutLedgerGLMOcrClient.calls) == 1
+    assert len(LayoutLedgerGLMOcrClient.crop_calls) == 1
+    assert result["layout"][0]["status"] == "EXTRACTED"
+    assert result["layout"][0]["error"] is None
+    assert result["layout_recovery"]["objects"][0]["outcome"] == "recovered"
+    assert result["elements"]["tables"][0]["markdown"] == recovered
+    assert recovered in result["render"]["markdown"]
+    assert incomplete not in result["render"]["markdown"]
+    assert result["reconciliation"]["complete"] is True
 
 
 @pytest.mark.parametrize(

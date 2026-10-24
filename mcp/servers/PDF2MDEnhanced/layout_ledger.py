@@ -301,11 +301,15 @@ def apply_recovered_payloads(outcome: Dict[str, Any], recovered: Any) -> None:
                     existing.append(payload)
             entry["status"] = "EXTRACTED"
             entry["review_required"] = False
+            original_content = str(entry.get("content") or "")
             entry["content"] = _payload_content(object_type, payload)
             if object_type == "table":
                 _normalize_table_math(entry)
                 payload["markdown"] = entry["content"]
                 payload.update(_table_math_metadata(entry))
+                markdown = str(outcome.get("markdown") or "")
+                if original_content and original_content != entry["content"] and original_content in markdown:
+                    outcome["markdown"] = markdown.replace(original_content, entry["content"], 1)
             entry["error"] = None
             used_layout_ids.add(str(entry["layout_id"]))
     outcome["unmatched_recovery_refs"] = _unique(unmatched)

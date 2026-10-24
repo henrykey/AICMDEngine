@@ -559,6 +559,7 @@ def test_real_local_upload_preserves_source_crop_and_task_readback_without_recov
         vlm_config={"provider": "fixture", "model": "fixture-vlm", "api_key": "unused-local-only",
                     "base_url": "http://127.0.0.1:1/v1", "max_tokens": 12000, "max_retries": 0},
         routing_config={"render_dpi": 300, "render_cleanup_with_llm": False,
+                        "layout_recovery_max_objects": 0,
                         "ocr_config": {"glm_ocr": {"enabled": True, "model": "glm-ocr",
                                                    "base_url": "http://127.0.0.1:1"}}},
     )))["page_result"]
