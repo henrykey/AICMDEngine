@@ -140,7 +140,7 @@ def process_page(
         effective_vlm_config = dict(vlm_config or rc.get("vlm_ocr") or {})
         effective_vlm_config.update(description_language=description_language, max_retries=0,
             _calculation_processing="single_operation", table_analysis_max_model_calls=1,
-            table_analysis_max_physical_requests=1)
+            table_analysis_max_physical_requests=2)
         vlm = DynamicVLMClient(effective_vlm_config)
         vlm.conversion_only = True
         logger.info(
@@ -208,7 +208,7 @@ def process_page(
                             bool(rc.get("vlm_ocr_enabled") and vlm.enabled),
                             rc["layout_recovery_max_objects"],
                             rc["layout_recovery_crop_padding_ratio"], glm=glm_ocr,
-                            source_dpi=rc["render_dpi"],
+                            source_dpi=rc["render_dpi"], max_model_calls=1,
                         )
                         glm_calls += recovery_glm_calls
                         vlm_calls += recovery_vlm_calls

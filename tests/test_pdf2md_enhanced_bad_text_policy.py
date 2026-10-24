@@ -930,8 +930,10 @@ class LayoutLedgerVLMClient:
     calls = 0
     last_blocks = []
     last_image_paths = []
+    configs = []
 
     def __init__(self, cfg):
+        type(self).configs.append(dict(cfg or {}))
         self.enabled = bool(cfg)
         self.provider = "fixture"
         self.model = "fixture-vlm"
@@ -996,6 +998,7 @@ def _run_layout_ledger_page(monkeypatch, raw, recovered=None, recovery_max_objec
     LayoutLedgerVLMClient.calls = 0
     LayoutLedgerVLMClient.last_blocks = []
     LayoutLedgerVLMClient.last_image_paths = []
+    LayoutLedgerVLMClient.configs = []
     result = page_processor.process_page(
         source_path="/tmp/layout-fixture.pdf",
         page_no=1,
@@ -1220,6 +1223,8 @@ def test_process_page_recovers_successfully_parsed_incomplete_table_from_its_cro
 
     assert len(LayoutLedgerGLMOcrClient.calls) == 1
     assert len(LayoutLedgerGLMOcrClient.crop_calls) == 1
+    assert LayoutLedgerVLMClient.configs[0]["table_analysis_max_model_calls"] == 1
+    assert LayoutLedgerVLMClient.configs[0]["table_analysis_max_physical_requests"] == 2
     assert result["layout"][0]["status"] == "EXTRACTED"
     assert result["layout"][0]["error"] is None
     assert result["layout_recovery"]["objects"][0]["outcome"] == "recovered"
