@@ -953,7 +953,10 @@ class LayoutLedgerVLMClient:
         values = self.recovered.get(collection, [])
         if not values:
             return {"layout_id": block["layout_id"], "type": block["type"], "status": "FAILED", "complete": False}
-        return {**values[0], "type": block["type"], "status": "EXTRACTED", "complete": True}
+        value = {**values[0], "type": block["type"], "status": "EXTRACTED", "complete": True}
+        if block.get("recovery_target") == "table_content_with_cell_images":
+            value.setdefault("contains_images", False)
+        return value
 
     def extract_table_html(self, image_path, block, compact=False):
         result = self.extract_object_structured(image_path, block, compact=compact)
@@ -1232,6 +1235,56 @@ def test_process_page_recovers_successfully_parsed_incomplete_table_from_its_cro
     assert recovered in result["render"]["markdown"]
     assert incomplete not in result["render"]["markdown"]
     assert result["reconciliation"]["complete"] is True
+
+
+def test_incomplete_table_triggers_one_targeted_cell_image_layout_recovery(monkeypatch):
+    incomplete = "<table><tr><td>参数</td></tr><tr><td>未闭合"
+    recovered = "<table><tr><td>参数</td></tr><tr><td>完整值</td></tr></table>"
+    raw = _layout_raw([
+        {"label": "table", "bbox_2d": [10, 20, 90, 90], "content": incomplete},
+    ], markdown="表8-5浮头法兰计算\n\n" + incomplete)
+    candidate = {
+        "layout_id": "p1-o001-table", "type": "table", "status": "EXTRACTED", "complete": True,
+        "markdown": recovered, "contains_images": True,
+        "source_cells": [{"row": 1, "col": 0, "rowspan": 1, "colspan": 1,
+                           "bbox": [0.1, 0.1, 0.9, 0.9], "bbox_space": "normalized_crop",
+                           "image_regions": [{"image_id": "diagram", "bbox": [0.2, 0.2, 0.8, 0.8],
+                                              "bbox_space": "normalized_crop"}]}],
+    }
+    monkeypatch.setattr(page_processor, "_validate_cell_image_recovery", lambda block, payload, crop_info, image_path: ("", payload))
+    monkeypatch.setattr(page_processor, "_table_image_problem", lambda table: False)
+    monkeypatch.setattr(page_processor, "_attach_figure_assets", lambda *args, **kwargs: None)
+    result = _run_layout_ledger_page(
+        monkeypatch, raw, recovered={"tables": [candidate]}, recovery_max_objects=1,
+        crop_results=[incomplete],
+    )
+
+    assert LayoutLedgerGLMOcrClient.crop_calls
+    assert LayoutLedgerVLMClient.calls == 1
+    assert LayoutLedgerVLMClient.last_blocks[0]["recovery_target"] == "table_content_with_cell_images"
+    assert result["layout_recovery"]["objects"][0]["outcome"] == "recovered"
+    assert result["elements"]["tables"][0]["contains_images"] is True
+
+
+@pytest.mark.parametrize("image_signal", [False, True])
+def test_cell_image_layout_recovery_only_runs_for_explicit_image_signal(monkeypatch, image_signal):
+    table = {
+        "label": "table", "bbox_2d": [10, 20, 90, 90],
+        "content": "<table><tr><td>参数</td></tr></table>",
+    }
+    if image_signal:
+        table.update(contains_images=True, image_unresolved=[{"reason": "missing_cell_image_geometry"}])
+    raw = _layout_raw([table])
+    calls = []
+    def recover(*args, **kwargs):
+        calls.append(args[2])
+        return 0, 0, {"objects": []}
+    monkeypatch.setattr(page_processor, "_recover_missing_table_images", recover)
+    monkeypatch.setattr(page_processor, "_attach_figure_assets", lambda *args, **kwargs: None)
+
+    _run_layout_ledger_page(monkeypatch, raw, recovered={"tables": []}, recovery_max_objects=1)
+
+    assert len(calls) == int(image_signal)
 
 
 @pytest.mark.parametrize(

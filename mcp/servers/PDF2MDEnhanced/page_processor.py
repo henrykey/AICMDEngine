@@ -193,7 +193,8 @@ def process_page(
                         fallback_height,
                     )
                     pending_tables = [
-                        block for block in recovery_blocks(layout_outcome)
+                        {**block, "recovery_target": "table_content_with_cell_images"}
+                        for block in recovery_blocks(layout_outcome)
                         if block.get("type") == "table"
                         and any(
                             item.get("layout_id") == block.get("layout_id")
@@ -208,7 +209,8 @@ def process_page(
                             bool(rc.get("vlm_ocr_enabled") and vlm.enabled),
                             rc["layout_recovery_max_objects"],
                             rc["layout_recovery_crop_padding_ratio"], glm=glm_ocr,
-                            source_dpi=rc["render_dpi"], max_model_calls=1,
+                            source_dpi=rc["render_dpi"], max_model_calls=2 * min(
+                                len(pending_tables), rc["layout_recovery_max_objects"]),
                         )
                         glm_calls += recovery_glm_calls
                         vlm_calls += recovery_vlm_calls
@@ -303,6 +305,21 @@ def process_page(
                 table.setdefault("layout_id", f"p{display_page_no}-table-{index}")
         if layout_driven:
             attach_object_relationships(layout_outcome["payloads"], display_page_no)
+            image_candidates = [
+                table for table in layout_outcome["payloads"].get("tables", [])
+                if _table_image_problem(table)
+            ]
+            if image_candidates:
+                with tempfile.TemporaryDirectory(prefix="pdf2md_cell_recovery_") as directory:
+                    recovery_glm_calls, recovery_vlm_calls, image_recovery = _recover_missing_table_images(
+                        image_path, Path(directory), layout_outcome["payloads"], vlm,
+                        bool(rc.get("vlm_ocr_enabled") and vlm.enabled),
+                        rc["layout_recovery_max_objects"], source_dpi=rc["render_dpi"],
+                        max_model_calls=2 * min(len(image_candidates), rc["layout_recovery_max_objects"]),
+                    )
+                glm_calls += recovery_glm_calls
+                vlm_calls += recovery_vlm_calls
+                layout_outcome["cell_image_recovery"] = image_recovery
             _attach_figure_assets(image_path, layout_outcome["payloads"], display_page_no, source_dpi=rc["render_dpi"])
         else:
             tables = list(structured.get("table_metadata", {}).values())
@@ -1016,9 +1033,12 @@ def _recover_layout_objects(
             item_diagnostics["review_required"] = True
             continue
 
-        # At most two OCR attempts, then two VLM attempts. The second attempt
-        # for each provider uses fewer pixels, never the same oversized image.
-        providers = (["glm_ocr"] * 2 if use_glm else []) + (["vlm_ocr"] * 2 if vlm_enabled else [])
+        # Incomplete table content gets one OCR attempt and one targeted VLM
+        # table/cell-image analysis. Other objects keep their existing retries.
+        if object_type == "table" and block.get("recovery_target") == "table_content_with_cell_images":
+            providers = (["glm_ocr"] if use_glm else []) + (["vlm_ocr"] if vlm_enabled else [])
+        else:
+            providers = (["glm_ocr"] * 2 if use_glm else []) + (["vlm_ocr"] * 2 if vlm_enabled else [])
         if image_geometry:
             providers = providers[:block.get("_remaining_attempts", 2)]
             if not providers:
@@ -1049,16 +1069,13 @@ def _recover_layout_objects(
                     glm_calls += 1
                 else:
                     vlm_calls += 1
-                if object_type == "table" and not image_geometry:
+                if object_type == "table" and not image_geometry and not (
+                    provider == "vlm_ocr" and block.get("recovery_target") == "table_content_with_cell_images"
+                ):
                     html = (glm.extract_table_html(str(crop_path)) if provider == "glm_ocr" else
                             vlm.extract_table_html(str(crop_path), block, compact=compact))
-                    candidate = {
-                        "layout_id": layout_id,
-                        "type": "table",
-                        "status": "EXTRACTED",
-                        "complete": True,
-                        "markdown": html,
-                    }
+                    candidate = {"layout_id": layout_id, "type": "table", "status": "EXTRACTED",
+                                 "complete": True, "markdown": html}
                 else:
                     candidate = vlm.extract_object_structured(str(crop_path), block, compact=compact)
                 attempt.update(_safe_object_call_info(client))
@@ -1069,6 +1086,20 @@ def _recover_layout_objects(
                     shape = {}
                 else:
                     reason, shape = validate_recovered_object(block, candidate)
+                    if (not reason and provider == "glm_ocr" and vlm_enabled
+                            and block.get("recovery_target") == "table_content_with_cell_images"):
+                        candidate = {**candidate, "contains_images": None,
+                                     "image_unresolved": [{"reason": "image_detection_incomplete"}]}
+                    if (not reason and provider == "vlm_ocr"
+                            and block.get("recovery_target") == "table_content_with_cell_images"):
+                        if candidate.get("contains_images") is True:
+                            image_block = {**block, "markdown": candidate.get("markdown", "")}
+                            reason, recovered_table = _validate_cell_image_recovery(
+                                image_block, candidate, crop_info, image_path)
+                            if not reason:
+                                candidate = recovered_table
+                        elif candidate.get("contains_images") is not False:
+                            reason = "image_detection_incomplete"
                 attempt.update(shape)
                 if attempt.get("truncated") or attempt.get("finish_reason") == "length":
                     reason = "provider_output_truncated"
@@ -1184,6 +1215,19 @@ def _validate_cell_image_recovery(block, candidate, crop_info, image_path):
     if candidate.get("complete") is not True or candidate.get("status") != "EXTRACTED":
         return "provider_reported_incomplete", None
     cells = candidate.get("source_cells")
+    if candidate.get("contains_images") is False and isinstance(cells, list) and not cells \
+            and not candidate.get("image_unresolved"):
+        result = copy.deepcopy(block)
+        result.pop("recovery_target", None)
+        result.pop("_reuse_recovery_slot", None)
+        result.pop("_remaining_attempts", None)
+        result["contains_images"] = False
+        result["image_unresolved"] = [issue for issue in result.get("image_unresolved", [])
+                                      if issue.get("reason") not in _CELL_IMAGE_GEOMETRY_REASONS
+                                      and issue.get("stage") != "cell_image_recovery"]
+        result["manualReviewRequired"] = bool(result.get("image_unresolved") or result.get("degraded")
+                                               or result.get("warnings"))
+        return "", result
     if candidate.get("contains_images") is not True or not isinstance(cells, list) or not cells or candidate.get("image_unresolved"):
         return "missing_cell_image_geometry", None
     from .single_page_tools import _normalize_table_contract
@@ -1299,6 +1343,10 @@ def _object_success_payload(block: Dict[str, Any], candidate: Dict[str, Any]) ->
     }
     if candidate.get("semantic_reason") == "description_language_mismatch":
         payload["semantic_reason"] = "description_language_mismatch"
+    if block["type"] == "table":
+        for key in ("contains_images", "source_cells", "image_unresolved"):
+            if key in candidate:
+                payload[key] = candidate[key]
     if block["type"] == "formula":
         _copy_semantic_confidence(payload, candidate)
     return payload

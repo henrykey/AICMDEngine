@@ -591,7 +591,9 @@ def _payload_from_entry(entry: Dict[str, Any], block: Dict[str, Any]) -> Optiona
             **_table_math_metadata(entry),
             # Preserve supplied cell evidence through the layout route. Coordinates
             # retain their declared space; no bounds or confidence are invented.
-            **{key: raw[key] for key in ("source_cells", "cell_status", "source_cell_row_offset") if key in raw},
+            **{key: raw[key] for key in (
+                "source_cells", "cell_status", "source_cell_row_offset", "contains_images", "image_unresolved"
+            ) if key in raw},
             # A layout-bound caption is the only reliable title source.  Model/raw
             # metadata may belong to a preceding table on the same page.
             "title": entry.get("title") or "",

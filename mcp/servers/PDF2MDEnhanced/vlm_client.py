@@ -938,6 +938,8 @@ class DynamicVLMClient:
             "layout_id": block.get("layout_id"), "type": object_type,
             "status": "EXTRACTED", "complete": True, **schemas[object_type],
         }
+        if block.get("recovery_target") == "table_content_with_cell_images":
+            schema.update({"contains_images": None, "source_cells": [], "image_unresolved": []})
         prompt = (
             "The input image is already cropped to ONE identified document object, with small padding. "
             "Transcribe the complete visible object from the IMAGE, not a layout preview or a summary. "
@@ -958,11 +960,25 @@ class DynamicVLMClient:
         ) + _description_language_instruction(self.description_language)
         if object_type == "formula":
             prompt += _table_formula_semantic_instruction()
+        if block.get("recovery_target") == "table_content_with_cell_images":
+            prompt += (
+                " This targeted recovery was requested because the table transcription was incomplete. "
+                "Also inspect only this table crop for images inside cells. Set contains_images explicitly "
+                "to true or false. If true, return source_cells only for image-bearing cells, with original "
+                "zero-based row/col and rowspan/colspan matching the returned table, bbox and "
+                "bbox_space=normalized_crop, plus image_regions with stable image_id and bbox in the same "
+                "crop coordinates. Never invent uncertain cell or image boundaries; in that case set "
+                "contains_images=true and return image_unresolved:[{reason:missing_cell_image_geometry}]. "
+                "If image presence is uncertain, set contains_images=null and return "
+                "image_unresolved:[{reason:image_detection_incomplete}]."
+            )
         if block.get("recovery_target") == "cell_images":
             prompt = (
                 "Locate images inside the cells of this ONE cropped table. Return one strict JSON object. "
-                "Keep the supplied layout_id and type=table. Return contains_images=true, status=EXTRACTED, "
-                "complete=true only when ALL missing cell images have been located. Otherwise complete=false. "
+                "Keep the supplied layout_id and type=table. Set contains_images=false, source_cells=[], "
+                "image_unresolved=[] when no images occur in any cell. If images occur, return "
+                "contains_images=true, status=EXTRACTED, complete=true only when ALL cell images have been "
+                "located. Otherwise complete=false. "
                 "Return source_cells for image-bearing cells: original zero-based row/col, rowspan/colspan, "
                 "bbox and bbox_space=normalized_crop, image_regions=[{image_id: stable local id, bbox, "
                 "bbox_space: normalized_crop}]. Every bbox is [x0,y0,x1,y1] in 0..1 relative to this supplied "

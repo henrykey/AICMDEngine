@@ -222,6 +222,16 @@ def test_uncertain_presence_is_not_plain_table(source_image, tmp_path):
     assert table['contains_images'] is True
 
 
+def test_targeted_detection_confirms_table_has_no_cell_images(source_image, tmp_path):
+    candidate = {'layout_id': 'p3-table', 'type': 'table', 'status': 'EXTRACTED',
+                 'complete': True, 'contains_images': False, 'source_cells': [], 'image_unresolved': []}
+    table, _, counts = run_recovery(source_image, tmp_path, client=GeometryClient([candidate]))
+    assert counts[1] == 1
+    assert table['contains_images'] is False
+    assert not table['image_unresolved']
+    assert table['manualReviewRequired'] is False
+
+
 def test_missing_provider_is_explicit(source_image, tmp_path):
     table = table_target()
     payload = {'tables': [table], 'figures': []}
