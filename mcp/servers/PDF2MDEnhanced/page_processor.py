@@ -155,7 +155,7 @@ def process_page(
         vlm_calls = 0
         glm_calls = 0
         glm_ocr_config = dict(rc.get("glm_ocr") or {})
-        glm_ocr_config.update(description_language=description_language, max_retries=0)
+        glm_ocr_config.update(description_language=description_language, max_retries=1)
         glm_ocr = OpenAICompatibleOcrClient(glm_ocr_config, source="glm_ocr")
         glm_ocr.request_guard = getattr(vlm, "_count_physical_request", None)
         layout_enabled = image_input or bool(rc.get("layout_ledger_enabled", True))
@@ -217,7 +217,7 @@ def process_page(
                     if not layout_driven:
                         raise ValueError("layout_conversion_incomplete")
                 except Exception as exc:
-                    raise ValueError("layout_conversion_failed") from None
+                    raise ValueError(f"layout_conversion_failed: {exc}") from exc
 
         if route_selected == "blank":
             markdown = ""

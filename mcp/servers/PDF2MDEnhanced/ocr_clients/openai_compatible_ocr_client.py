@@ -228,7 +228,7 @@ class OpenAICompatibleOcrClient:
                 return json.loads(raw)
             except urllib.error.HTTPError as exc:
                 error_body = exc.read().decode("utf-8", errors="replace")
-                last_err = f"HTTP {exc.code}: {error_body}"
+                last_err = f"HTTP {exc.code}: {self._layout_error_detail(error_body)}"
                 retryable_overload = self._is_retryable_layout_overload(exc.code, error_body)
                 logger.warning(
                     "%s layout_parsing call failed: model=%s attempt=%s/%s error=%s",
@@ -250,7 +250,7 @@ class OpenAICompatibleOcrClient:
                         self.max_retries,
                     )
             except Exception as exc:
-                last_err = repr(exc)
+                last_err = f"{type(exc).__name__}: {str(exc)[:240]}"
                 logger.warning(
                     "%s layout_parsing call failed: model=%s attempt=%s/%s error=%s",
                     self.source,
@@ -263,6 +263,22 @@ class OpenAICompatibleOcrClient:
                     break
             time.sleep(retry_delay)
         raise RuntimeError(f"{self.source} layout_parsing call failed: {last_err}")
+
+    @staticmethod
+    def _layout_error_detail(error_body: str) -> str:
+        try:
+            payload = json.loads(error_body)
+        except (TypeError, ValueError):
+            return error_body[:240]
+        error = payload.get("error") if isinstance(payload, dict) else None
+        code = payload.get("code") if isinstance(payload, dict) else None
+        message = error.get("message") if isinstance(error, dict) else None
+        if isinstance(error, dict) and code is None:
+            code = error.get("code")
+        if message is None and isinstance(payload, dict):
+            message = payload.get("message")
+        detail = ": ".join(str(value) for value in (code, message) if value is not None)
+        return detail[:240] if detail else error_body[:240]
 
     @staticmethod
     def _is_retryable_layout_overload(status_code: int, error_body: str) -> bool:
