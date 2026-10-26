@@ -222,6 +222,80 @@ def test_uncertain_presence_is_not_plain_table(source_image, tmp_path):
     assert table['contains_images'] is True
 
 
+def test_incomplete_table_is_inspected_without_prior_image_marker(source_image, tmp_path):
+    table = {**table_target(), 'contains_images': False, 'image_unresolved': [],
+             'source_cells': [], 'recovery_quality': 'partial'}
+    recovered, client, counts = run_recovery(source_image, tmp_path, table, GeometryClient([geometry(table)]))
+    assert counts[1] == 1
+    assert recovered['contains_images'] is True
+    assert recovered['source_cells'][0]['image_regions']
+    assert client.calls == [(120, False)]
+
+
+def test_ocr_element_structure_quality_survives_to_table_metadata():
+    element = sp.OcrElement(kind='table', source='ocr', markdown=HTML,
+        raw={'structure_status': 'partial', 'recovery_quality': 'degraded'})
+    payload = pp._ocr_element_payload(element, 'table')
+    normalized = pp._normalize_structured({'tables': [payload]})
+    assert pp._table_needs_cell_image_inspection(normalized['table_metadata'][HTML])
+
+
+def test_ocr_table_incompleteness_survives_normalization_for_cell_image_inspection():
+    normalized = pp._normalize_structured({'tables': [{
+        'markdown': HTML, 'structure_status': 'partial', 'recovery_quality': 'degraded',
+        'degraded': True, 'warnings': ['table_content_incomplete'],
+    }]})
+    table = normalized['table_metadata'][HTML]
+    assert pp._table_needs_cell_image_inspection(table)
+
+
+def test_complete_table_is_not_scheduled_for_cell_image_inspection():
+    table = {**table_target(), 'contains_images': False, 'image_unresolved': [],
+             'source_cells': [], 'recovery_quality': 'complete', 'structure_status': 'parsed'}
+    assert pp._table_needs_cell_image_inspection(table) is False
+
+
+def test_non_layout_incomplete_ocr_table_runs_cell_image_recovery(tmp_path, monkeypatch):
+    path = tmp_path / 'page.pdf'
+    doc = fitz.open()
+    page = doc.new_page(width=100, height=100)
+    page.draw_rect(fitz.Rect(20, 20, 80, 80), color=(1, 0, 0), fill=(1, 0, 0))
+    doc.save(path)
+    doc.close()
+
+    class OCR(LayoutLedgerGLMOcrClient):
+        def extract_page(self, source):
+            return sp.OcrResult(markdown=HTML, tables=[sp.OcrElement(
+                kind='table', source='glm_ocr', markdown=HTML,
+                raw={'bbox': [.2,.2,.8,.8], 'bbox_space': 'normalized_page',
+                     'structure_status': 'partial', 'recovery_quality': 'degraded'})])
+
+    calls = []
+    def recover(image_path, output_dir, payloads, vlm, enabled, max_objects, **kwargs):
+        calls.append((payloads, enabled))
+        payloads['tables'][0].update(contains_images=True, source_cell_row_offset=1, source_cells=[{
+            'row': 0, 'col': 0, 'rowspan': 1, 'colspan': 1, 'confidence': .99,
+            'bbox': [.2, .2, .8, .8], 'bbox_space': 'normalized_page',
+            'image_regions': [{'image_id': 'diagram', 'bbox': [.3, .3, .5, .5],
+                               'bbox_space': 'normalized_page'}],
+        }])
+        return 0, 1, {}
+
+    monkeypatch.setattr(pp, 'OpenAICompatibleOcrClient', OCR)
+    monkeypatch.setattr(pp, 'DynamicVLMClient', LayoutLedgerVLMClient)
+    monkeypatch.setattr(pp, '_recover_missing_table_images', recover)
+    result = pp.process_page(str(path), 1, 'auto', {'provider': 'fixture'},
+        {'source_page_no': 7, 'render_dpi': 150, 'render_cleanup_with_llm': False,
+         'layout_ledger_enabled': False, 'ocr_config': {'glm_ocr': {'enabled': True}}}, None)
+
+    assert len(calls) == 1
+    assert calls[0][0]['tables'][0]['recovery_quality'] == 'degraded'
+    figure = result['rag']['elements']['figures'][0]
+    assert figure['source'] == 'source_cell_image_region'
+    assert figure['cell_image_source']['cell_source'] == 'r0c0'
+    assert figure['image_asset']['status'] == 'available'
+
+
 def test_targeted_detection_confirms_table_has_no_cell_images(source_image, tmp_path):
     candidate = {'layout_id': 'p3-table', 'type': 'table', 'status': 'EXTRACTED',
                  'complete': True, 'contains_images': False, 'source_cells': [], 'image_unresolved': []}

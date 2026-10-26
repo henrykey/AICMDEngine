@@ -34,6 +34,8 @@ from .layout_ledger import (
     reconcile_layout,
     recovery_blocks,
     validate_recovered_object,
+    _html_table_incomplete,
+    _markdown_table_has_synthetic_columns,
 )
 from .vlm_client import DynamicVLMClient
 
@@ -307,7 +309,7 @@ def process_page(
             attach_object_relationships(layout_outcome["payloads"], display_page_no)
             image_candidates = [
                 table for table in layout_outcome["payloads"].get("tables", [])
-                if _table_image_problem(table)
+                if _table_needs_cell_image_inspection(table)
             ]
             if image_candidates:
                 with tempfile.TemporaryDirectory(prefix="pdf2md_cell_recovery_") as directory:
@@ -326,7 +328,19 @@ def process_page(
             for index, table in enumerate(tables):
                 if reliable_normalized_bbox(table):
                     table.setdefault("layout_id", f"p{display_page_no}-table-{index}")
-            _attach_figure_assets(image_path, {"tables": tables, "figures": cell_figures},
+            table_payloads = {"tables": tables, "figures": cell_figures}
+            image_candidates = [table for table in tables if _table_needs_cell_image_inspection(table)]
+            if image_candidates:
+                with tempfile.TemporaryDirectory(prefix="pdf2md_cell_recovery_") as directory:
+                    recovery_glm_calls, recovery_vlm_calls, image_recovery = _recover_missing_table_images(
+                        image_path, Path(directory), table_payloads, vlm,
+                        bool(rc.get("vlm_ocr_enabled") and vlm.enabled),
+                        rc["layout_recovery_max_objects"], source_dpi=rc["render_dpi"],
+                        max_model_calls=2 * min(len(image_candidates), rc["layout_recovery_max_objects"]),
+                    )
+                glm_calls += recovery_glm_calls
+                vlm_calls += recovery_vlm_calls
+            _attach_figure_assets(image_path, table_payloads,
                                   display_page_no, source_dpi=rc["render_dpi"])
 
     doc.close()
@@ -1166,6 +1180,18 @@ def _table_image_problem(table):
     return any(f.get("parent_relation", {}).get("status") != "resolved" for f in probe["figures"])
 
 
+def _table_needs_cell_image_inspection(table):
+    """Inspect cell images only when extraction reports a structural gap or image gap."""
+    if _table_image_problem(table):
+        return True
+    if table.get("degraded") is True or table.get("recovery_quality") in {"partial", "degraded"}:
+        return True
+    if table.get("structure_status") in {"incomplete", "partial", "unavailable", "failed"}:
+        return True
+    markdown = str(table.get("markdown") or table.get("html") or "")
+    return _html_table_incomplete(markdown) or _markdown_table_has_synthetic_columns(markdown)
+
+
 @timed_stage("page_processor._recover_missing_table_images")
 def _recover_missing_table_images(image_path, output_dir, payloads, vlm, enabled, max_objects,
                                   source_dpi=150, previous=None, max_model_calls=None):
@@ -1174,7 +1200,7 @@ def _recover_missing_table_images(image_path, output_dir, payloads, vlm, enabled
     pending = []
     prior_objects = {obj["layout_id"]: obj for obj in previous.get("objects", [])}
     for table in payloads.get("tables", []):
-        if not _table_image_problem(table):
+        if not _table_needs_cell_image_inspection(table):
             continue
         if not table.get("layout_id") or not reliable_normalized_bbox(table):
             table.setdefault("image_unresolved", []).append({"reason": "missing_cell_image_geometry"})
@@ -2415,6 +2441,10 @@ def _normalize_structured(value: Any) -> Dict[str, Any]:
             "cell_status",
             "source_cell_row_offset",
             "source_block_index",
+            "recovery_quality",
+            "structure_status",
+            "degraded",
+            "warnings",
         ):
             value = item.get(key) if isinstance(item, dict) else None
             if (metadata.get("table_kind", "data_table") != "data_table"
@@ -2642,6 +2672,10 @@ def _ocr_element_payload(item: Any, kind: str) -> Dict[str, Any]:
                 "cell_status",
                 "source_cell_row_offset",
                 "source_block_index",
+                "recovery_quality",
+                "structure_status",
+                "degraded",
+                "warnings",
             ]
         )
     for key in passthrough_keys:
