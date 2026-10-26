@@ -394,6 +394,91 @@ def test_table_recovery_adds_ledger_metadata_to_plain_html(monkeypatch):
     assert diagnostics["objects"][0]["attempts"][0]["json_status"] == "html"
 
 
+def test_cell_image_table_recovery_keeps_ocr_and_vlm_attempts_independent(monkeypatch):
+    ocr_table = "<table><tr><td>OCR source</td></tr></table>"
+    vlm_table = "<table><tr><td>VLM rewrite</td></tr></table>"
+    raw = fixtures._layout_raw([
+        {"index": 10, "label": "table", "bbox_2d": [10, 20, 90, 80], "content": PARTIAL},
+    ])
+    outcome = ledger.build_layout_outcome(raw, page_no=7, fallback_width=100, fallback_height=100)
+    block = ledger.recovery_blocks(outcome)[0]
+    block["recovery_target"] = "table_content_with_cell_images"
+
+    class OCR:
+        enabled = True
+        use_layout_parsing = True
+        calls = 0
+
+        def extract_table_html(self, path):
+            self.calls += 1
+            self.last_object_call_info = {"finish_reason": "stop", "json_status": "html"}
+            return ocr_table
+
+    glm = OCR()
+    client = ContentClient([
+        candidate(markdown=PARTIAL, layout_id=block["layout_id"]),
+        candidate(markdown=vlm_table, contains_images=False, layout_id=block["layout_id"]),
+    ])
+    monkeypatch.setattr(processor, "_crop_layout_block_image", lambda *args, **kwargs:
+        (Path("crop.png"), {"pixel_bbox": [8, 18, 92, 82], "width": 84, "height": 64}))
+    monkeypatch.setattr(processor, "_shrink_recovery_image", lambda path, info, scale: (path, info))
+    counts = processor._recover_layout_objects(
+        image_path=Path("page.png"), output_dir=Path("/tmp"),
+        layout_outcome=outcome, pending_blocks=[block], vlm=client, vlm_enabled=True,
+        max_objects=1, padding_ratio=0.02, glm=glm, max_model_calls=3,
+    )
+
+    attempts = counts[2]["objects"][0]["attempts"]
+    assert [attempt["provider"] for attempt in attempts] == ["glm_ocr", "vlm_ocr", "vlm_ocr"]
+    assert [attempt["attempt"] for attempt in attempts] == [1, 1, 2]
+    assert [call[2] for call in client.calls] == [False, True]
+    assert counts[:2] == (1, 2)
+    assert outcome["layout"][0]["status"] == "EXTRACTED"
+    assert outcome["payloads"]["tables"][0]["markdown"] == ocr_table
+
+
+def test_image_retry_prompt_targets_geometry_without_retranscribing_table():
+    client = VLMClient.__new__(VLMClient)
+    client.max_tokens = 20000
+    client.description_language = "zh"
+    client.last_call_info = {}
+    prompts = []
+    def call(path, prompt, max_tokens):
+        prompts.append(prompt)
+        return json.dumps({"layout_id": "p1-o001-table", "type": "table", "complete": False})
+    client._call_image_prompt = call
+    client.extract_object_structured("crop.png", {**block(), "markdown": TABLE,
+        "recovery_target": "cell_images", "recovery_error": "invalid_cell_image_geometry"}, compact=True)
+    assert "invalid_cell_image_geometry" in prompts[0]
+    assert "Correct only the unresolved image geometry" in prompts[0]
+    assert "Do not clear or regenerate the supplied table" in prompts[0]
+    assert "keep every data row and cell" not in prompts[0]
+
+
+def test_content_prompt_keeps_diagram_cell_as_plain_placeholder():
+    client = VLMClient.__new__(VLMClient)
+    client.max_tokens = 20000
+    client.last_call_info = {}
+    prompts = []
+    def call(path, prompt, max_tokens):
+        prompts.append(prompt)
+        return TABLE
+    client._call_image_prompt = call
+    assert client.extract_table_html("crop.png", block()) == TABLE
+    assert "placeholder [image]" in prompts[0]
+    assert "Image localization is a separate step" in prompts[0]
+    assert "balanced $...$ LaTeX delimiters inside HTML cells" in prompts[0]
+    assert "Never flatten formulas into plain ASCII" in prompts[0]
+
+
+def test_invalid_html_diagnostics_identify_image_markup_without_payload():
+    reason, diagnostics = ledger.validate_recovered_object(block(), candidate(
+        markdown='<table><tr><td><img src="PRIVATE_IMAGE"></td></tr></table>'))
+    assert reason == "table_html_invalid"
+    assert diagnostics["table_unsafe_tags"] == ["img"]
+    assert "PRIVATE_IMAGE" not in json.dumps(diagnostics)
+
+
 def test_two_invalid_crops_stay_failed_and_do_not_block_formula_or_figure(monkeypatch):
     outcome, client, _, (_, vlm_calls, diagnostics) = recover(monkeypatch, [
         candidate(markdown=PARTIAL), candidate(markdown=PARTIAL),

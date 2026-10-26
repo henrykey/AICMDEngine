@@ -77,14 +77,52 @@ def table_target():
             'image_unresolved': [{'reason': 'missing_cell_image_geometry'}]}
 
 
+def test_content_recovery_survives_failed_image_localization(source_image, tmp_path):
+    raw = _layout_raw([{'label': 'table', 'bbox_2d': [20, 20, 80, 80],
+                       'content': '<table><tr><td>incomplete'}])
+    outcome = pp.build_layout_outcome(raw, 7, 100, 100)
+    target = {**pp.recovery_blocks(outcome)[0], 'recovery_target': 'table_content_with_cell_images'}
+
+    class OCR:
+        enabled = True
+        use_layout_parsing = True
+        def extract_table_html(self, path):
+            return '<table><tr><td>incomplete'
+
+    class VLM(GeometryClient):
+        def extract_table_html(self, path, block, compact=False):
+            self.calls.append(('content', compact))
+            return HTML
+        def extract_object_structured(self, path, block, compact=False):
+            self.calls.append((block.get('recovery_target'), compact))
+            self.last_target = block
+            self.last_object_call_info = {'json_status': 'object', 'finish_reason': 'stop'}
+            return {'layout_id': block['layout_id'], 'type': 'table', 'complete': False}
+
+    client = VLM()
+    counts = pp._recover_layout_objects(source_image, tmp_path, outcome, [target], client, True,
+                                       1, 0, glm=OCR(), max_model_calls=3)
+    assert counts[:2] == (1, 2)
+    assert client.calls == [('content', False), ('cell_images', False)]
+    assert client.last_target['source_cell_origins'] == [{'row': 0, 'col': 0, 'rowspan': 1, 'colspan': 1}]
+    assert len(outcome['payloads']['tables']) == 1
+    table = outcome['payloads']['tables'][0]
+    assert table['markdown'] == HTML
+    assert table['image_unresolved']
+    assert table['manualReviewRequired'] is True
+    assert not table.get('source_cells')
+
+
 class GeometryClient:
     enabled = True
     def __init__(self, responses=None):
         self.responses = iter(responses) if responses is not None else None
         self.calls = []
+        self.targets = []
         self.last_object_call_info = {}
     def extract_object_structured(self, path, block, compact=False):
         self.calls.append((fitz.Pixmap(path).width, compact))
+        self.targets.append(copy.deepcopy(block))
         self.last_object_call_info = {'json_status': 'object', 'finish_reason': 'stop'}
         response = next(self.responses) if self.responses is not None else geometry(block)
         if isinstance(response, Exception):
@@ -100,6 +138,64 @@ def run_recovery(source_image, tmp_path, table=None, client=None, **kwargs):
     return table, client, counts
 
 
+def test_localization_copies_parsed_source_spans(source_image, tmp_path):
+    table = {**table_target(), 'markdown': '<table><tr><th>A</th><th>B</th></tr>'
+             '<tr><td rowspan="2">[image]</td><td>x</td></tr><tr><td>y</td></tr></table>'}
+    response = geometry(table)
+    response['source_cells'][0].update(row=1, rowspan=2)
+    table, client, counts = run_recovery(source_image, tmp_path, table, GeometryClient([response]))
+    origins = client.targets[0]['source_cell_origins']
+    assert {'row': 1, 'col': 0, 'rowspan': 2, 'colspan': 1, 'image_placeholder': True} in origins
+    assert counts[1] == 1
+    assert table['source_cells'][0]['rowspan'] == 2
+    assert not table['image_unresolved']
+    assert 'source_cell_origins' not in table
+
+
+def test_source_parse_failure_preserves_table_without_model_send(source_image, tmp_path, monkeypatch):
+    def fail(*args, **kwargs):
+        raise ValueError('invalid_table_source')
+    monkeypatch.setattr(sp, '_normalize_table_contract', fail)
+    table, client, counts = run_recovery(source_image, tmp_path)
+    assert table['markdown'] == HTML
+    assert table['image_unresolved']
+    assert client.calls == []
+    assert counts[1] == 0
+
+
+def test_wrong_source_cell_identity_is_retried_with_specific_error(source_image, tmp_path):
+    wrong = geometry(table_target())
+    wrong['source_cells'][0]['row'] = 99
+    table, client, counts = run_recovery(source_image, tmp_path,
+                                        client=GeometryClient([wrong, geometry(table_target())]))
+    assert counts[1] == 2
+    assert client.targets[1]['recovery_error'] == 'cell_source_mismatch'
+    assert not table['image_unresolved']
+
+
+def test_padded_crop_supplies_authoritative_table_boundary(source_image, tmp_path):
+    table = table_target()
+    client = GeometryClient()
+    pp._recover_layout_objects(source_image, tmp_path, {'payloads': {'tables': [table]}},
+        [{**table, 'type': 'table', 'recovery_target': 'cell_images'}], client, True, 1, .02)
+    x0, y0, x1, y1 = client.targets[0]['table_bbox_in_crop']
+    assert 0 < x0 < x1 < 1
+    assert 0 < y0 < y1 < 1
+    assert 'table_bbox_in_crop' not in table
+
+
+def test_geometry_diagnostics_omit_source_text_and_generated_ids(source_image, tmp_path):
+    import json
+    response = geometry(table_target())
+    response['source_cells'][0]['text'] = 'PRIVATE_CELL_TEXT'
+    response['source_cells'][0]['image_regions'][0]['image_id'] = 'PRIVATE_MODEL_ID'
+    _, _, counts = run_recovery(source_image, tmp_path, client=GeometryClient([response]))
+    diagnostics = json.dumps(counts[2])
+    assert 'PRIVATE' not in diagnostics
+    attempt = counts[2]['objects'][0]['attempts'][0]
+    assert attempt['cell_geometry'][0]['regions'][0]['bbox_space'] == 'normalized_crop'
+
+
 @pytest.mark.parametrize('dpi', [150, 300])
 def test_projection_uses_original_pixel_rectangle_even_after_resize(source_image, tmp_path, dpi):
     table, client, counts = run_recovery(source_image, tmp_path, source_dpi=dpi)
@@ -112,11 +208,11 @@ def test_projection_uses_original_pixel_rectangle_even_after_resize(source_image
     assert again[1] == 0
 
 
-def test_retry_is_smaller_and_bounded(source_image, tmp_path):
+def test_geometry_retry_preserves_resolution_and_is_bounded(source_image, tmp_path):
     invalid = {'complete': False, 'type': 'table', 'layout_id': 'p3-table'}
     table, client, counts = run_recovery(source_image, tmp_path, client=GeometryClient([invalid, geometry(table_target())]))
     assert counts[1] == 2
-    assert client.calls[1][0] < client.calls[0][0]
+    assert client.calls[1][0] == client.calls[0][0]
     assert table['source_cells'][0]['image_regions'][0]['bbox'] == pytest.approx([.35, .35, .65, .65])
 
 
@@ -191,7 +287,8 @@ def test_direct_entry_recovery_updates_counts(source_image):
 def test_source_cell_must_match_original_table(source_image, tmp_path, change):
     candidate = geometry(table_target())
     candidate['source_cells'][0].update(change)
-    table, client, _ = run_recovery(source_image, tmp_path, client=GeometryClient([candidate]))
+    table, client, counts = run_recovery(source_image, tmp_path, client=GeometryClient([candidate, candidate]))
+    assert counts[1] == 2
     assert not table.get('source_cells')
     assert any(issue['reason'] == 'cell_source_mismatch' for issue in table['image_unresolved'])
 

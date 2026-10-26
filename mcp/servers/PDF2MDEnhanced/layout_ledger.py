@@ -698,6 +698,9 @@ def validate_recovered_object(block: Dict[str, Any], candidate: Any) -> Tuple[st
             except Exception:
                 return "table_html_invalid", shape
             if parser.invalid or parser.stack:
+                shape["table_unsafe_tags"] = sorted(set(re.findall(
+                    r"<(script|iframe|object|embed|img|svg|style|link|meta)\b", content, re.IGNORECASE)))
+                shape["table_unclosed_structure"] = bool(parser.stack)
                 return "table_html_invalid", shape
             if not shape["tr_open_count"] or not (shape["td_open_count"] + shape["th_open_count"]):
                 return "table_cells_missing", shape

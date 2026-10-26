@@ -910,6 +910,8 @@ class LayoutLedgerGLMOcrClient:
 
     def parse_layout(self, image_path, return_crop_images=False, need_layout_visualization=False):
         type(self).calls.append(str(image_path))
+        if self.request_guard is not None:
+            self.request_guard()
         _ = return_crop_images
         _ = need_layout_visualization
         assert "layout-recovery-" not in str(image_path), "layout endpoint is not an object content contract"
@@ -921,6 +923,8 @@ class LayoutLedgerGLMOcrClient:
 
     def extract_table_html(self, image_path):
         type(self).crop_calls.append(str(image_path))
+        if self.request_guard is not None:
+            self.request_guard()
         self.last_object_call_info = {"finish_reason": "stop", "json_status": "html"}
         return type(self).crop_results.pop(0) if type(self).crop_results else ""
 
@@ -931,6 +935,7 @@ class LayoutLedgerVLMClient:
     last_blocks = []
     last_image_paths = []
     configs = []
+    physical_requests = 0
 
     def __init__(self, cfg):
         type(self).configs.append(dict(cfg or {}))
@@ -942,9 +947,17 @@ class LayoutLedgerVLMClient:
         self.max_retries = 0
         self.last_call_info = {}
         self.last_dual_output_budget = {}
+        self.physical_request_limit = (cfg or {}).get("table_analysis_max_physical_requests", 0)
+        type(self).physical_requests = 0
+
+    def _count_physical_request(self, _request=None):
+        if type(self).physical_requests >= self.physical_request_limit:
+            raise RuntimeError("vlm_physical_budget_exhausted")
+        type(self).physical_requests += 1
 
     def extract_object_structured(self, image_path, block, compact=False):
         _ = compact
+        self._count_physical_request()
         type(self).calls += 1
         type(self).last_blocks = [block]
         type(self).last_image_paths.append(str(image_path))
@@ -967,7 +980,8 @@ class LayoutLedgerVLMClient:
         return markdown_text
 
 
-def _run_layout_ledger_page(monkeypatch, raw, recovered=None, recovery_max_objects=0, crop_results=None):
+def _run_layout_ledger_page(monkeypatch, raw, recovered=None, recovery_max_objects=0, crop_results=None,
+                            request_limit=2):
     page = FakePage(
         text="fixture text layer",
         blocks=[(0, 0, 100, 100, "fixture text layer", 0, 0)],
@@ -1002,11 +1016,13 @@ def _run_layout_ledger_page(monkeypatch, raw, recovered=None, recovery_max_objec
     LayoutLedgerVLMClient.last_blocks = []
     LayoutLedgerVLMClient.last_image_paths = []
     LayoutLedgerVLMClient.configs = []
+    LayoutLedgerVLMClient.physical_requests = 0
     result = page_processor.process_page(
         source_path="/tmp/layout-fixture.pdf",
         page_no=1,
         policy="force_direct",
-        vlm_config={"provider": "fixture"} if recovered is not None else None,
+        vlm_config={"provider": "fixture", "table_analysis_max_model_calls": request_limit}
+                   if recovered is not None else None,
         routing_config={
             "ocr_config": {
                 "glm_ocr": {
@@ -1226,18 +1242,18 @@ def test_process_page_recovers_successfully_parsed_incomplete_table_from_its_cro
 
     assert len(LayoutLedgerGLMOcrClient.calls) == 1
     assert len(LayoutLedgerGLMOcrClient.crop_calls) == 1
-    assert LayoutLedgerVLMClient.configs[0]["table_analysis_max_model_calls"] == 1
+    assert LayoutLedgerVLMClient.configs[0]["table_analysis_max_model_calls"] == 2
     assert LayoutLedgerVLMClient.configs[0]["table_analysis_max_physical_requests"] == 2
     assert result["layout"][0]["status"] == "EXTRACTED"
     assert result["layout"][0]["error"] is None
-    assert result["layout_recovery"]["objects"][0]["outcome"] == "recovered"
+    assert result["layout_recovery"]["objects"][0]["outcome"] == "content_recovered_image_pending"
     assert result["elements"]["tables"][0]["markdown"] == recovered
     assert recovered in result["render"]["markdown"]
     assert incomplete not in result["render"]["markdown"]
     assert result["reconciliation"]["complete"] is True
 
 
-def test_incomplete_table_triggers_one_targeted_cell_image_layout_recovery(monkeypatch):
+def test_incomplete_table_recovers_content_then_cell_images(monkeypatch):
     incomplete = "<table><tr><td>参数</td></tr><tr><td>未闭合"
     recovered = "<table><tr><td>参数</td></tr><tr><td>完整值</td></tr></table>"
     raw = _layout_raw([
@@ -1260,10 +1276,50 @@ def test_incomplete_table_triggers_one_targeted_cell_image_layout_recovery(monke
     )
 
     assert LayoutLedgerGLMOcrClient.crop_calls
-    assert LayoutLedgerVLMClient.calls == 1
-    assert LayoutLedgerVLMClient.last_blocks[0]["recovery_target"] == "table_content_with_cell_images"
+    assert LayoutLedgerVLMClient.calls == 2
+    assert result["decision"]["provider_requests"] == {
+        "glm_ocr": 2, "vlm_ocr": 2, "limits": {"glm_ocr": 2, "vlm_ocr": 2},
+    }
+    assert LayoutLedgerVLMClient.last_blocks[0]["recovery_target"] == "cell_images"
     assert result["layout_recovery"]["objects"][0]["outcome"] == "recovered"
     assert result["elements"]["tables"][0]["contains_images"] is True
+
+
+def test_complete_ocr_crop_still_runs_vlm_and_keeps_ocr_table_source(monkeypatch):
+    incomplete = "<table><tr><td>参数</td></tr><tr><td>未闭合"
+    ocr_table = "<table><tr><td>OCR 表格正文</td></tr></table>"
+    vlm_table = "<table><tr><td>VLM 改写正文</td></tr></table>"
+    raw = _layout_raw([
+        {"label": "table", "bbox_2d": [10, 20, 90, 90], "content": incomplete},
+    ], markdown="表8-5\n\n" + incomplete)
+    result = _run_layout_ledger_page(
+        monkeypatch, raw, recovered={"tables": [{"markdown": vlm_table}],
+                                     "formulas": [], "figures": []},
+        recovery_max_objects=1, crop_results=[ocr_table],
+    )
+
+    assert 1 <= LayoutLedgerVLMClient.calls <= 2
+    assert result["elements"]["tables"][0]["markdown"] == ocr_table
+    assert result["decision"]["provider_requests"]["glm_ocr"] == 2
+    assert result["decision"]["provider_requests"]["vlm_ocr"] == 2
+
+
+@pytest.mark.parametrize("request_limit", [1, 2])
+def test_configured_provider_budget_preserves_recovered_content(monkeypatch, request_limit):
+    html = "<table><tr><td>Recovered source</td></tr></table>"
+    raw = _layout_raw([{"label": "table", "bbox_2d": [10, 20, 90, 90],
+                       "content": "<table><tr><td>incomplete"}])
+    result = _run_layout_ledger_page(
+        monkeypatch, raw, recovered={"tables": [{"layout_id": "p1-o001-table", "markdown": html,
+            "contains_images": False, "source_cells": [], "image_unresolved": []}]},
+        recovery_max_objects=1, crop_results=[html], request_limit=request_limit,
+    )
+    budget = result["decision"]["provider_requests"]
+    assert budget["limits"] == {"glm_ocr": request_limit, "vlm_ocr": request_limit}
+    assert budget["glm_ocr"] <= request_limit
+    assert budget["vlm_ocr"] <= request_limit
+    assert len(result["elements"]["tables"]) == 1
+    assert result["elements"]["tables"][0]["markdown"] == html
 
 
 @pytest.mark.parametrize("image_signal", [False, True])

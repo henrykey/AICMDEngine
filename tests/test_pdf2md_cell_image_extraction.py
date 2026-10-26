@@ -21,7 +21,8 @@ def test_source_geometry_reaches_existing_asset_pipeline(tmp_path):
     pix.clear_with(255)
     pix.save(str(path))
     table = {'layout_id': 'p7-t', 'bbox': [0, 0, 1, 1], 'bbox_space': 'normalized_page',
-             'markdown': '<table><tr><td>Original</td></tr></table>'}
+             'markdown': '<table><tr><td>Original</td></tr></table>',
+             'reading_order': 4, 'source_block_index': 3}
     original = table['markdown']
     table.update(contains_images=True, source_cells=[cell()])
     payloads = {'tables': [table], 'figures': []}
@@ -30,6 +31,8 @@ def test_source_geometry_reaches_existing_asset_pipeline(tmp_path):
     assert payloads['figures'][0]['image_asset']['status'] == 'available'
     assert payloads['figures'][0]['image_asset']['page_no'] == 7
     assert payloads['figures'][0]['parent_relation']['cell_source'] == 'r0c0'
+    assert payloads['figures'][0]['reading_order'] == 4
+    assert payloads['figures'][0]['source_block_index'] == 3
     assert table['markdown'] == original
     output = pp._build_layout_output_elements('', payloads, 'full_glm_ocr')
     assert output['tables'][0]['source_cells'][0]['image_regions'] == cell()['image_regions']
