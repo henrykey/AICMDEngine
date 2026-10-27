@@ -19,14 +19,22 @@
             ],
             "status": "EXTRACTED",
             "bbox_space": "normalized_page",
+            "manualReviewRequired": true,
             "layout_id": "p1-o001-table",
             "reading_order": 1,
+            "image_unresolved": [
+              {
+                "reason": "recovery_limit_exceeded",
+                "stage": "cell_image_recovery"
+              }
+            ],
             "source_block_index": 1,
             "description": "",
             "semantic_summary": "",
             "missing_fields": [
               "title",
-              "description"
+              "description",
+              "cell_images"
             ],
             "semantic_status": "missing"
           }
@@ -42,7 +50,8 @@
       "complete": false,
       "missing": [
         "tables[0].title",
-        "tables[0].description"
+        "tables[0].description",
+        "tables[0].cell_images"
       ],
       "reason": "docs_semantics_pending",
       "objects": [
@@ -51,7 +60,8 @@
           "index": 0,
           "missing_fields": [
             "title",
-            "description"
+            "description",
+            "cell_images"
           ],
           "semantic_status": "missing",
           "layout_id": "p1-o001-table"

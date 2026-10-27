@@ -1256,8 +1256,10 @@ def _table_image_problem(table):
 
 
 def _table_needs_cell_image_inspection(table):
-    """Inspect cell images only when extraction reports a structural gap or image gap."""
+    """Complete text/HTML is not evidence that every cell image was inspected."""
     if _table_image_problem(table):
+        return True
+    if table.get("cell_image_inspection_status") != "complete":
         return True
     if table.get("degraded") is True or table.get("recovery_quality") in {"partial", "degraded"}:
         return True
@@ -1325,6 +1327,7 @@ def _validate_cell_image_recovery(block, candidate, crop_info, image_path):
         result.pop("source_cell_origins", None)
         result.pop("recovery_error", None)
         result.pop("table_bbox_in_crop", None)
+        result["cell_image_inspection_status"] = "complete"
         result["contains_images"] = False
         result["image_unresolved"] = [issue for issue in result.get("image_unresolved", [])
                                       if issue.get("reason") not in _CELL_IMAGE_GEOMETRY_REASONS
@@ -1406,6 +1409,7 @@ def _validate_cell_image_recovery(block, candidate, crop_info, image_path):
     result.setdefault("source_cell_row_offset", 1)
     if _table_image_problem({**result, "image_unresolved": []}):
         return "invalid_cell_image_geometry", None
+    result["cell_image_inspection_status"] = "complete"
     result["manualReviewRequired"] = bool(result.get("image_unresolved") or result.get("degraded") or result.get("warnings")
         or result.get("table_kind", "data_table") != "data_table"
         or (block.get("manualReviewRequired") and not block.get("image_unresolved")))
@@ -1452,7 +1456,7 @@ def _object_success_payload(block: Dict[str, Any], candidate: Dict[str, Any]) ->
     if candidate.get("semantic_reason") == "description_language_mismatch":
         payload["semantic_reason"] = "description_language_mismatch"
     if block["type"] == "table":
-        for key in ("contains_images", "source_cells", "image_unresolved"):
+        for key in ("contains_images", "source_cells", "image_unresolved", "cell_image_inspection_status"):
             if key in candidate:
                 payload[key] = candidate[key]
     if block["type"] == "formula":
@@ -2155,6 +2159,7 @@ def _copy_optional_element_metadata(item: Dict[str, Any], metadata: Dict[str, An
         "normalized_rows",
         "source_cells",
         "contains_images",
+        "cell_image_inspection_status",
         "image_unresolved",
         "cell_status",
         "source_cell_row_offset",
@@ -2519,6 +2524,7 @@ def _normalize_structured(value: Any) -> Dict[str, Any]:
             "normalized_rows",
             "source_cells",
             "contains_images",
+            "cell_image_inspection_status",
             "image_unresolved",
             "cell_status",
             "source_cell_row_offset",
@@ -2750,6 +2756,7 @@ def _ocr_element_payload(item: Any, kind: str) -> Dict[str, Any]:
                 "normalized_rows",
                 "source_cells",
                 "contains_images",
+                "cell_image_inspection_status",
                 "image_unresolved",
                 "cell_status",
                 "source_cell_row_offset",

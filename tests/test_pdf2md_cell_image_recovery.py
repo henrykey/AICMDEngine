@@ -22,7 +22,7 @@ def geometry(block):
 
 @pytest.mark.parametrize("layout_enabled", [True, False])
 @pytest.mark.parametrize("figure_semantics", [True, False])
-def test_conversion_preserves_table_without_implicit_cell_image_recovery(tmp_path, monkeypatch, layout_enabled, figure_semantics):
+def test_conversion_preserves_complete_table_and_inspects_cell_images(tmp_path, monkeypatch, layout_enabled, figure_semantics):
     path = tmp_path / 'page.pdf'
     doc = fitz.open()
     page = doc.new_page(width=100, height=100)
@@ -46,20 +46,30 @@ def test_conversion_preserves_table_without_implicit_cell_image_recovery(tmp_pat
             if block["type"] == "figure":
                 return {"layout_id": block["layout_id"], "type": "figure", "status": "EXTRACTED",
                         "complete": True, "description": "A red rectangular component occupies the center of the diagram."}
-            return geometry(block)
+            result = geometry(block)
+            result['source_cells'][0]['image_regions'] = [
+                {'image_id': 'left', 'bbox': [.1, .2, .4, .8], 'bbox_space': 'normalized_crop'},
+                {'image_id': 'right', 'bbox': [.6, .2, .9, .8], 'bbox_space': 'normalized_crop'},
+            ]
+            return result
     monkeypatch.setattr(pp, 'OpenAICompatibleOcrClient', OCR)
     monkeypatch.setattr(pp, 'DynamicVLMClient', VLM)
     result = pp.process_page(str(path), 1, 'auto', {'provider': 'fixture'},
         {'source_page_no': 7, 'render_dpi': 150, 'render_cleanup_with_llm': False,
          'layout_ledger_enabled': layout_enabled, 'figure_semantic_description_required': figure_semantics,
          'ocr_config': {'glm_ocr': {'enabled': True}}}, None)
-    assert calls == []
+    assert len(calls) == 1
+    assert calls[0]["recovery_target"] == "cell_images"
     table = result['elements']['tables'][0]
     assert table['markdown'] == HTML
     assert table['bbox'] == [.2, .2, .8, .8]
     assert table['bbox_space'] == 'normalized_page'
-    # No supplied cell geometry: conversion must not invent a figure or trigger recovery.
-    assert not result['elements']['figures']
+    assert len(result["elements"]["figures"]) == 2
+    assert all(f['image_asset']['status'] == 'available' for f in result['elements']['figures'])
+    assert table['cell_image_inspection_status'] == 'complete'
+    if layout_enabled:
+        assert result['reconciliation']['complete']
+        assert not result['reconciliation']['unmatched_payload_layout_ids']
 
 
 @pytest.fixture
@@ -254,7 +264,8 @@ def test_same_object_can_use_remaining_budget(source_image, tmp_path):
 
 
 def test_plain_table_no_extra_call(source_image, tmp_path):
-    table = {**table_target(), 'contains_images': False, 'image_unresolved': []}
+    table = {**table_target(), 'contains_images': False, 'image_unresolved': [],
+             'cell_image_inspection_status': 'complete'}
     _, client, counts = run_recovery(source_image, tmp_path, table)
     assert client.calls == []
 
@@ -346,9 +357,10 @@ def test_ocr_table_incompleteness_survives_normalization_for_cell_image_inspecti
     assert pp._table_needs_cell_image_inspection(table)
 
 
-def test_complete_table_is_not_scheduled_for_cell_image_inspection():
+def test_visually_checked_complete_table_is_not_inspected_again():
     table = {**table_target(), 'contains_images': False, 'image_unresolved': [],
-             'source_cells': [], 'recovery_quality': 'complete', 'structure_status': 'parsed'}
+             'source_cells': [], 'recovery_quality': 'complete', 'structure_status': 'parsed',
+             'cell_image_inspection_status': 'complete'}
     assert pp._table_needs_cell_image_inspection(table) is False
 
 
@@ -459,3 +471,15 @@ def test_partial_recovery_adds_image_without_replacing_existing(source_image, tm
     assert table['source_cells'][0]['image_regions'][0] == old_image
     assert len(table['source_cells'][0]['image_regions']) == 2
     assert not table['image_unresolved']
+
+
+def test_confirmed_no_images_is_retained_and_not_called_again(source_image, tmp_path):
+    table = {**table_target(), 'contains_images': False, 'image_unresolved': []}
+    client = GeometryClient([{'layout_id': table['layout_id'], 'type': 'table',
+                             'status': 'EXTRACTED', 'complete': True, 'contains_images': False, 'source_cells': []}])
+    table, _, _ = run_recovery(source_image, tmp_path, table, client)
+    assert table['cell_image_inspection_status'] == 'complete'
+    assert table['markdown'] == HTML
+    assert not table['image_unresolved']
+    run_recovery(source_image, tmp_path, table, client)
+    assert len(client.calls) == 1

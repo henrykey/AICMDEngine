@@ -9,7 +9,7 @@ def test_page_conversion_keeps_source_and_layout_without_business_calls(monkeypa
     def forbidden(*args, **kwargs):
         raise AssertionError('conversion must return control to Docs')
     for name in ('_enrich_upload_semantics', 'complete_calculation_batch', '_recover_formula_numbers',
-                 '_recover_missing_table_images', '_recover_cell_figure_semantics', '_recover_layout_objects',
+                 '_recover_cell_figure_semantics',
                  '_recover_unbound_table_regions'):
         monkeypatch.setattr(pp, name, forbidden, raising=False)
     source = '| Input | Value |\n| --- | --- |\n| p | 12 MPa |'
@@ -22,6 +22,8 @@ def test_page_conversion_keeps_source_and_layout_without_business_calls(monkeypa
     assert 'table_kind' not in table and 'calculation_sheet' not in table
     assert out['decision']['vlm_calls'] == 0
     assert out['decision']['glm_calls'] == 1
+    assert out['elements']['tables'][0]['image_unresolved'] == [
+        {'reason': 'recovery_limit_exceeded', 'stage': 'cell_image_recovery'}]
     assert out['semantic_status']['reason'] == 'docs_semantics_pending'
 
 

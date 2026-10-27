@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import copy
 from html.parser import HTMLParser
 
 from typing import Any, Dict, List, Optional, Tuple
@@ -315,6 +316,43 @@ def apply_recovered_payloads(outcome: Dict[str, Any], recovered: Any) -> None:
     outcome["unmatched_recovery_refs"] = _unique(unmatched)
 
 
+def _validated_cell_figure_ids(output_elements, layout):
+    """Derived figures belong to a validated table cell, not a second page layout block."""
+    payloads = copy.deepcopy(output_elements)
+    attach_object_relationships(payloads, None)
+    table_ids = [item.get("layout_id") for item in layout
+                 if item.get("type") == "table" and item.get("status") == "EXTRACTED"]
+    figures = payloads.get("figures", [])
+    accepted = set()
+    for figure in figures:
+        identity = figure.get("layout_id")
+        declared = figure.get("cell_image_source") or {}
+        relation = figure.get("parent_relation") or {}
+        asset = figure.get("image_asset") or {}
+        if (figure.get("source") != "source_cell_image_region" or not identity
+                or sum(f.get("layout_id") == identity for f in figures) != 1
+                or relation.get("status") != "resolved"
+                or any(declared.get(key) != relation.get(key) for key in ("table_layout_id", "cell_source"))
+                or table_ids.count(declared.get("table_layout_id")) != 1
+                or asset.get("status") != "available" or asset.get("layout_id") != identity):
+            continue
+        matches = []
+        for table in payloads.get("tables", []):
+            if table.get("layout_id") != declared.get("table_layout_id"):
+                continue
+            for cell in table.get("source_cells", []):
+                cell_ref = f"r{cell.get('row')}c{cell.get('col')}"
+                for region in cell.get("image_regions", []):
+                    expected = f"{table['layout_id']}:{cell_ref}:image:{region.get('image_id')}"
+                    if (identity == expected and cell_ref == declared.get("cell_source")
+                            and region.get("bbox") == figure.get("bbox")
+                            and region.get("bbox_space") == "normalized_page"):
+                        matches.append(expected)
+        if len(matches) == 1:
+            accepted.add(identity)
+    return accepted
+
+
 def reconcile_layout(
     layout_status: str,
     layout: List[Dict[str, Any]],
@@ -338,12 +376,15 @@ def reconcile_layout(
     payload_refs: Dict[str, List[Tuple[str, int]]] = {}
     unmatched_payloads: List[str] = list(unmatched_recovery_refs or [])
     valid_layout_ids = {str(item.get("layout_id") or "") for item in layout}
+    cell_figure_ids = _validated_cell_figure_ids(output_elements, layout)
     for collection in ("tables", "formulas", "figures"):
         values = output_elements.get(collection)
         if not isinstance(values, list):
             continue
         for index, payload in enumerate(values):
             layout_id = str(payload.get("layout_id") or "") if isinstance(payload, dict) else ""
+            if collection == "figures" and layout_id in cell_figure_ids and layout_id not in valid_layout_ids:
+                continue
             if not layout_id or layout_id not in valid_layout_ids:
                 unmatched_payloads.append(layout_id or f"{collection}:{index}")
                 continue
