@@ -211,8 +211,9 @@ def process_page(
                         if block.get("type") == "table"
                         and any(
                             item.get("layout_id") == block.get("layout_id")
-                            and (item.get("error") or {}).get("code") == "layout_table_content_incomplete"
-                            and (item.get("error") or {}).get("retryable") is True
+                            and (((item.get("error") or {}).get("code") == "layout_table_content_incomplete"
+                                  and (item.get("error") or {}).get("retryable") is True)
+                                 or "table_math_delimiter_unresolved" in item.get("warnings", []))
                             for item in layout_outcome.get("layout") or []
                         )
                     ]
@@ -1234,6 +1235,7 @@ def _recover_layout_objects(
 
 
 _CELL_IMAGE_GEOMETRY_REASONS = {
+    "cell_image_boundary_intersects_content",
     "missing_cell_image_geometry", "image_detection_incomplete", "invalid_cell_image_geometry",
     "invalid_cell_image_regions", "invalid_cell_image_identity", "cell_image_geometry_conflict",
     "image_identity_conflict",
@@ -1409,6 +1411,14 @@ def _validate_cell_image_recovery(block, candidate, crop_info, image_path):
     result.setdefault("source_cell_row_offset", 1)
     if _table_image_problem({**result, "image_unresolved": []}):
         return "invalid_cell_image_geometry", None
+    # Geometry ownership does not prove that the crop contains the whole drawing.
+    # Reuse calculation-source cut validation before accepting or materializing it.
+    from PIL import Image
+    from .calculation_blocks import boundary_intersects_content
+    with Image.open(image_path) as page_image:
+        if any(boundary_intersects_content(page_image, region["bbox"])
+               for cell in result["source_cells"] for region in cell.get("image_regions", [])):
+            return "cell_image_boundary_intersects_content", None
     result["cell_image_inspection_status"] = "complete"
     result["manualReviewRequired"] = bool(result.get("image_unresolved") or result.get("degraded") or result.get("warnings")
         or result.get("table_kind", "data_table") != "data_table"
@@ -1422,7 +1432,7 @@ def _object_content_retryable(reason: str) -> bool:
         "provider_output_truncated", "table_content_empty", "table_html_unclosed", "table_html_invalid",
         "table_cells_missing", "table_count_invalid", "table_markdown_invalid", "image_detection_incomplete", "formula_content_empty",
         "formula_unbalanced", "figure_content_empty", "missing_cell_image_geometry", "invalid_cell_image_geometry",
-        "cell_source_mismatch",
+        "cell_source_mismatch", "cell_image_boundary_intersects_content", "table_math_delimiter_unresolved",
     }
 
 

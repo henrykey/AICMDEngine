@@ -26,7 +26,9 @@ def test_conversion_preserves_complete_table_and_inspects_cell_images(tmp_path, 
     path = tmp_path / 'page.pdf'
     doc = fitz.open()
     page = doc.new_page(width=100, height=100)
-    page.draw_rect(fitz.Rect(30, 30, 70, 70), color=(1, 0, 0), fill=(1, 0, 0))
+    # Two complete drawings lie strictly inside the two returned image regions.
+    for bounds in [(30, 40, 40, 60), (60, 40, 70, 60)]:
+        page.draw_rect(fitz.Rect(*bounds), color=(1, 0, 0), fill=(1, 0, 0))
     doc.save(path)
     doc.close()
     class OCR(LayoutLedgerGLMOcrClient):
@@ -483,3 +485,102 @@ def test_confirmed_no_images_is_retained_and_not_called_again(source_image, tmp_
     assert not table['image_unresolved']
     run_recovery(source_image, tmp_path, table, client)
     assert len(client.calls) == 1
+
+
+def test_cut_image_boundary_retries_without_discarding_table(source_image, tmp_path):
+    from PIL import Image, ImageDraw
+    image = Image.new('RGB', (200, 100), 'white')
+    ImageDraw.Draw(image).rectangle((75, 25, 125, 75), fill='black')
+    image.save(source_image)
+    target = table_target()
+    # Crop is [40,20,160,80]; first region cuts through the component at y=35.
+    clipped = geometry(target)
+    corrected = geometry(target)
+    corrected['source_cells'][0]['image_regions'][0]['bbox'] = [.2, .02, .8, .98]
+    client = GeometryClient([clipped, corrected])
+    table, _, _ = run_recovery(source_image, tmp_path, target, client)
+    assert len(client.calls) == 2
+    assert client.targets[1]['recovery_error'] == 'cell_image_boundary_intersects_content'
+    assert table['cell_image_inspection_status'] == 'complete'
+    assert table['markdown'] == HTML
+
+
+def test_cut_image_boundary_exhaustion_stays_reviewable(source_image, tmp_path):
+    from PIL import Image, ImageDraw
+    image = Image.new('RGB', (200, 100), 'white')
+    ImageDraw.Draw(image).rectangle((75, 25, 125, 75), fill='black')
+    image.save(source_image)
+    target = table_target()
+    table, client, _ = run_recovery(source_image, tmp_path, target,
+        GeometryClient([geometry(target), geometry(target)]))
+    assert len(client.calls) == 2
+    assert table.get('cell_image_inspection_status') != 'complete'
+    assert table['image_unresolved'][-1]['reason'] == 'cell_image_boundary_intersects_content'
+    assert table['markdown'] == HTML
+
+
+def test_math_invalid_complete_table_uses_existing_recovery(source_image, tmp_path):
+    broken = '<table><tr><td>coefficient $x_{i</td></tr></table>'
+    fixed = '<table><tr><td>coefficient $x_{i}$</td></tr></table>'
+    outcome = pp.build_layout_outcome(_layout_raw([
+        {'label': 'table', 'bbox_2d': [20,20,80,80], 'content': broken}], broken), 3, 200, 100)
+    targets = pp.recovery_blocks(outcome)
+    assert len(targets) == 1
+    class OCR:
+        enabled = True
+        def extract_table_html(self, path): return fixed
+    pp._recover_layout_objects(source_image, tmp_path, outcome, targets,
+        GeometryClient(), False, 1, 0, glm=OCR())
+    assert len(outcome['payloads']['tables']) == 1
+    table = outcome['payloads']['tables'][0]
+    assert table['markdown'] == fixed
+    assert 'table_math_delimiter_unresolved' not in table.get('warnings', [])
+    assert not outcome['layout'][0]['review_required']
+    assert fixed in outcome['markdown']
+
+
+def test_math_invalid_recovery_keeps_original_table(source_image, tmp_path):
+    broken = '<table><tr><td>coefficient $x_{i</td></tr></table>'
+    outcome = pp.build_layout_outcome(_layout_raw([
+        {'label': 'table', 'bbox_2d': [20,20,80,80], 'content': broken}], broken), 3, 200, 100)
+    class OCR:
+        enabled = True
+        def extract_table_html(self, path): return broken
+    pp._recover_layout_objects(source_image, tmp_path, outcome, pp.recovery_blocks(outcome),
+        GeometryClient(), False, 1, 0, glm=OCR())
+    assert len(outcome['payloads']['tables']) == 1
+    assert outcome['payloads']['tables'][0]['markdown'] == broken
+    assert outcome['layout'][0]['review_required']
+
+
+def test_recovered_table_rejects_balanced_dollars_with_broken_latex():
+    block = {'layout_id': 't', 'type': 'table'}
+    candidate = {**block, 'complete': True, 'status': 'EXTRACTED',
+        'markdown': '<table><tr><td>$\\frac{x}{y$</td></tr></table>'}
+    assert pp.validate_recovered_object(block, candidate)[0] == 'table_math_delimiter_unresolved'
+
+
+def test_full_page_math_recovery_preserves_single_identity(source_image, tmp_path, monkeypatch):
+    broken = '<table><tr><td>coefficient $x_{i</td></tr></table>'
+    fixed = '<table><tr><td>coefficient $x_{i}$</td></tr></table>'
+    calls = []
+    class OCR(LayoutLedgerGLMOcrClient):
+        raw = _layout_raw([{'label': 'table', 'bbox_2d': [20,20,80,80], 'content': broken}], broken)
+        def extract_table_html(self, path):
+            calls.append('content')
+            return fixed
+    class VLM(LayoutLedgerVLMClient):
+        def extract_object_structured(self, path, block, compact=False):
+            calls.append(block.get('recovery_target'))
+            return {'layout_id': block['layout_id'], 'type': 'table', 'status': 'EXTRACTED',
+                    'complete': True, 'contains_images': False, 'source_cells': [], 'image_unresolved': []}
+    monkeypatch.setattr(pp, 'OpenAICompatibleOcrClient', OCR)
+    monkeypatch.setattr(pp, 'DynamicVLMClient', VLM)
+    result = pp.process_page(str(source_image), 1, 'auto', {'provider': 'fixture'},
+        {'source_page_no': 23, 'render_cleanup_with_llm': False,
+         'ocr_config': {'glm_ocr': {'enabled': True}}}, None)
+    assert calls == ['content', 'cell_images']
+    assert len(result['elements']['tables']) == 1
+    assert result['elements']['tables'][0]['markdown'] == fixed
+    assert result['reconciliation']['complete']
+    assert not result['reconciliation']['duplicate_layout_ids']

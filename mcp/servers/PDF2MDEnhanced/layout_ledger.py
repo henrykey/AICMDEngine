@@ -261,8 +261,9 @@ def recovery_blocks(outcome: Dict[str, Any]) -> List[Dict[str, Any]]:
         }
         for item in outcome.get("layout") or []
         if item.get("type") in {"table", "figure", "formula"}
-        and item.get("status") == "FAILED"
-        and ((item.get("error") or {}).get("stage") == "layout_content")
+        and ((item.get("status") == "FAILED"
+              and (item.get("error") or {}).get("stage") == "layout_content")
+             or "table_math_delimiter_unresolved" in item.get("warnings", []))
     ]
 
 
@@ -295,8 +296,9 @@ def apply_recovered_payloads(outcome: Dict[str, Any], recovered: Any) -> None:
                 existing = outcome["payloads"][collection]
                 retained = [i for i, value in enumerate(existing)
                             if value.get("layout_id") == entry["layout_id"]
-                            and value.get("content_status") == "geometry_only"]
-                if object_type == "figure" and len(retained) == 1:
+                            and (value.get("content_status") == "geometry_only"
+                                 or (object_type == "table" and "table_math_delimiter_unresolved" in entry.get("warnings", [])))]
+                if len(retained) == 1:
                     existing[retained[0]] = payload
                 else:
                     existing.append(payload)
@@ -305,6 +307,11 @@ def apply_recovered_payloads(outcome: Dict[str, Any], recovered: Any) -> None:
             original_content = str(entry.get("content") or "")
             entry["content"] = _payload_content(object_type, payload)
             if object_type == "table":
+                if "table_math_delimiter_unresolved" in entry.get("warnings", []):
+                    entry["warnings"] = [w for w in entry["warnings"] if w != "table_math_delimiter_unresolved"]
+                    if not entry["warnings"]:
+                        entry.pop("degraded", None)
+                        entry.pop("manualReviewRequired", None)
                 _normalize_table_math(entry)
                 payload["markdown"] = entry["content"]
                 payload.update(_table_math_metadata(entry))
@@ -752,6 +759,10 @@ def validate_recovered_object(block: Dict[str, Any], candidate: Any) -> Tuple[st
                     or not all(re.fullmatch(r"\s*:?-{3,}:?\s*", cell) for cell in rows[1])
                     or any(len(row) != len(rows[0]) for row in rows)):
                 return "table_markdown_invalid", shape
+        probe = {"content": content}
+        _normalize_table_math(probe)
+        if "table_math_delimiter_unresolved" in probe.get("warnings", []):
+            return "table_math_delimiter_unresolved", shape
     elif kind == "formula":
         depth = 0
         for brace in re.findall(r"(?<!\\)[{}]", content):
@@ -806,6 +817,14 @@ def _normalize_math_cell(cell: str) -> Tuple[str, bool]:
         and cell[left.end():right.start()].strip()
         for left, right in zip(dollars[::2], dollars[1::2])
     )
+    if valid:
+        for left, right in zip(dollars[::2], dollars[1::2]):
+            reason, _ = validate_recovered_object({"layout_id": "cell", "type": "formula"},
+                {"layout_id": "cell", "type": "formula", "status": "EXTRACTED", "complete": True,
+                 "latex": cell[left.end():right.start()]})
+            if reason:
+                valid = False
+                break
     return cell, not valid
 
 
@@ -920,7 +939,7 @@ def _match_recovery_entry(
         item
         for item in layout
         if item.get("type") == object_type
-        and item.get("status") == "FAILED"
+        and (item.get("status") == "FAILED" or "table_math_delimiter_unresolved" in item.get("warnings", []))
         and str(item.get("layout_id") or "") not in used_layout_ids
     ]
     layout_id = str(candidate.get("layout_id") or "")
