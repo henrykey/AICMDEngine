@@ -1,0 +1,22 @@
+{
+  "task_id": "task_058ea7be5a0f8480",
+  "page_no": 8,
+  "table": {
+    "layout_id": "p8-o004-table",
+    "bbox": [
+      0.116935,
+      0.212942,
+      0.892742,
+      0.729475
+    ],
+    "bbox_space": "normalized_page",
+    "markdown": "<table border=\"1\"><tr><td>材料</td><td></td></tr><tr><td colspan=\"2\">设计温度下钩圈材料的许用应力 $[\\sigma]_{\\mathrm{g}}^{\\mathrm{t}}=$ MPa</td></tr><tr><td colspan=\"2\">直径比 $K=D_{\\mathrm{fo}}/D_{\\mathrm{fi}}=$</td></tr><tr><td colspan=\"2\">系数Y-根据直径比K值,按GB/T150.3-2024查得系数Y=</td></tr><tr><td colspan=\"2\">$L_{\\mathrm{G}}=0.5\\left[D_{\\mathrm{b}}-0.5\\left(D_{\\mathrm{e}}+D_{\\mathrm{fi}}\\right)\\right]$ mm</td></tr><tr><td colspan=\"2\">$M=W_{\\mathrm{p}}L_{\\mathrm{G}}$ N·mm($W_{\\mathrm{p}}$取自表8-5)</td></tr><tr><td colspan=\"2\">$\\delta_{\\mathrm{g}}=\\sqrt{\\frac{2YM}{D_{\\mathrm{fi}}[\\sigma]_{\\mathrm{g}}^{\\mathrm{t}}}}$ mm</td></tr><tr><td colspan=\"2\">A型钩圈尺寸：</td></tr></table>",
+    "image_unresolved": [
+      {
+        "reason": "response_json_invalid",
+        "stage": "cell_image_recovery"
+      }
+    ]
+  },
+  "raw_response_available": false
+}

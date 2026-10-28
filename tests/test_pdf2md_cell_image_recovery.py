@@ -653,3 +653,33 @@ def test_thin_dimension_stroke_cannot_cross_image_crop(edge, size):
     # Existing calculation-block separators are still permitted.
     assert not boundary(image, bbox)
     assert not boundary(image, [.1, .1, .9, .9], allow_thin_rules=False)
+
+
+def test_real_json_failure_keeps_table_and_serializes_attempt_diagnostics(tmp_path, monkeypatch):
+    import json
+    from pathlib import Path
+    root = Path(__file__).parent / 'fixtures' / 'cell_image_crop'
+    recorded = json.loads((root / 'invalid_json_result.json').read_text())
+    table = recorded['table']
+    class OCR(LayoutLedgerGLMOcrClient):
+        raw = _layout_raw([{'label': 'table', 'bbox_2d': [10,20,90,80],
+                           'content': table['markdown']}], table['markdown'])
+    class VLM(LayoutLedgerVLMClient):
+        def extract_object_structured(self, path, block, compact=False):
+            self.last_object_call_info = {'json_status': 'invalid', 'finish_reason': 'stop',
+                'response_chars': 17, 'json_error_position': 3, 'effective_max_tokens': 2048,
+                'raw_response': 'DO_NOT_PERSIST'}
+            return {}
+    monkeypatch.setattr(pp, 'OpenAICompatibleOcrClient', OCR)
+    monkeypatch.setattr(pp, 'DynamicVLMClient', VLM)
+    result = pp.process_page(str(root / 'dimension_page.png'), 1, 'auto', {'provider': 'fixture'},
+        {'source_page_no': 8, 'render_cleanup_with_llm': False, 'layout_ledger_enabled': True,
+         'figure_semantic_description_required': False, 'ocr_config': {'glm_ocr': {'enabled': True}}}, None)
+    actual = result['elements']['tables'][0]
+    assert actual['markdown'] == table['markdown']
+    assert actual['image_unresolved'] == table['image_unresolved']
+    assert actual.get('cell_image_inspection_status') != 'complete'
+    attempts = result['cell_image_recovery']['objects'][0]['attempts']
+    assert len(attempts) == 2
+    assert all(a['reason'] == 'response_json_invalid' and a['json_error_position'] == 3 for a in attempts)
+    assert 'DO_NOT_PERSIST' not in json.dumps(result)

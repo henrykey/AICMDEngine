@@ -542,6 +542,7 @@ def process_page(
                 "layout": layout_outcome.get("layout") or [],
                 "reconciliation": reconciliation,
                 "missing_table_recovery": layout_outcome.get("missing_table_recovery"),
+                "cell_image_recovery": layout_outcome.get("cell_image_recovery"),
                 "layout_recovery": layout_outcome.get("recovery") or {
                     "contract": "object-crop-content-v1",
                     "pending": 0,
@@ -1439,7 +1440,7 @@ def _object_content_retryable(reason: str) -> bool:
 def _safe_object_call_info(vlm: DynamicVLMClient) -> Dict[str, Any]:
     raw = getattr(vlm, "last_object_call_info", {}) or {}
     result: Dict[str, Any] = {}
-    for key in ("response_chars", "requested_max_tokens", "effective_max_tokens"):
+    for key in ("response_chars", "requested_max_tokens", "effective_max_tokens", "json_error_position"):
         value = raw.get(key)
         result[key] = value if type(value) is int and value >= 0 else None
     for key, allowed in {

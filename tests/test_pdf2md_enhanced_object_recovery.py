@@ -443,7 +443,8 @@ def test_image_retry_prompt_targets_geometry_without_retranscribing_table():
     client.description_language = "zh"
     client.last_call_info = {}
     prompts = []
-    def call(path, prompt, max_tokens):
+    def call(path, prompt, max_tokens, **kwargs):
+        assert kwargs == {"json_object": True}
         prompts.append(prompt)
         return json.dumps({"layout_id": "p1-o001-table", "type": "table", "complete": False})
     client._call_image_prompt = call
@@ -671,3 +672,22 @@ def test_real_local_upload_preserves_source_crop_and_task_readback_without_recov
     assert saved['layout'] == result['layout']
     finalized = manager.finalize_task(started["task_id"], merge_mode="both")
     assert finalized["merged_rag"][0]["rag"]["elements"] == result["elements"]
+
+
+def test_cell_image_localization_requests_json_mode_and_keeps_safe_parse_evidence():
+    client = VLMClient.__new__(VLMClient)
+    client.max_tokens = 2048
+    client.description_language = "unknown"
+    calls = []
+    def call(path, prompt, max_tokens, **kwargs):
+        calls.append(kwargs)
+        client.last_call_info = {"finish_reason": "stop", "effective_max_tokens": max_tokens}
+        return '{"source_cells": SECRET_INVALID}'
+    client._call_image_prompt = call
+    assert client.extract_object_structured("crop.png", {**block(), "recovery_target": "cell_images"}) == {}
+    assert calls == [{"json_object": True}]
+    safe = processor._safe_object_call_info(client)
+    assert safe['json_status'] == 'invalid'
+    assert safe['json_error_position'] == 17
+    assert safe['finish_reason'] == 'stop'
+    assert 'SECRET_INVALID' not in json.dumps(safe)

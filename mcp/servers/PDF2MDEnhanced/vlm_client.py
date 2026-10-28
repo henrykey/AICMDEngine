@@ -1013,18 +1013,23 @@ class DynamicVLMClient:
         budget = max(1, min(self.max_tokens, 16384))
         self.last_call_info = {}
         self.last_object_call_info = {}
-        text = self._call_image_prompt(image_path, prompt, max_tokens=budget)
+        text = self._call_image_prompt(image_path, prompt, max_tokens=budget,
+            **({"json_object": True} if block.get("recovery_target") == "cell_images" else {}))
+        parse_error = None
         try:
             data = json.loads(text)
             json_status = "object" if isinstance(data, dict) else "non_object"
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
             data = None
             json_status = "invalid" if text else "empty"
+            if isinstance(exc, json.JSONDecodeError):
+                parse_error = exc.pos
         call = self.last_call_info
         finish = call.get("finish_reason")
         self.last_object_call_info = {
             "response_chars": len(text or ""),
             "json_status": json_status,
+            "json_error_position": parse_error,
             "finish_reason": finish if finish in {None, "stop", "length", "content_filter", "tool_calls"} else "other",
             "requested_max_tokens": budget,
             "effective_max_tokens": call.get("effective_max_tokens"),
