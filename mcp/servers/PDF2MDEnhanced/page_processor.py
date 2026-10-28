@@ -1416,7 +1416,7 @@ def _validate_cell_image_recovery(block, candidate, crop_info, image_path):
     from PIL import Image
     from .calculation_blocks import boundary_intersects_content
     with Image.open(image_path) as page_image:
-        if any(boundary_intersects_content(page_image, region["bbox"])
+        if any(boundary_intersects_content(page_image, region["bbox"], allow_thin_rules=False)
                for cell in result["source_cells"] for region in cell.get("image_regions", [])):
             return "cell_image_boundary_intersects_content", None
     result["cell_image_inspection_status"] = "complete"

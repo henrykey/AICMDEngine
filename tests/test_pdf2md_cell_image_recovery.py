@@ -584,3 +584,72 @@ def test_full_page_math_recovery_preserves_single_identity(source_image, tmp_pat
     assert result['elements']['tables'][0]['markdown'] == fixed
     assert result['reconciliation']['complete']
     assert not result['reconciliation']['duplicate_layout_ids']
+
+
+@pytest.mark.parametrize('correct_on_retry', [False, True])
+def test_real_dimension_crop_uses_bounded_recovery(tmp_path, correct_on_retry):
+    """Replay the 2026-10-28 provider crop, including its too-small cell bbox."""
+    import json
+    from pathlib import Path
+    fixture = Path(__file__).parent / 'fixtures' / 'cell_image_crop'
+    target = json.loads((fixture / 'dimension_page.json').read_text())['table']
+    source = fixture / 'dimension_page.png'
+    original = target['markdown']
+    cells = target.pop('source_cells')
+    target['image_unresolved'] = [{'reason': 'missing_cell_image_geometry'}]
+
+    class Replay(GeometryClient):
+        def extract_object_structured(self, path, block, compact=False):
+            self.calls.append((path, compact))
+            self.targets.append(copy.deepcopy(block))
+            result = geometry(block)
+            result['source_cells'] = copy.deepcopy(cells)
+            # The existing recovery supplies an unpadded table crop in this case.
+            page = fitz.Pixmap(str(source))
+            _, crop = pp._crop_layout_block_image(source, target, tmp_path, padding_ratio=0)
+            left, top, right, bottom = crop['pixel_bbox']
+            for cell in result['source_cells']:
+                if correct_on_retry and len(self.calls) == 2:
+                    cell['bbox'][1] = 1650 / page.height
+                    cell['image_regions'][0]['bbox'][1] = 1650 / page.height
+                for item in [cell, *cell['image_regions']]:
+                    x0,y0,x1,y1 = item['bbox']
+                    item['bbox'] = [(x0*page.width-left)/(right-left),
+                                    (y0*page.height-top)/(bottom-top),
+                                    (x1*page.width-left)/(right-left),
+                                    (y1*page.height-top)/(bottom-top)]
+                    item['bbox_space'] = 'normalized_crop'
+            return result
+
+    client = Replay()
+    table, _, _ = run_recovery(source, tmp_path, target, client)
+    assert len(client.calls) == 2
+    assert client.targets[1]['recovery_error'] == 'cell_image_boundary_intersects_content'
+    assert table['markdown'] == original
+    if correct_on_retry:
+        assert table['cell_image_inspection_status'] == 'complete'
+        assert not table['image_unresolved']
+    else:
+        assert table.get('cell_image_inspection_status') != 'complete'
+        assert table['image_unresolved'][-1]['reason'] == 'cell_image_boundary_intersects_content'
+        assert table['manualReviewRequired'] is True
+
+
+@pytest.mark.parametrize('edge', ['top', 'bottom', 'left', 'right'])
+@pytest.mark.parametrize('size', [200, 1000])
+def test_thin_dimension_stroke_cannot_cross_image_crop(edge, size):
+    from PIL import Image, ImageDraw
+    from importlib import import_module
+    boundary = import_module(sp.__package__ + '.calculation_blocks').boundary_intersects_content
+    image = Image.new('L', (size, size), 255)
+    draw = ImageDraw.Draw(image)
+    cut = size // 4 if edge in ('top', 'left') else 3 * size // 4
+    if edge in ('top', 'bottom'):
+        draw.line((size//2, cut-10, size//2, cut+10), fill=0, width=1)
+    else:
+        draw.line((cut-10, size//2, cut+10, size//2), fill=0, width=1)
+    bbox = [.25, .25, .75, .75]
+    assert boundary(image, bbox, allow_thin_rules=False)
+    # Existing calculation-block separators are still permitted.
+    assert not boundary(image, bbox)
+    assert not boundary(image, [.1, .1, .9, .9], allow_thin_rules=False)

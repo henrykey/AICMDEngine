@@ -53,8 +53,12 @@ def calculation_block_boxes(regions, bbox):
     return partition(boxes, list(bbox))
 
 
-def boundary_intersects_content(image, bbox):
-    """Detect ink crossing crop edges; thin separator rules alone are not glyphs."""
+def boundary_intersects_content(image, bbox, *, allow_thin_rules=True):
+    """Detect crossing ink; only calculation partitions may ignore thin rules.
+
+    A figure dimension extension is content even when only one stroke crosses
+    a wide crop. Cell-image crops must not use the partition separator allowance.
+    """
     from PIL import ImageChops
     gray = image.convert('L')
     x0, y0, x1, y1 = [round(v*s) for v,s in zip(bbox, (image.width,image.height,image.width,image.height))]
@@ -69,7 +73,7 @@ def boundary_intersects_content(image, bbox):
         first = gray.crop(a).point(lambda p: 255 if p < 200 else 0)
         second = gray.crop(b).point(lambda p: 255 if p < 200 else 0)
         dark = ImageChops.multiply(first, second).histogram()[255]
-        return dark > max(2, (end-start)*.01)
+        return dark > (max(2, (end-start)*.01) if allow_thin_rules else 0)
     return (crossing(1,y0,x0,x1) or crossing(1,y1,x0,x1)
             or crossing(0,x0,y0,y1) or crossing(0,x1,y0,y1))
 
