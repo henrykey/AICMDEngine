@@ -1279,6 +1279,7 @@ def test_incomplete_table_recovers_content_then_cell_images(monkeypatch):
     assert LayoutLedgerVLMClient.calls == 2
     assert result["decision"]["provider_requests"] == {
         "glm_ocr": 2, "vlm_ocr": 2, "limits": {"glm_ocr": 2, "vlm_ocr": 2},
+        "limit_scope": "per_object_operation",
     }
     assert LayoutLedgerVLMClient.last_blocks[0]["recovery_target"] == "cell_images"
     assert result["layout_recovery"]["objects"][0]["outcome"] == "recovered"
@@ -1316,7 +1317,9 @@ def test_configured_provider_budget_preserves_recovered_content(monkeypatch, req
     )
     budget = result["decision"]["provider_requests"]
     assert budget["limits"] == {"glm_ocr": request_limit, "vlm_ocr": request_limit}
-    assert budget["glm_ocr"] <= request_limit
+    assert budget["limit_scope"] == "per_object_operation"
+    # Page layout and targeted table content have independent finite caps.
+    assert budget["glm_ocr"] <= 2 * request_limit
     assert budget["vlm_ocr"] <= request_limit
     assert len(result["elements"]["tables"]) == 1
     assert result["elements"]["tables"][0]["markdown"] == html

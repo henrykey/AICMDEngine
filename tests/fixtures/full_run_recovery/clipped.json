@@ -1,0 +1,183 @@
+{
+  "task_id": "task_f57c326d3b017f7d",
+  "table": {
+    "markdown": "<table border=\"1\">\n<tr><td colspan=\"3\">设计条件</td><td colspan=\"5\">垫片及螺柱计算</td></tr>\n<tr><td colspan=\"3\">计算压力 $p_{\\mathrm{c}}=$ MPa</td><td rowspan=\"2\">垫片</td><td>材料</td><td></td><td>$N=$ mm</td><td>$y=$ MPa</td></tr>\n<tr><td colspan=\"3\">设计温度 $t=$ ℃</td><td colspan=\"2\">外径×内径×厚度</td><td>$b=$ mm</td><td>$m=$ MPa</td></tr>\n<tr><td colspan=\"3\">公称直径 DN= mm</td><td></td><td></td><td></td><td></td><td></td></tr>\n<tr><td rowspan=\"3\">法兰</td><td>材料</td><td></td><td colspan=\"3\">假设法兰有效厚度 $\\delta_{\\mathrm{f}}=$ mm</td><td colspan=\"2\">球冠形封头有效厚度 $\\delta_{\\mathrm{e}}=$ mm</td></tr>\n<tr><td rowspan=\"2\">许用应力</td><td>$[\\sigma]_{t}^{\\mathrm{s}}=$ MPa</td><td colspan=\"3\">$F=0.785D_{\\mathrm{G}}^{2}p_{\\mathrm{c}}=$ N</td><td colspan=\"2\">$F_{\\mathrm{p}}=6.28D_{\\mathrm{G}}bmp_{\\mathrm{c}}=$ N</td></tr>\n<tr><td>$[\\sigma]_{t}^{\\mathrm{r}}=$ MPa</td><td colspan=\"3\">$W_{\\mathrm{a}}=F_{\\mathrm{a}}=3.14D_{\\mathrm{G}}yb=$ N</td><td colspan=\"2\">$W_{\\mathrm{p}}=F+F_{\\mathrm{p}}=$ N</td></tr>\n<tr><td rowspan=\"3\">螺柱</td><td>材料</td><td></td><td colspan=\"3\">螺柱公称直径 $d_{\\mathrm{b}}=$ mm</td><td colspan=\"2\">螺柱数量 $n=$ 个</td></tr>\n<tr><td rowspan=\"2\">许用应力</td><td>$[\\sigma]_{\\mathrm{b}}=$ MPa</td><td colspan=\"3\">$A_{\\mathrm{p}}=W_{\\mathrm{p}}/[\\sigma]_{\\mathrm{b}}^{\\mathrm{r}}=$ mm²</td><td colspan=\"2\">$A_{\\mathrm{a}}=\\dfrac{W_{\\mathrm{a}}}{[\\sigma]_{\\mathrm{b}}}=$ mm²</td></tr>\n<tr><td>$[\\sigma]_{\\mathrm{b}}^{\\mathrm{r}}=$ MPa</td><td colspan=\"3\">$A_{\\mathrm{m}}=\\max\\{A_{\\mathrm{p}},A_{\\mathrm{a}}\\}$ mm²</td><td colspan=\"2\">$A_{\\mathrm{b}}=$ mm²</td></tr>\n<tr><td colspan=\"3\">$\\beta_{1}=\\arcsin\\dfrac{0.5D_{\\mathrm{fi}}}{R_{\\mathrm{i}}+0.5\\delta_{\\mathrm{e}}}$ (°)</td><td colspan=\"3\">$W=0.5(A_{\\mathrm{m}}+A_{\\mathrm{b}})\\cdot[\\sigma]_{\\mathrm{b}}=$ N</td><td colspan=\"2\">假设 $l=$ mm<br/>($l$ 见表 8-5 所列示意图)</td></tr>\n<tr><td colspan=\"3\">操作情况下法兰的受力</td><td colspan=\"2\">力 臂</td><td colspan=\"2\">力 矩</td></tr>\n<tr><td colspan=\"3\">$F_{\\mathrm{D}}=0.785D_{\\mathrm{fi}}^{2}p_{\\mathrm{c}}=$ N</td><td colspan=\"2\">$L_{\\mathrm{D}}=\\dfrac{1}{2}(D_{\\mathrm{b}}-D_{\\mathrm{fi}})=$ mm</td><td colspan=\"2\">$M_{\\mathrm{D}}=F_{\\mathrm{D}}L_{\\mathrm{D}}=$ N·mm</td></tr>\n<tr><td colspan=\"3\">$F_{\\mathrm{G}}=F_{\\mathrm{p}}=$ N</td><td colspan=\"2\">$L_{\\mathrm{G}}=\\dfrac{1}{2}(D_{\\mathrm{b}}-D_{\\mathrm{G}})=$ mm</td><td colspan=\"2\">$M_{\\mathrm{G}}=F_{\\mathrm{G}}L_{\\mathrm{G}}=$ N·mm</td></tr>\n<tr><td colspan=\"3\">$F_{\\mathrm{T}}=F-F_{\\mathrm{D}}=$ N</td><td colspan=\"2\">$L_{\\mathrm{T}}=\\dfrac{1}{2}(L_{\\mathrm{D}}+L_{\\mathrm{G}})=$ mm</td><td colspan=\"2\">$M_{\\mathrm{T}}=F_{\\mathrm{T}}L_{\\mathrm{T}}=$ N·mm</td></tr>\n<tr><td colspan=\"3\">$F_{\\mathrm{r}}=F_{\\mathrm{D}}\\cdot\\cot\\beta_{1}$</td><td colspan=\"2\">$L_{\\mathrm{r}}=\\dfrac{\\delta_{\\mathrm{f}}}{2}-\\dfrac{\\delta_{\\mathrm{e}}}{2\\cos\\beta_{1}}-l$ mm</td><td colspan=\"2\">$M_{\\mathrm{r}}=F_{\\mathrm{r}}L_{\\mathrm{r}}=$ N·mm</td></tr>\n<tr><td colspan=\"5\">操作情况下法兰总力矩 $M_{\\mathrm{p}}=M_{\\mathrm{D}}+M_{\\mathrm{G}}+M_{\\mathrm{T}}-M_{\\mathrm{r}}$</td><td colspan=\"2\">N·mm</td></tr>\n<tr><td colspan=\"3\">预紧螺柱时法兰的受力</td><td colspan=\"2\">力 臂</td><td colspan=\"2\">力 矩</td></tr>\n<tr><td colspan=\"3\">$F_{\\mathrm{G}}=W=$ N</td><td colspan=\"2\">$L_{\\mathrm{G}}=\\dfrac{1}{2}(D_{\\mathrm{b}}-D_{\\mathrm{G}})=$ mm</td><td colspan=\"2\">$M_{\\mathrm{s}}=F_{\\mathrm{G}}L_{\\mathrm{G}}=$ N·mm</td></tr>\n<tr><td colspan=\"3\" rowspan=\"3\">[image]</td><td colspan=\"5\">$L=\\dfrac{p_{\\mathrm{c}}D_{\\mathrm{fi}}\\sqrt{4R_{\\mathrm{i}}^{2}-D_{\\mathrm{fi}}^{2}}}{8[\\sigma]_{t}^{\\mathrm{r}}(D_{\\mathrm{lo}}-D_{\\mathrm{fi}})}$ mm</td></tr>\n<tr><td colspan=\"5\">操作状态 $J_{\\mathrm{p}}=\\dfrac{M_{\\mathrm{p}}}{[\\sigma]_{t}^{\\mathrm{r}}D_{\\mathrm{fi}}}\\left[\\dfrac{D_{\\mathrm{lo}}+D_{\\mathrm{fi}}}{D_{\\mathrm{lo}}-D_{\\mathrm{fi}}}\\right]=$ mm²<br/>预紧状态 $J_{\\mathrm{s}}=\\dfrac{M_{\\mathrm{s}}}{[\\sigma]_{t}^{\\mathrm{r}}D_{\\mathrm{fi}}}\\left[\\dfrac{D_{\\mathrm{lo}}+D_{\\mathrm{fi}}}{D_{\\mathrm{lo}}-D_{\\mathrm{fi}}}\\right]=$ mm²</td></tr>\n<tr><td>法兰厚度</td><td colspan=\"4\">操作状态 $\\delta_{\\mathrm{lp}}=L+\\sqrt{J_{\\mathrm{p}}+L^{2}}=$ mm<br/>预紧状态 $\\delta_{\\mathrm{ls}}=\\sqrt{J_{\\mathrm{s}}}=$ mm<br/>法兰有效厚度 $\\delta_{\\mathrm{f}}$ 取 $\\delta_{\\mathrm{lp}}$ 与 $\\delta_{\\mathrm{ls}}$ 之较大者，且不小于球冠形封头有效厚度 $\\delta_{\\mathrm{e}}$ 的 2 倍</td></tr>\n</table>",
+    "bbox": [
+      0.104839,
+      0.230331,
+      0.882258,
+      0.906214
+    ],
+    "bbox_space": "normalized_page",
+    "layout_id": "p7-o004-table"
+  },
+  "recovery": {
+    "contract": "object-crop-content-v1",
+    "limit": 8,
+    "pending": 2,
+    "attempted": 2,
+    "objects": [
+      {
+        "layout_id": "p7-o004-table",
+        "type": "table",
+        "crop": {
+          "pixel_bbox": [
+            221,
+            760,
+            2227,
+            3227
+          ],
+          "width": 1003,
+          "height": 1233,
+          "padding_ratio": 0.02
+        },
+        "attempts": [
+          {
+            "attempt": 1,
+            "attempt_sequence": 1,
+            "mode": "initial",
+            "provider": "glm_ocr",
+            "endpoint_kind": "layout_parsing",
+            "outcome": "not_recovered",
+            "image_width": 1003,
+            "image_height": 1233,
+            "response_chars": 2850,
+            "requested_max_tokens": null,
+            "effective_max_tokens": null,
+            "json_error_position": null,
+            "finish_reason": null,
+            "json_status": "html",
+            "call_mode": "non_stream",
+            "truncated": false,
+            "candidate_chars": 2850,
+            "table_open_count": 1,
+            "table_close_count": 0,
+            "tr_open_count": 20,
+            "tr_close_count": 19,
+            "td_open_count": 68,
+            "td_close_count": 67,
+            "th_open_count": 0,
+            "th_close_count": 0,
+            "reason": "table_html_unclosed"
+          },
+          {
+            "attempt": 1,
+            "attempt_sequence": 2,
+            "mode": "initial",
+            "provider": "vlm_ocr",
+            "endpoint_kind": "image_chat_completions",
+            "outcome": "recovered",
+            "image_width": 1003,
+            "image_height": 1233,
+            "response_chars": 4200,
+            "requested_max_tokens": 16384,
+            "effective_max_tokens": 16384,
+            "json_error_position": null,
+            "finish_reason": "stop",
+            "json_status": "html",
+            "call_mode": "stream",
+            "truncated": false,
+            "candidate_chars": 4200,
+            "table_open_count": 1,
+            "table_close_count": 1,
+            "tr_open_count": 22,
+            "tr_close_count": 22,
+            "td_open_count": 73,
+            "td_close_count": 73,
+            "th_open_count": 0,
+            "th_close_count": 0,
+            "reason": "validated_table_content"
+          },
+          {
+            "attempt": 2,
+            "attempt_sequence": 3,
+            "mode": "initial",
+            "provider": "vlm_ocr",
+            "endpoint_kind": "image_chat_completions",
+            "outcome": "not_recovered",
+            "image_width": 1003,
+            "image_height": 1233,
+            "response_chars": 409,
+            "requested_max_tokens": 16384,
+            "effective_max_tokens": 16384,
+            "json_error_position": null,
+            "finish_reason": "stop",
+            "json_status": "object",
+            "call_mode": "stream",
+            "truncated": false,
+            "cell_geometry": [
+              {
+                "bbox": [
+                  0.019442,
+                  0.655,
+                  0.465,
+                  0.980543
+                ],
+                "bbox_space": "normalized_crop",
+                "has_image_id": false,
+                "row": 19,
+                "col": 0,
+                "rowspan": 3,
+                "colspan": 3,
+                "regions": [
+                  {
+                    "bbox": [
+                      0.078,
+                      0.662,
+                      0.448,
+                      0.97
+                    ],
+                    "bbox_space": "normalized_crop",
+                    "has_image_id": true
+                  }
+                ]
+              }
+            ],
+            "reason": "cell_image_boundary_intersects_content"
+          }
+        ],
+        "outcome": "content_recovered_image_pending",
+        "provider": "vlm_ocr",
+        "review_required": true
+      },
+      {
+        "layout_id": "p7-o004-table",
+        "type": "table",
+        "crop": {
+          "pixel_bbox": [
+            260,
+            808,
+            2188,
+            3179
+          ],
+          "width": 964,
+          "height": 1185,
+          "padding_ratio": 0.0
+        },
+        "attempts": [
+          {
+            "attempt": 1,
+            "attempt_sequence": 1,
+            "mode": "initial",
+            "provider": "vlm_ocr",
+            "endpoint_kind": "image_chat_completions",
+            "outcome": "failed",
+            "image_width": 964,
+            "image_height": 1185,
+            "response_chars": null,
+            "requested_max_tokens": null,
+            "effective_max_tokens": null,
+            "json_error_position": null,
+            "finish_reason": null,
+            "json_status": null,
+            "call_mode": null,
+            "truncated": false,
+            "reason": "PhysicalRequestBudgetExceeded"
+          }
+        ],
+        "outcome": "failed",
+        "review_required": true
+      }
+    ]
+  }
+}

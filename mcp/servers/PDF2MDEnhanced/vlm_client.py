@@ -168,6 +168,8 @@ class DynamicVLMClient:
         self.last_call_info: Dict[str, Any] = {}
         self.last_object_call_info: Dict[str, Any] = {}
         self.physical_requests = 0
+        self.recovery_requests = {}
+        self.recovery_budget_key = None
         self.physical_request_limit = None
         processing = cfg.get('_calculation_processing')
         self.automatic_calculation_budget = ((not processing or processing == 'transcription')
@@ -215,8 +217,12 @@ class DynamicVLMClient:
         if not self._calculation_guard_active:
             provider_send()
             return
-        if self.physical_requests >= self.physical_request_limit:
+        key = self.recovery_budget_key
+        used = self.recovery_requests.get(key, 0) if key is not None else self.physical_requests
+        if used >= self.physical_request_limit:
             raise PhysicalRequestBudgetExceeded()
+        if key is not None:
+            self.recovery_requests[key] = used + 1
         self.physical_requests += 1
         provider_send()
 
@@ -979,7 +985,9 @@ class DynamicVLMClient:
                 "contains_images=false, source_cells=[], "
                 "image_unresolved=[] when no images occur in any cell. If images occur, return "
                 "contains_images=true, status=EXTRACTED, complete=true only when ALL cell images have been "
-                "located. Include each complete drawing, its outermost lines, dimensions and labels, with a "
+                "located. Watermarks, stamps, background logos, table rules, numeric text and standalone "
+                "equations are NOT cell illustrations. Never return their boxes as images. "
+                "Include each complete drawing, its outermost lines, dimensions and labels, with a "
                 "small blank margin; never crop through a drawing or its annotations. Otherwise complete=false. "
                 "Return source_cells for image-bearing cells: original zero-based row/col, rowspan/colspan, "
                 "bbox and bbox_space=normalized_crop, image_regions=[{image_id: stable local id, bbox, "
@@ -1000,6 +1008,14 @@ class DynamicVLMClient:
                               "source_cell_origins": block.get("source_cell_origins", []),
                               "table_bbox_in_crop": block.get("table_bbox_in_crop"),
                               "source_cells": block.get("source_cells", [])}, ensure_ascii=False)
+            )
+        if block.get("recovery_target") == "visual_type":
+            prompt += (
+                " Verify the visual type of this text-free layout candidate. The supplied figure type is "
+                "provisional. If this crop is a standalone mathematical equation rather than a drawing, "
+                "return type=formula with exact latex, optional formula_no and a source-grounded description. "
+                "Do not describe equation glyphs as a diagram. Otherwise retain type=figure and describe "
+                "only visible content, without inventing physical meanings for undefined symbols."
             )
         if compact:
             prompt += (" Correct only the unresolved image geometry. Keep verified table content and image identities. "

@@ -80,6 +80,12 @@ def source_image(tmp_path):
     pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 200, 100), False)
     pix.clear_with(255)
     pix.save(str(path))
+    from PIL import Image, ImageDraw
+    with Image.open(path) as image:
+        draw = ImageDraw.Draw(image)
+        for x, y in [(76, 37), (76, 63), (124, 63), (100, 50), (55, 27)]:
+            draw.rectangle((x, y, x + 1, y + 1), fill="black")
+        image.save(path)
     return path
 
 

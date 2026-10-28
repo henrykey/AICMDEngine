@@ -81,11 +81,30 @@ def boundary_intersects_content(image, bbox, *, allow_thin_rules=True):
     return any(_boundary_crossings(image, bbox, allow_thin_rules))
 
 
+def image_has_foreground(image, bbox, table_bbox):
+    """Ignore only full-table horizontal rules when checking a candidate crop.
+
+    Pale background or a rule alone is insufficient evidence of an illustration;
+    callers must retry localization, not discard the source table.
+    """
+    scales = image.size * 2
+    box = [round(v * scale) for v, scale in zip(bbox, scales)]
+    table = [round(v * scale) for v, scale in zip(table_bbox, scales)]
+    ink = image.convert('L').point(lambda p: 255 if p < 200 else 0)
+    for y in range(box[1], box[3]):
+        if ink.crop((box[0], y, box[2], y + 1)).getbbox() is None:
+            continue
+        if ink.crop((table[0], y, table[2], y + 1)).histogram()[255] < .95 * (table[2] - table[0]):
+            return True
+    return False
+
+
 def expand_clipped_image_bbox(image, bbox, table_bbox):
     """Move cut edges to nearby blank bands, bounded by the source table.
 
-    Never shrink, cross the table, or search more than a quarter of the original
-    image extent per edge. Uncertain/large corrections remain in bounded recovery.
+    Trim only an adjacent full-table separator; otherwise only expand. Never
+    cross the table or search beyond a quarter of the original extent per edge.
+    Uncertain/large corrections remain in bounded recovery.
     """
     if not _valid(bbox) or not _valid(table_bbox):
         return None
@@ -95,6 +114,26 @@ def expand_clipped_image_bbox(image, bbox, table_bbox):
     box = list(original)
     ink = image.convert('L').point(lambda p: 255 if p < 200 else 0)
     margin = max(4, round(min(image.size) / 400))
+    # A crop may include the adjacent full-width table separator. It cannot
+    # reach a blank vertical edge until that separator alone is trimmed away.
+    # Only recognize rules spanning the entire table, never short dimensions.
+    for edge in (1, 3):
+        direction = 1 if edge == 1 else -1
+        rows = range(box[edge], box[edge] + direction * margin * 3, direction)
+        rule_rows = []
+        for y in rows:
+            if not limits[1] <= y < limits[3]:
+                break
+            whole = ink.crop((limits[0], y, limits[2], y + 1))
+            if whole.histogram()[255] >= .95 * (limits[2] - limits[0]):
+                rule_rows.append(y)
+            elif ink.crop((box[0], y, box[2], y + 1)).histogram()[255] > 3:
+                break
+        if rule_rows:
+            cut = (max(rule_rows) + margin + 1 if edge == 1 else min(rule_rows) - margin)
+            strip = (box[0], max(rule_rows) + 1, box[2], cut) if edge == 1 else (box[0], cut, box[2], min(rule_rows))
+            if ink.crop(strip).getbbox() is None:
+                box[edge] = cut
     # Recheck after expansion: widening one side may expose a cut on another.
     for _ in range(4):
         crossings = _boundary_crossings(image, [v/s for v,s in zip(box, scales)], False)

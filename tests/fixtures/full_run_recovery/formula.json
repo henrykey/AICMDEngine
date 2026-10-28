@@ -1,0 +1,27 @@
+{
+  "task_id": "task_9228ec08f1fb09a3",
+  "layout": [
+    {
+      "layout_id": "p11-o014-figure",
+      "source_block_index": 13,
+      "type": "figure",
+      "layout_type": "image",
+      "reading_order": 14,
+      "bbox": [
+        0.214919,
+        0.835804,
+        0.356452,
+        0.859749
+      ],
+      "bbox_space": "normalized_page",
+      "status": "EXTRACTED",
+      "review_required": false,
+      "content": "",
+      "payload_ref": {
+        "collection": "figures",
+        "index": 1
+      },
+      "error": null
+    }
+  ]
+}

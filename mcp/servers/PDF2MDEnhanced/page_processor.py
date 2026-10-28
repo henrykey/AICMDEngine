@@ -162,12 +162,14 @@ def process_page(
         glm_ocr_config = dict(rc.get("glm_ocr") or {})
         glm_ocr_config.update(description_language=description_language, max_retries=1)
         glm_ocr = OpenAICompatibleOcrClient(glm_ocr_config, source="glm_ocr")
-        glm_request_budget = {"physical_requests": 0, "limit": provider_request_limit}
+        glm_request_budget = {}
 
         def count_glm_physical_request(_request=None):
-            if glm_request_budget["physical_requests"] >= glm_request_budget["limit"]:
+            key = getattr(glm_ocr, "recovery_budget_key", None)
+            used = glm_request_budget.get(key, 0)
+            if used >= provider_request_limit:
                 raise PhysicalRequestBudgetExceeded()
-            glm_request_budget["physical_requests"] += 1
+            glm_request_budget[key] = used + 1
             provider_send()
 
         glm_ocr.request_guard = count_glm_physical_request
@@ -229,6 +231,24 @@ def process_page(
                         glm_calls += recovery_glm_calls
                         vlm_calls += recovery_vlm_calls
                         layout_outcome["recovery"] = recovery
+                    # Narrow, text-free visual blocks can be equation lines. Aspect ratio
+                    # only selects a crop for verification; it never determines its type.
+                    suspect_visuals = []
+                    for figure in layout_outcome["payloads"]["figures"]:
+                        box = figure.get("bbox", [])
+                        if len(box) == 4 and figure.get("content_status") == "geometry_only" \
+                                and (box[2] - box[0]) * fallback_width >= 3 * (box[3] - box[1]) * fallback_height:
+                            suspect_visuals.append({**figure, "type": "figure", "recovery_target": "visual_type"})
+                    if suspect_visuals:
+                        extra_glm, extra_vlm, visual_recovery = _recover_layout_objects(
+                            image_path, Path(work_dir), layout_outcome, suspect_visuals, vlm,
+                            bool(rc.get("vlm_ocr_enabled") and vlm.enabled),
+                            rc["layout_recovery_max_objects"], rc["layout_recovery_crop_padding_ratio"],
+                            source_dpi=rc["render_dpi"], max_model_calls=2 * min(
+                                len(suspect_visuals), rc["layout_recovery_max_objects"]))
+                        glm_calls += extra_glm
+                        vlm_calls += extra_vlm
+                        layout_outcome["visual_type_recovery"] = visual_recovery
                     layout_driven = layout_outcome["layout_status"] == "EXTRACTED" or bool(layout_outcome.get("markdown"))
                     if not layout_driven:
                         raise ValueError("layout_conversion_incomplete")
@@ -499,9 +519,10 @@ def process_page(
             "vlm_calls": vlm_calls,
             "physical_requests": getattr(vlm, "physical_requests", 0),
             "provider_requests": {
-                "glm_ocr": glm_request_budget["physical_requests"],
+                "glm_ocr": sum(glm_request_budget.values()),
                 "vlm_ocr": getattr(vlm, "physical_requests", 0),
-                "limits": {"glm_ocr": glm_request_budget["limit"], "vlm_ocr": provider_request_limit},
+                "limits": {"glm_ocr": provider_request_limit, "vlm_ocr": provider_request_limit},
+                "limit_scope": "per_object_operation",
             },
             "formula_semantic_calls": formula_semantic_calls,
             "formula_number_ocr": formula_number_ocr,
@@ -543,6 +564,7 @@ def process_page(
                 "reconciliation": reconciliation,
                 "missing_table_recovery": layout_outcome.get("missing_table_recovery"),
                 "cell_image_recovery": layout_outcome.get("cell_image_recovery"),
+                "visual_type_recovery": layout_outcome.get("visual_type_recovery"),
                 "layout_recovery": layout_outcome.get("recovery") or {
                     "contract": "object-crop-content-v1",
                     "pending": 0,
@@ -1038,6 +1060,10 @@ def _recover_layout_objects(
             "outcome": "failed",
         }
         diagnostics["objects"].append(item_diagnostics)
+        if block.get("recovery_target") == "visual_type":
+            for figure in layout_outcome["payloads"]["figures"]:
+                if figure.get("layout_id") == layout_id:
+                    figure["warnings"] = list(dict.fromkeys([*figure.get("warnings", []), "visual_type_unverified"]))
         image_geometry = block.get("recovery_target") == "cell_images"
         table_content_with_cell_images = (
             object_type == "table" and block.get("recovery_target") == "table_content_with_cell_images"
@@ -1112,6 +1138,7 @@ def _recover_layout_objects(
             }
             item_diagnostics["attempts"].append(attempt)
             client.last_object_call_info = {}
+            client.recovery_budget_key = (layout_id, "cell_images" if recover_images else "content")
             try:
                 if recover_images:
                     from .single_page_tools import _normalize_table_contract
@@ -1146,7 +1173,7 @@ def _recover_layout_objects(
                 else:
                     candidate = vlm.extract_object_structured(str(crop_path), request_block, compact=compact)
                 attempt.update(_safe_object_call_info(client))
-                if isinstance(candidate, dict) and object_type == "figure":
+                if isinstance(candidate, dict) and object_type == "figure" and candidate.get("type") == "figure":
                     candidate = _normalize_recovered_figure(candidate)
                 if recover_images:
                     cells = candidate.get("source_cells") if isinstance(candidate, dict) else None
@@ -1169,7 +1196,10 @@ def _recover_layout_objects(
                     reason, recovered_table = _validate_cell_image_recovery(request_block, candidate, crop_info, image_path)
                     shape = {}
                 else:
-                    reason, shape = validate_recovered_object(block, candidate)
+                    validated_block = block
+                    if block.get("recovery_target") == "visual_type" and isinstance(candidate, dict) and candidate.get("type") == "formula":
+                        validated_block = {**block, "type": "formula"}
+                    reason, shape = validate_recovered_object(validated_block, candidate)
                     if not reason and table_content_with_cell_images:
                         candidate = {**candidate, "contains_images": None,
                                      "image_unresolved": [{"reason": "image_detection_incomplete",
@@ -1189,10 +1219,23 @@ def _recover_layout_objects(
                     item_diagnostics.update(outcome="recovered", provider=provider)
                     break
                 if not reason:
-                    payload = _object_success_payload(block, candidate)
+                    recovered_type = validated_block["type"]
+                    payload = _object_success_payload(validated_block, candidate)
+                    if block.get("recovery_target") == "visual_type":
+                        for entry in layout_outcome["layout"]:
+                            if entry["layout_id"] == layout_id:
+                                entry["status"] = "FAILED"
+                    if recovered_type != object_type:
+                        # Preserve identity/geometry and change only the verified object type.
+                        for entry in layout_outcome["layout"]:
+                            if entry["layout_id"] == layout_id:
+                                entry["type"] = recovered_type
+                                entry["original_type"] = object_type
+                        layout_outcome["payloads"]["figures"] = [
+                            item for item in layout_outcome["payloads"]["figures"] if item.get("layout_id") != layout_id]
                     if provider == "glm_ocr":
                         payload["source"] = "glm_ocr_layout+glm_object_crop"
-                    apply_recovered_payloads(layout_outcome, _single_recovery_result(object_type, payload))
+                    apply_recovered_payloads(layout_outcome, _single_recovery_result(recovered_type, payload))
                     if _layout_entry_recovered(layout_outcome, layout_id):
                         attempt.update({"outcome": "recovered", "reason": "validated_object"})
                         if table_content_with_cell_images:
@@ -1222,6 +1265,8 @@ def _recover_layout_objects(
                     skip_glm = True
                     continue
                 break
+            finally:
+                client.recovery_budget_key = None
 
         if item_diagnostics["outcome"] != "recovered":
             item_diagnostics["review_required"] = True
@@ -1236,6 +1281,7 @@ def _recover_layout_objects(
 
 
 _CELL_IMAGE_GEOMETRY_REASONS = {
+    "cell_image_nonvisual_content",
     "cell_image_boundary_intersects_content",
     "missing_cell_image_geometry", "image_detection_incomplete", "invalid_cell_image_geometry",
     "invalid_cell_image_regions", "invalid_cell_image_identity", "cell_image_geometry_conflict",
@@ -1415,10 +1461,14 @@ def _validate_cell_image_recovery(block, candidate, crop_info, image_path):
     # Geometry ownership does not prove that the crop contains the whole drawing.
     # Reuse calculation-source cut validation before accepting or materializing it.
     from PIL import Image
-    from .calculation_blocks import boundary_intersects_content, expand_clipped_image_bbox
+    from .calculation_blocks import boundary_intersects_content, expand_clipped_image_bbox, image_has_foreground
     with Image.open(image_path) as page_image:
         for cell in result["source_cells"]:
             for region in cell.get("image_regions", []):
+                # Blank/pale background alone cannot establish an illustration. Keep
+                # the table and retry location rather than materializing a false figure.
+                if not image_has_foreground(page_image, region["bbox"], block["bbox"]):
+                    return "cell_image_nonvisual_content", None
                 if not boundary_intersects_content(page_image, region["bbox"], allow_thin_rules=False):
                     continue
                 expanded = expand_clipped_image_bbox(page_image, region["bbox"], block.get("bbox"))
@@ -1444,7 +1494,7 @@ def _object_content_retryable(reason: str) -> bool:
         "provider_output_truncated", "table_content_empty", "table_html_unclosed", "table_html_invalid",
         "table_cells_missing", "table_count_invalid", "table_markdown_invalid", "image_detection_incomplete", "formula_content_empty",
         "formula_unbalanced", "figure_content_empty", "missing_cell_image_geometry", "invalid_cell_image_geometry",
-        "cell_source_mismatch", "cell_image_boundary_intersects_content", "table_math_delimiter_unresolved",
+        "cell_source_mismatch", "cell_image_boundary_intersects_content", "cell_image_nonvisual_content", "table_math_delimiter_unresolved",
     }
 
 
