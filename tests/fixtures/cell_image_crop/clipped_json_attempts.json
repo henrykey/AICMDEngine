@@ -1,0 +1,72 @@
+{
+  "task_id": "task_72c340df37cb27a0",
+  "crop": {
+    "pixel_bbox": [
+      289,
+      747,
+      2215,
+      2559
+    ],
+    "width": 963,
+    "height": 906,
+    "padding_ratio": 0.0
+  },
+  "attempts": [
+    [
+      {
+        "bbox": [
+          0.0005185877466251386,
+          0.5082869424247742,
+          0.9994808722741433,
+          0.9999990618101544
+        ],
+        "bbox_space": "normalized_crop",
+        "has_image_id": false,
+        "row": 7,
+        "col": 0,
+        "rowspan": 1,
+        "colspan": 2,
+        "regions": [
+          {
+            "bbox": [
+              0.102,
+              0.538,
+              0.898,
+              0.972
+            ],
+            "bbox_space": "normalized_crop",
+            "has_image_id": true
+          }
+        ]
+      }
+    ],
+    [
+      {
+        "bbox": [
+          0.0005185877466251386,
+          0.54,
+          0.9994808722741433,
+          0.9999990618101544
+        ],
+        "bbox_space": "normalized_crop",
+        "has_image_id": false,
+        "row": 7,
+        "col": 0,
+        "rowspan": 1,
+        "colspan": 2,
+        "regions": [
+          {
+            "bbox": [
+              0.10500000000000001,
+              0.555,
+              0.895,
+              0.985
+            ],
+            "bbox_space": "normalized_crop",
+            "has_image_id": true
+          }
+        ]
+      }
+    ]
+  ]
+}

@@ -53,7 +53,7 @@ def calculation_block_boxes(regions, bbox):
     return partition(boxes, list(bbox))
 
 
-def boundary_intersects_content(image, bbox, *, allow_thin_rules=True):
+def _boundary_crossings(image, bbox, allow_thin_rules):
     """Detect crossing ink; only calculation partitions may ignore thin rules.
 
     A figure dimension extension is content even when only one stroke crosses
@@ -74,8 +74,52 @@ def boundary_intersects_content(image, bbox, *, allow_thin_rules=True):
         second = gray.crop(b).point(lambda p: 255 if p < 200 else 0)
         dark = ImageChops.multiply(first, second).histogram()[255]
         return dark > (max(2, (end-start)*.01) if allow_thin_rules else 0)
-    return (crossing(1,y0,x0,x1) or crossing(1,y1,x0,x1)
-            or crossing(0,x0,y0,y1) or crossing(0,x1,y0,y1))
+    return (crossing(0,x0,y0,y1), crossing(1,y0,x0,x1),
+            crossing(0,x1,y0,y1), crossing(1,y1,x0,x1))
+
+def boundary_intersects_content(image, bbox, *, allow_thin_rules=True):
+    return any(_boundary_crossings(image, bbox, allow_thin_rules))
+
+
+def expand_clipped_image_bbox(image, bbox, table_bbox):
+    """Move cut edges to nearby blank bands, bounded by the source table.
+
+    Never shrink, cross the table, or search more than a quarter of the original
+    image extent per edge. Uncertain/large corrections remain in bounded recovery.
+    """
+    if not _valid(bbox) or not _valid(table_bbox):
+        return None
+    scales = (image.width, image.height) * 2
+    original = [round(v*s) for v,s in zip(bbox, scales)]
+    limits = [round(v*s) for v,s in zip(table_bbox, scales)]
+    box = list(original)
+    ink = image.convert('L').point(lambda p: 255 if p < 200 else 0)
+    margin = max(4, round(min(image.size) / 400))
+    # Recheck after expansion: widening one side may expose a cut on another.
+    for _ in range(4):
+        crossings = _boundary_crossings(image, [v/s for v,s in zip(box, scales)], False)
+        if not any(crossings):
+            return [v/s for v,s in zip(box, scales)]
+        for edge, crossing in enumerate(crossings):
+            if not crossing:
+                continue
+            axis = edge % 2
+            direction = -1 if edge < 2 else 1
+            budget = (original[axis+2] - original[axis]) // 4
+            start = box[edge]
+            stop = max(limits[edge], original[edge]-budget) if direction < 0 else min(limits[edge], original[edge]+budget)
+            for cut in range(start+direction, stop, direction):
+                strip = ([cut-margin, box[1], cut+margin+1, box[3]] if axis == 0
+                         else [box[0], cut-margin, box[2], cut+margin+1])
+                if strip[axis] < limits[axis] or strip[axis+2] > limits[axis+2]:
+                    continue
+                if ink.crop(strip).getbbox() is None:
+                    box[edge] = cut
+                    break
+            else:
+                return None
+    return None
+
 
 
 def _formula_sections(layout, bbox):

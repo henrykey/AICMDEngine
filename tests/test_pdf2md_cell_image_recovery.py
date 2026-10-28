@@ -586,8 +586,7 @@ def test_full_page_math_recovery_preserves_single_identity(source_image, tmp_pat
     assert not result['reconciliation']['duplicate_layout_ids']
 
 
-@pytest.mark.parametrize('correct_on_retry', [False, True])
-def test_real_dimension_crop_uses_bounded_recovery(tmp_path, correct_on_retry):
+def test_real_dimension_crop_is_repaired_without_another_model_call(tmp_path):
     """Replay the 2026-10-28 provider crop, including its too-small cell bbox."""
     import json
     from pathlib import Path
@@ -609,9 +608,6 @@ def test_real_dimension_crop_uses_bounded_recovery(tmp_path, correct_on_retry):
             _, crop = pp._crop_layout_block_image(source, target, tmp_path, padding_ratio=0)
             left, top, right, bottom = crop['pixel_bbox']
             for cell in result['source_cells']:
-                if correct_on_retry and len(self.calls) == 2:
-                    cell['bbox'][1] = 1650 / page.height
-                    cell['image_regions'][0]['bbox'][1] = 1650 / page.height
                 for item in [cell, *cell['image_regions']]:
                     x0,y0,x1,y1 = item['bbox']
                     item['bbox'] = [(x0*page.width-left)/(right-left),
@@ -623,16 +619,11 @@ def test_real_dimension_crop_uses_bounded_recovery(tmp_path, correct_on_retry):
 
     client = Replay()
     table, _, _ = run_recovery(source, tmp_path, target, client)
-    assert len(client.calls) == 2
-    assert client.targets[1]['recovery_error'] == 'cell_image_boundary_intersects_content'
+    assert len(client.calls) == 1
     assert table['markdown'] == original
-    if correct_on_retry:
-        assert table['cell_image_inspection_status'] == 'complete'
-        assert not table['image_unresolved']
-    else:
-        assert table.get('cell_image_inspection_status') != 'complete'
-        assert table['image_unresolved'][-1]['reason'] == 'cell_image_boundary_intersects_content'
-        assert table['manualReviewRequired'] is True
+    assert table['cell_image_inspection_status'] == 'complete'
+    assert not table['image_unresolved']
+    assert table['source_cells'][0]['image_regions'][0]['bbox'][1] * 3508 <= 1660
 
 
 @pytest.mark.parametrize('edge', ['top', 'bottom', 'left', 'right'])
@@ -683,3 +674,62 @@ def test_real_json_failure_keeps_table_and_serializes_attempt_diagnostics(tmp_pa
     assert len(attempts) == 2
     assert all(a['reason'] == 'response_json_invalid' and a['json_error_position'] == 3 for a in attempts)
     assert 'DO_NOT_PERSIST' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('attempt', [0, 1])
+def test_real_clipped_json_is_repaired_from_source_pixels(tmp_path, attempt):
+    import json
+    from pathlib import Path
+    root = Path(__file__).parent / 'fixtures' / 'cell_image_crop'
+    table = json.loads((root / 'dimension_page.json').read_text())['table']
+    table.pop('source_cells')
+    recorded = json.loads((root / 'clipped_json_attempts.json').read_text())
+    response = geometry(table)
+    response['source_cells'] = copy.deepcopy(recorded['attempts'][attempt])
+    for cell in response['source_cells']:
+        cell['image_regions'] = cell.pop('regions')
+        for region in cell['image_regions']:
+            region['image_id'] = 'recorded-drawing'
+    reason, recovered = pp._validate_cell_image_recovery(table, response, recorded['crop'], root / 'dimension_page.png')
+    assert reason == ''
+    assert recovered['markdown'] == table['markdown']
+    cell = recovered['source_cells'][0]
+    region = cell['image_regions'][0]
+    # Source top of the detached "10" dimension is above both rejected boxes.
+    assert region['bbox'][1] * 3508 <= 1660
+    assert cell['bbox'][1] <= region['bbox'][1]
+    assert region['image_id'] == 'recorded-drawing'
+    assert recovered['cell_image_inspection_status'] == 'complete'
+    payload = {'tables': [recovered], 'figures': []}
+    pp._attach_figure_assets(root / 'dimension_page.png', payload, 8)
+    figure = payload['figures'][0]
+    assert figure['bbox'] == region['bbox']
+    assert figure['image_asset']['status'] == 'available'
+    assert figure['image_asset']['height'] > 850
+
+
+
+@pytest.mark.parametrize('edge', [0, 1, 2, 3])
+@pytest.mark.parametrize('size', [400, 1200])
+def test_auto_crop_expansion_is_bounded_and_preserves_complete_crops(edge, size):
+    from PIL import Image, ImageDraw
+    boundary = importlib.import_module(sp.__package__ + '.calculation_blocks')
+    image = Image.new('L', (size, size), 255)
+    draw = ImageDraw.Draw(image)
+    # A thin extension of a drawing crosses each possible proposed edge.
+    axis, direction = edge % 2, -1 if edge < 2 else 1
+    cut = .3 if edge < 2 else .7
+    points = [(int(size*.5), int(size*(cut-.04))), (int(size*.5), int(size*(cut+.04)))]
+    if axis == 0:
+        points = [(y,x) for x,y in points]
+    draw.line(points, fill=0, width=max(1,size//400))
+    bbox = [.3,.3,.7,.7]
+    repaired = boundary.expand_clipped_image_bbox(image, bbox, [.1,.1,.9,.9])
+    assert repaired is not None
+    assert (repaired[edge] - bbox[edge]) * direction > .04
+    assert not boundary.boundary_intersects_content(image, repaired, allow_thin_rules=False)
+    assert boundary.expand_clipped_image_bbox(image, repaired, [.1,.1,.9,.9]) == repaired
+    # No room beyond the table / no nearby blank boundary must retain the error.
+    assert boundary.expand_clipped_image_bbox(image, bbox, bbox) is None
+    solid = Image.new('L', (size,size), 0)
+    assert boundary.expand_clipped_image_bbox(solid, bbox, [.1,.1,.9,.9]) is None

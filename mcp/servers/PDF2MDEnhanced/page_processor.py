@@ -1415,11 +1415,22 @@ def _validate_cell_image_recovery(block, candidate, crop_info, image_path):
     # Geometry ownership does not prove that the crop contains the whole drawing.
     # Reuse calculation-source cut validation before accepting or materializing it.
     from PIL import Image
-    from .calculation_blocks import boundary_intersects_content
+    from .calculation_blocks import boundary_intersects_content, expand_clipped_image_bbox
     with Image.open(image_path) as page_image:
-        if any(boundary_intersects_content(page_image, region["bbox"], allow_thin_rules=False)
-               for cell in result["source_cells"] for region in cell.get("image_regions", [])):
-            return "cell_image_boundary_intersects_content", None
+        for cell in result["source_cells"]:
+            for region in cell.get("image_regions", []):
+                if not boundary_intersects_content(page_image, region["bbox"], allow_thin_rules=False):
+                    continue
+                expanded = expand_clipped_image_bbox(page_image, region["bbox"], block.get("bbox"))
+                if expanded is None:
+                    return "cell_image_boundary_intersects_content", None
+                region["bbox"] = expanded
+                # The provider may have clipped the cell and image together. Keep
+                # its parsed identity/spans, enlarging geometry only to contain ink.
+                cell["bbox"] = [min(cell["bbox"][0], expanded[0]), min(cell["bbox"][1], expanded[1]),
+                                max(cell["bbox"][2], expanded[2]), max(cell["bbox"][3], expanded[3])]
+        if _table_image_problem({**result, "image_unresolved": []}):
+            return "invalid_cell_image_geometry", None
     result["cell_image_inspection_status"] = "complete"
     result["manualReviewRequired"] = bool(result.get("image_unresolved") or result.get("degraded") or result.get("warnings")
         or result.get("table_kind", "data_table") != "data_table"
