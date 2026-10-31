@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.2.6 - 2026-10-31
+
+### Changed
+
+- Added bounded table and cell-image recovery while preserving recognized source content, layout identities, and unresolved diagnostics.
+- Improved crop boundary checks and expansion for thin lines and dimensions; retained structured JSON and parse-failure diagnostics.
+- Separated provider and per-object recovery budgets, optional formula descriptions, and document-run retention.
+
+### Integration and verification
+
+- Pair with Membership `v2.4-R0.4.2`; classification, Stage 1 persistence, and indexing remain Membership responsibilities.
+- Targeted offline regression: 490 passed, 2 failed. The two failures concern expected cell-image missing fields and recovery invocation; their causes remain to be resolved.
+- Real ASME selected-page results and remaining full-document performance limitations are documented in [Release Notes — v1.2.6](RELEASE_NOTES_v1.2.6.md).
+
 ## v1.2.5 - 2026-10-10
 
 ### Added
