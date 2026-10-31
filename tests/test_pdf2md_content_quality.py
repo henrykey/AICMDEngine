@@ -338,7 +338,8 @@ def test_structure_recovery_uses_pdf_render_dpi_without_extra_calls(tmp_path, mo
     monkeypatch.setattr(sp, 'DynamicVLMClient', VLM)
     target = {'layout_id': 'table', 'type': 'table', 'bbox': [.1,.1,.5,.5],
               'bbox_space': 'normalized_page', 'page_no': 1,
-              'source_sha1': hashlib.sha1(path.read_bytes()).hexdigest()}
+              'source_sha1': hashlib.sha1(path.read_bytes()).hexdigest(),
+              'content_provider_plan': ['vlm_ocr'], 'image_provider_plan': []}
     result = json.loads(sp.extract_page_tables_direct(file_path=str(path), input_type='pdf',
         description_language='en', routing_config={'render_dpi': 300}, context={'structure_target': target}))
     assert sizes == [(60, 60)]

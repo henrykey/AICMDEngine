@@ -2688,3 +2688,70 @@ def test_calculation_wait_expiry_preserves_worker(monkeypatch):
             with pytest.raises(asyncio.CancelledError): await operation
             server._calculation_page_operations.pop(key, None)
     asyncio.run(run())
+
+
+def test_two_step_task_reuses_saved_layout_and_keeps_first_result_on_failure(monkeypatch):
+    from types import SimpleNamespace
+    page = SimpleNamespace(result=None)
+    task = SimpleNamespace(source_path='/tmp/demo.png', planned_pages=[1], description_language='en', pages={1: page})
+    class Manager:
+        def validate_source_identity(self, task_id, identity):
+            assert task_id == 'task' and identity is None
+        def get_task(self, task_id): return task
+        def update_page_running(self, task_id, page_no): pass
+        def begin_page_worker(self, task_id, page_no): pass
+        def finish_page_worker(self, task_id, page_no): pass
+        def update_page_result(self, task_id, page_no, result): page.result = result
+        def update_page_failed(self, task_id, page_no, error): raise AssertionError('first result must be kept')
+    def process(source_path, page_no, policy, vlm_config, routing_config, prev_context):
+        if routing_config['docs_recovery_phase'] == 'recognize':
+            return {'render': {'markdown': 'original'}, '_docs_raw_layout': {'layout_details': ['raw']}}
+        assert routing_config['__docs_saved_layout'] == {'layout_details': ['raw']}
+        raise ValueError('recovery failed')
+    monkeypatch.setattr(server, 'manager', Manager())
+    monkeypatch.setattr(server, 'process_page', process)
+    fn = getattr(server.process_task_page, 'fn', server.process_task_page)
+    first = json.loads(asyncio.run(fn(task_id='task', page_no=1, routing_config={'docs_recovery_phase': 'recognize'})))
+    assert first['page_result'] == {'render': {'markdown': 'original'}}
+    failed = json.loads(asyncio.run(fn(task_id='task', page_no=1, routing_config={'docs_recovery_phase': 'recover', 'docs_recovery_selection': {'tables': ['t1']}})))
+    assert 'error' in failed
+    assert page.result['render']['markdown'] == 'original'
+    assert page.result['_docs_raw_layout'] == {'layout_details': ['raw']}
+
+
+def test_two_step_task_aggregates_model_counts(monkeypatch):
+    from types import SimpleNamespace
+    page = SimpleNamespace(result=None)
+    task = SimpleNamespace(source_path='/tmp/demo.png', planned_pages=[1], description_language='en', pages={1: page})
+    class Manager:
+        def validate_source_identity(self, task_id, identity): pass
+        def get_task(self, task_id): return task
+        def update_page_running(self, task_id, page_no): pass
+        def begin_page_worker(self, task_id, page_no): pass
+        def finish_page_worker(self, task_id, page_no): pass
+        def update_page_result(self, task_id, page_no, result): page.result = result
+        def update_page_failed(self, task_id, page_no, error): raise AssertionError(error)
+    def process(source_path, page_no, policy, vlm_config, routing_config, prev_context):
+        first = routing_config['docs_recovery_phase'] == 'recognize'
+        result = {'decision': {'glm_calls': 1 if first else 0, 'vlm_calls': 0 if first else 1,
+                  'physical_requests': 0 if first else 1,
+                  'provider_requests': {'glm_ocr': 1 if first else 0, 'vlm_ocr': 0 if first else 1}}}
+        if first:
+            result['_docs_raw_layout'] = {'layout_details': []}
+        else:
+            prior = routing_config['__docs_saved_layout']
+            result['_docs_raw_layout'] = {'round': prior.get('round', 0) + 1}
+        return result
+    monkeypatch.setattr(server, 'manager', Manager())
+    monkeypatch.setattr(server, 'process_page', process)
+    fn = getattr(server.process_task_page, 'fn', server.process_task_page)
+    asyncio.run(fn(task_id='task', page_no=1, routing_config={'docs_recovery_phase': 'recognize'}))
+    second = json.loads(asyncio.run(fn(task_id='task', page_no=1, routing_config={'docs_recovery_phase': 'recover', 'docs_recovery_selection': {'figures': ['f']}})))
+    assert second['page_result']['decision']['provider_requests'] == {'glm_ocr': 1, 'vlm_ocr': 1}
+    assert second['page_result']['decision']['glm_calls'] == 1
+    assert second['page_result']['decision']['vlm_calls'] == 1
+    assert '_docs_raw_layout' not in second['page_result']
+    assert page.result['_docs_raw_layout'] == {'round': 1}
+    third = json.loads(asyncio.run(fn(task_id='task', page_no=1, routing_config={'docs_recovery_phase': 'recover', 'docs_recovery_selection': {'figures': ['g']}})))
+    assert third['page_result']['decision']['provider_requests'] == {'glm_ocr': 1, 'vlm_ocr': 2}
+    assert page.result['_docs_raw_layout'] == {'round': 2}

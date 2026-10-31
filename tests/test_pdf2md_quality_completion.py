@@ -42,7 +42,7 @@ def test_explicit_missing_parent_recovery_is_crop_only(tmp_path, monkeypatch):
             image=fitz.Pixmap(path);calls.append((image.width,image.height,block['layout_id']))
             return '<table><tr><td>$$Q=KA$$</td><td>9</td></tr></table>'
     monkeypatch.setattr(sp,'DynamicVLMClient',VLM)
-    target={'layout_id':'missing-parent','type':'table','bbox':[.1,.1,.5,.5],'bbox_space':'normalized_page','page_no':1,'source_sha1':hashlib.sha1(path.read_bytes()).hexdigest()}
+    target={'layout_id':'missing-parent','type':'table','bbox':[.1,.1,.5,.5],'bbox_space':'normalized_page','page_no':1,'source_sha1':hashlib.sha1(path.read_bytes()).hexdigest(),'content_provider_plan':['vlm_ocr'],'image_provider_plan':[]}
     out=json.loads(sp.extract_page_tables_direct(file_path=str(path),input_type='image',description_language='en',context={'structure_target':target}))
     assert calls==[(40,40,'missing-parent')]
     assert out['tables'][0]['layout_id']=='missing-parent'
@@ -126,7 +126,7 @@ def test_structure_recovery_budget_exhaustion_has_no_hidden_retry(tmp_path,monke
         def __init__(self,cfg): self.last_object_call_info={}
         def extract_table_html(self,*a,**k): calls.append(1);return '<table><tr><td>incomplete'
     monkeypatch.setattr(sp,'DynamicVLMClient',VLM)
-    target={'layout_id':'t','type':'table','bbox':[0,0,1,1],'bbox_space':'normalized_page','page_no':1,'source_sha1':hashlib.sha1(path.read_bytes()).hexdigest(),'max_model_calls':1}
+    target={'layout_id':'t','type':'table','bbox':[0,0,1,1],'bbox_space':'normalized_page','page_no':1,'source_sha1':hashlib.sha1(path.read_bytes()).hexdigest(),'max_model_calls':1,'content_provider_plan':['vlm_ocr'],'image_provider_plan':[]}
     out=json.loads(sp.extract_page_tables_direct(file_path=str(path),input_type='image',context={'structure_target':target}))
     assert len(calls)==1 and out['model_calls']['vlm_ocr']==1
     assert out['structure_recovery']['status']=='unresolved' and out['tables']==[]

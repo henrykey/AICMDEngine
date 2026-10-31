@@ -36,6 +36,7 @@ from .layout_ledger import (
     validate_recovered_object,
     _html_table_incomplete,
     _markdown_table_has_synthetic_columns,
+    _payload_from_entry,
 )
 from .vlm_client import DynamicVLMClient
 
@@ -76,6 +77,18 @@ def process_page(
     prev_context: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     rc = _routing_defaults(routing_config)
+    phase = (routing_config or {}).get("docs_recovery_phase", "recognize")
+    if phase not in ("recognize", "recover"):
+        raise ValueError("invalid_docs_recovery_phase")
+    selection = (routing_config or {}).get("docs_recovery_selection") or {}
+    if phase == "recover" and not isinstance(selection, dict):
+        raise ValueError("invalid_docs_recovery_selection")
+    def selected(kind, item):
+        return phase == "recover" and item.get("layout_id") in selection.get(kind, [])
+    saved_layout = (routing_config or {}).get("__docs_saved_layout")
+    if phase == "recover" and not isinstance(saved_layout, dict):
+        raise ValueError("missing_saved_layout")
+    raw_layout = None
     # Conversion is one operation. Docs owns semantic completion and recovery.
     rc.update(full_vlm_fallback_enabled=False, full_vlm_retry_markdown=False,
               full_vlm_split_extract=False, render_cleanup_with_llm=False,
@@ -189,8 +202,11 @@ def process_page(
                 layout_outcome = failed_layout_outcome("layout_analysis_unavailable")
             else:
                 try:
-                    glm_calls += 1
-                    raw_layout = glm_ocr.parse_layout(str(image_path))
+                    if phase == "recover":
+                        raw_layout = saved_layout
+                    else:
+                        glm_calls += 1
+                        raw_layout = glm_ocr.parse_layout(str(image_path))
                     if image_input:
                         from PIL import Image
                         with Image.open(image_path) as rendered:
@@ -201,16 +217,22 @@ def process_page(
                         fallback_height = float(page.rect.height) * render_scale
                         if int(rc.get("render_rotate_deg", 0)) % 180:
                             fallback_width, fallback_height = fallback_height, fallback_width
-                    layout_outcome = build_layout_outcome(
-                        raw_layout,
-                        display_page_no,
-                        fallback_width,
-                        fallback_height,
-                    )
+                    if phase == "recover" and isinstance(saved_layout.get("_docs_layout_snapshot"), dict):
+                        layout_outcome = copy.deepcopy(saved_layout["_docs_layout_snapshot"])
+                    else:
+                        layout_outcome = build_layout_outcome(
+                            raw_layout,
+                            display_page_no,
+                            fallback_width,
+                            fallback_height,
+                        )
+                    if phase == "recover":
+                        _bind_requested_source_tables(layout_outcome, selection.get("source_tables", []))
                     pending_tables = [
                         {**block, "recovery_target": "table_content_with_cell_images"}
                         for block in recovery_blocks(layout_outcome)
                         if block.get("type") == "table"
+                        and selected("tables", block)
                         and any(
                             item.get("layout_id") == block.get("layout_id")
                             and (((item.get("error") or {}).get("code") == "layout_table_content_incomplete"
@@ -225,8 +247,8 @@ def process_page(
                             bool(rc.get("vlm_ocr_enabled") and vlm.enabled),
                             rc["layout_recovery_max_objects"],
                             rc["layout_recovery_crop_padding_ratio"], glm=glm_ocr,
-                            source_dpi=rc["render_dpi"], max_model_calls=3 * min(
-                                len(pending_tables), rc["layout_recovery_max_objects"]),
+                            source_dpi=rc["render_dpi"], provider_plan=selection.get("table_provider_plan", []),
+                            max_model_calls=selection.get("table_model_budget", 0),
                         )
                         glm_calls += recovery_glm_calls
                         vlm_calls += recovery_vlm_calls
@@ -236,7 +258,7 @@ def process_page(
                     suspect_visuals = []
                     for figure in layout_outcome["payloads"]["figures"]:
                         box = figure.get("bbox", [])
-                        if len(box) == 4 and figure.get("content_status") == "geometry_only" \
+                        if selected("visual_types", figure) and len(box) == 4 and figure.get("content_status") == "geometry_only" \
                                 and (box[2] - box[0]) * fallback_width >= 3 * (box[3] - box[1]) * fallback_height:
                             suspect_visuals.append({**figure, "type": "figure", "recovery_target": "visual_type"})
                     if suspect_visuals:
@@ -244,8 +266,8 @@ def process_page(
                             image_path, Path(work_dir), layout_outcome, suspect_visuals, vlm,
                             bool(rc.get("vlm_ocr_enabled") and vlm.enabled),
                             rc["layout_recovery_max_objects"], rc["layout_recovery_crop_padding_ratio"],
-                            source_dpi=rc["render_dpi"], max_model_calls=2 * min(
-                                len(suspect_visuals), rc["layout_recovery_max_objects"]))
+                            source_dpi=rc["render_dpi"], provider_plan=selection.get("visual_provider_plan", []),
+                            max_model_calls=selection.get("visual_model_budget", 0))
                         glm_calls += extra_glm
                         vlm_calls += extra_vlm
                         layout_outcome["visual_type_recovery"] = visual_recovery
@@ -255,9 +277,10 @@ def process_page(
                 except Exception as exc:
                     raise ValueError(f"layout_conversion_failed: {exc}") from exc
 
-        if layout_driven and bool(rc.get("vlm_ocr_enabled") and vlm.enabled):
+        if layout_driven and bool(rc.get("vlm_ocr_enabled") and vlm.enabled) and phase != "recognize":
+            figure_ids = selection.get("figures", [])
             vlm_calls += _describe_missing_page_figures(
-                image_path, layout_outcome, vlm, description_language)
+                image_path, layout_outcome, vlm, description_language, figure_ids)
 
         if route_selected == "blank":
             markdown = ""
@@ -272,6 +295,12 @@ def process_page(
             route_decision["reasons"] = _unique_keep_order(
                 list(route_decision.get("reasons") or []) + ["layout_ledger"]
             )
+        elif phase == "recover" and saved_layout.get("_docs_non_layout_snapshot"):
+            snapshot = saved_layout["_docs_non_layout_snapshot"]
+            markdown = snapshot["markdown"]
+            rag_page_text = snapshot["rag_page_text"]
+            structured = copy.deepcopy(snapshot["structured"])
+            route_selected = snapshot["route_selected"]
         elif mode == "DIRECT":
             markdown = _build_direct_markdown(page)
             structured = {"formulas": [], "tables": [], "figures": []}
@@ -320,6 +349,9 @@ def process_page(
             markdown = _merge_region_vlm_markdown(markdown, structured)
             rag_page_text = ""
 
+        if phase == "recognize" and raw_layout is None and route_selected != "blank":
+            raw_layout = {"_docs_non_layout_snapshot": {"markdown": markdown, "rag_page_text": rag_page_text,
+                "structured": copy.deepcopy(structured), "route_selected": route_selected}}
         formula_body_text = list(structured.pop("formula_body_text", []))
         if layout_driven:
             formula_body_text.extend(
@@ -333,6 +365,7 @@ def process_page(
         formula_semantic_calls = {"text": 0, "image": 0}
         formula_number_ocr = {"calls": 0, "status": "not_requested"}
         cell_figures = []
+        image_recovery = None
         if not layout_driven:
             for content, metadata in structured.get("table_metadata", {}).items():
                 metadata["markdown"] = content
@@ -345,16 +378,16 @@ def process_page(
             attach_object_relationships(layout_outcome["payloads"], display_page_no)
             image_candidates = [
                 table for table in layout_outcome["payloads"].get("tables", [])
-                if _table_needs_cell_image_inspection(table)
+                if selected("table_images", table) and _table_needs_cell_image_inspection(table)
             ]
             if image_candidates:
                 with tempfile.TemporaryDirectory(prefix="pdf2md_cell_recovery_") as directory:
                     recovery_glm_calls, recovery_vlm_calls, image_recovery = _recover_missing_table_images(
-                        image_path, Path(directory), layout_outcome["payloads"], vlm,
+                        image_path, Path(directory), {"tables": image_candidates, "figures": layout_outcome["payloads"]["figures"]}, vlm,
                         bool(rc.get("vlm_ocr_enabled") and vlm.enabled),
                         rc["layout_recovery_max_objects"], source_dpi=rc["render_dpi"],
-                        previous=layout_outcome.get("recovery"),
-                        max_model_calls=2 * min(len(image_candidates), rc["layout_recovery_max_objects"]),
+                        previous=layout_outcome.get("recovery"), provider_plan=selection.get("image_provider_plan", []),
+                        max_model_calls=selection.get("image_model_budget", 0),
                     )
                 glm_calls += recovery_glm_calls
                 vlm_calls += recovery_vlm_calls
@@ -366,14 +399,14 @@ def process_page(
                 if reliable_normalized_bbox(table):
                     table.setdefault("layout_id", f"p{display_page_no}-table-{index}")
             table_payloads = {"tables": tables, "figures": cell_figures}
-            image_candidates = [table for table in tables if _table_needs_cell_image_inspection(table)]
+            image_candidates = [table for table in tables if selected("table_images", table) and _table_needs_cell_image_inspection(table)]
             if image_candidates:
                 with tempfile.TemporaryDirectory(prefix="pdf2md_cell_recovery_") as directory:
                     recovery_glm_calls, recovery_vlm_calls, image_recovery = _recover_missing_table_images(
-                        image_path, Path(directory), table_payloads, vlm,
+                        image_path, Path(directory), {"tables": image_candidates, "figures": cell_figures}, vlm,
                         bool(rc.get("vlm_ocr_enabled") and vlm.enabled),
                         rc["layout_recovery_max_objects"], source_dpi=rc["render_dpi"],
-                        max_model_calls=2 * min(len(image_candidates), rc["layout_recovery_max_objects"]),
+                        provider_plan=selection.get("image_provider_plan", []), max_model_calls=selection.get("image_model_budget", 0),
                     )
                 glm_calls += recovery_glm_calls
                 vlm_calls += recovery_vlm_calls
@@ -583,7 +616,49 @@ def process_page(
         result["decision"]["layout_error"] = layout_outcome.get("layout_error") or ""
         if layout_outcome.get("layout_error"):
             result["layout_error"] = layout_outcome["layout_error"]
+    if not layout_driven and image_recovery is not None:
+        result["cell_image_recovery"] = image_recovery
+    if phase == "recognize" and raw_layout is not None:
+        result["_docs_raw_layout"] = raw_layout
+    elif phase == "recover" and layout_driven:
+        result["_docs_raw_layout"] = {"_docs_layout_snapshot": copy.deepcopy(layout_outcome)}
+    elif phase == "recover" and saved_layout.get("_docs_non_layout_snapshot"):
+        saved_structured = copy.deepcopy(structured)
+        if formula_body_text:
+            saved_structured["formula_body_text"] = list(formula_body_text)
+        result["_docs_raw_layout"] = {"_docs_non_layout_snapshot": {"markdown": markdown,
+            "rag_page_text": rag_page_text, "structured": saved_structured, "route_selected": route_selected}}
     return result
+
+
+def _bind_requested_source_tables(outcome: Dict[str, Any], requests: Any) -> None:
+    """Bind caller-confirmed text as a table, retaining its original identity and content."""
+    if not isinstance(requests, list):
+        raise ValueError("invalid_source_table_selection")
+    for request in requests:
+        if not isinstance(request, dict):
+            raise ValueError("invalid_source_table_selection")
+        matches = [entry for entry in outcome.get("layout", []) if entry.get("layout_id") == request.get("layout_id")]
+        if len(matches) != 1:
+            raise ValueError("source_table_layout_mismatch")
+        entry = matches[0]
+        if entry.get("type") == "table":
+            continue
+        if (entry.get("type") != "text" or entry.get("status") != "EXTRACTED"
+                or not reliable_normalized_bbox(entry) or not str(entry.get("content") or "").strip()):
+            raise ValueError("source_table_content_mismatch")
+        blocks = outcome.get("blocks") or []
+        order = entry.get("reading_order")
+        if type(order) is not int or not 1 <= order <= len(blocks):
+            raise ValueError("source_table_layout_mismatch")
+        block = blocks[order - 1]
+        entry["type"] = "table"
+        entry["original_type"] = "text"
+        entry["title"] = ""
+        payload = _payload_from_entry(entry, block)
+        if payload is None:
+            raise ValueError("source_table_content_mismatch")
+        outcome["payloads"]["tables"].append(payload)
 
 
 def _routing_defaults(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1041,6 +1116,7 @@ def _recover_layout_objects(
     glm: Optional[OpenAICompatibleOcrClient] = None,
     source_dpi: float = 150,
     max_model_calls: Optional[int] = None,
+    provider_plan: Optional[list[str]] = None,
 ) -> tuple[int, int, Dict[str, Any]]:
     glm_calls = 0
     vlm_calls = 0
@@ -1104,7 +1180,11 @@ def _recover_layout_objects(
 
         # Incomplete table content gets one targeted OCR attempt and up to two
         # independent VLM attempts. Other objects keep their existing retries.
-        if table_content_with_cell_images:
+        if provider_plan is not None:
+            if not isinstance(provider_plan, list) or any(p not in {"glm_ocr", "vlm_ocr"} for p in provider_plan):
+                raise ValueError("invalid_recovery_provider_plan")
+            providers = [p for p in provider_plan if (p == "glm_ocr" and use_glm) or (p == "vlm_ocr" and vlm_enabled)]
+        elif table_content_with_cell_images:
             providers = (["glm_ocr"] if use_glm else []) + (["vlm_ocr"] * 2 if vlm_enabled else [])
         else:
             providers = (["glm_ocr"] * 2 if use_glm else []) + (["vlm_ocr"] * 2 if vlm_enabled else [])
@@ -1324,7 +1404,7 @@ def _table_needs_cell_image_inspection(table):
 
 @timed_stage("page_processor._recover_missing_table_images")
 def _recover_missing_table_images(image_path, output_dir, payloads, vlm, enabled, max_objects,
-                                  source_dpi=150, previous=None, max_model_calls=None):
+                                  source_dpi=150, previous=None, max_model_calls=None, provider_plan=None):
     """Schedule late image gaps through the existing bounded object recovery."""
     previous = previous or {}
     pending = []
@@ -1348,7 +1428,7 @@ def _recover_missing_table_images(image_path, output_dir, payloads, vlm, enabled
     gc, vc, result = _recover_layout_objects(
         image_path, output_dir, {"payloads": payloads}, pending, vlm, enabled,
         max(0, max_objects - len(prior_objects)), 0,
-        source_dpi=source_dpi, max_model_calls=remaining)
+        source_dpi=source_dpi, max_model_calls=remaining, provider_plan=provider_plan)
     for obj in result["objects"]:
         if obj["outcome"] != "recovered":
             table = next(t for t in payloads["tables"] if t.get("layout_id") == obj["layout_id"])
@@ -2158,14 +2238,14 @@ def _build_output_elements(
     return {"tables": tables, "formulas": formulas, "figures": figures}
 
 
-def _describe_missing_page_figures(image_path, layout_outcome, vlm, description_language):
+def _describe_missing_page_figures(image_path, layout_outcome, vlm, description_language, selected_ids=None):
     """Reuse the page-level figure tool once for standalone figures missing descriptions."""
     from types import SimpleNamespace
     from .single_page_tools import _enhance_layout_figures_with_vlm
 
     payloads = layout_outcome.get("payloads") or {}
     figures = payloads.get("figures") or []
-    pending = [f for f in figures if isinstance(f, dict) and not f.get("parent_relation")
+    pending = [f for f in figures if isinstance(f, dict) and (selected_ids is None or f.get("layout_id") in selected_ids) and not f.get("parent_relation")
                and isinstance(f.get("bbox"), list) and len(f["bbox"]) == 4
                and not str(f.get("description") or f.get("semantic_desc") or f.get("semanticDesc") or "").strip()]
     if not pending:

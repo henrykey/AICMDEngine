@@ -80,12 +80,6 @@ def build_layout_outcome(
         object_type = canonical_layout_type(block.get("layout_type"))
         # Complete source HTML is stronger structural evidence than a formula label.
         content = str(block.get("content") or "").strip()
-        calculation_title = None
-        if object_type == "text":
-            heading = re.match(r"(?is)^\s*((?:table\s+|表\s*)[a-z0-9]+(?:[.\-][a-z0-9]+)*)\s*\n\s*(evaluation\s+of[^\n]+)", content)
-            if heading and len(re.findall(r"(?i)\bcalculate\b", content)) >= 2 and content.count("$$") >= 4:
-                calculation_title = " ".join(heading.groups()).strip()
-                object_type = "table"
         if object_type == "formula" and re.fullmatch(r"(?is)<table\b[^>]*>.*</table>", content):
             parser = _TableStructureParser()
             parser.feed(content)
@@ -110,7 +104,7 @@ def build_layout_outcome(
             "error": None,
         }
         if object_type == "table":
-            entry["title"] = calculation_title or _table_caption_before(block, layout)
+            entry["title"] = _table_caption_before(block, layout)
         error = _entry_error(entry, str(block.get("bbox_error") or ""))
         if error:
             entry["error"] = error

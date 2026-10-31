@@ -593,7 +593,8 @@ def _extract_single_page(
             cell_figures = []
             if not (context and context.get("object_crop")):
                 _attach_single_page_figure_assets(ctx, cell_figures, items, vlm, model_calls,
-                                                 rc["layout_recovery_max_objects"])
+                                                 rc["layout_recovery_max_objects"],
+                                                 (context or {}).get("table_image_recovery"))
             result = _base_result(tool, ctx, model_calls, warnings, items=items)
             if cell_figures:
                 result["figures"] = cell_figures
@@ -613,7 +614,8 @@ def _extract_single_page(
         formulas = _extract_formulas(ctx, glm, vlm, describe, model_calls, warnings, description_language)
         figures = _extract_figures(ctx, glm, vlm, model_calls, warnings, description_language)
         _attach_single_page_figure_assets(ctx, figures, tables, vlm, model_calls,
-                                         rc["layout_recovery_max_objects"])
+                                         rc["layout_recovery_max_objects"],
+                                         (context or {}).get("table_image_recovery"))
         for item in tables + formulas + figures:
             if validate_descriptions(item, ctx.description_language):
                 warnings.append("vlm_ocr_failed_description_language_mismatch")
@@ -1540,7 +1542,7 @@ def _figure_item(item: OcrElement, page_text: str, source: str = "vlm_ocr") -> D
 
 def _attach_single_page_figure_assets(ctx: SinglePageContext, figures: List[Dict[str, Any]],
                                       tables: Optional[List[Dict[str, Any]]] = None,
-                                      vlm=None, model_calls=None, recovery_limit=8) -> None:
+                                      vlm=None, model_calls=None, recovery_limit=8, recovery_plan=None) -> None:
     from .layout_ledger import reliable_normalized_bbox
     from .page_processor import _attach_figure_assets, _recover_missing_table_images
     for index, table in enumerate(tables or []):
@@ -1549,11 +1551,17 @@ def _attach_single_page_figure_assets(ctx: SinglePageContext, figures: List[Dict
     if not tables and not any(item.get("layout_id") and reliable_normalized_bbox(item) for item in figures):
         return
     payloads = {"figures": [dict(item) for item in figures], "tables": tables or []}
-    if tables and vlm is not None:
+    if tables and vlm is not None and isinstance(recovery_plan, dict):
+        providers = recovery_plan.get("provider_plan", [])
+        budget = recovery_plan.get("max_model_calls", 0)
+        if not isinstance(providers, list) or any(provider != "vlm_ocr" for provider in providers):
+            raise ValueError("invalid_image_recovery_provider_plan")
+        if type(budget) is not int or budget < 0:
+            raise ValueError("invalid_image_recovery_budget")
         with tempfile.TemporaryDirectory(prefix="pdf2md_cell_recovery_") as directory:
             gc, vc, diagnostics = _recover_missing_table_images(
                 Path(ctx.image_path), Path(directory), payloads, vlm, bool(vlm.enabled), recovery_limit,
-                source_dpi=ctx.render_dpi)
+                source_dpi=ctx.render_dpi, provider_plan=providers, max_model_calls=budget)
         model_calls["glm_ocr"] += gc
         model_calls["vlm_ocr"] += vc
         for table in tables:
@@ -3621,6 +3629,14 @@ def _recover_structure_target(tool, kind, ctx, target, language, vlm_config, ocr
         return failed("invalid_model_budget")
     if budget == 0:
         return failed("model_budget_exhausted")
+    content_plan = target.get("content_provider_plan")
+    image_plan = target.get("image_provider_plan")
+    if not isinstance(content_plan, list) or not isinstance(image_plan, list):
+        return failed("recovery_provider_plan_required")
+    if (any(provider not in {"glm_ocr", "vlm_ocr"} for provider in content_plan)
+            or any(provider != "vlm_ocr" for provider in image_plan)
+            or len(content_plan) > budget or len(image_plan) > budget):
+        return failed("invalid_recovery_provider_plan")
     _initialize_description_language(ctx, language)
     try:
         vlm = DynamicVLMClient({**(vlm_config or _vlm_ocr_config(ocr_config) or {}),
@@ -3633,8 +3649,13 @@ def _recover_structure_target(tool, kind, ctx, target, language, vlm_config, ocr
              "error": {"stage": "layout_content"}, "review_required": True}
     outcome = {"layout": [entry], "payloads": {"tables": [], "formulas": [], "figures": []}}
     gc, vc, diagnostics = _recover_layout_objects(Path(ctx.image_path), directory, outcome, [entry], vlm,
-        bool(vlm.enabled), 1, 0, source_dpi=ctx.render_dpi, glm=glm, max_model_calls=budget)
+        bool(vlm.enabled), 1, 0, source_dpi=ctx.render_dpi, glm=glm, max_model_calls=budget,
+        provider_plan=content_plan)
     calls.update(glm_ocr=gc, vlm_ocr=vc)
+    if gc + vc >= budget:
+        for item in diagnostics.get("objects", []):
+            if item.get("outcome") != "recovered":
+                item.setdefault("reason", "model_budget_exhausted")
     for table in outcome["payloads"]["tables"]:
         if isinstance(target.get("source_cells"), list):
             table["source_cells"] = target["source_cells"]
@@ -3643,7 +3664,7 @@ def _recover_structure_target(tool, kind, ctx, target, language, vlm_config, ocr
                 table[key] = target[key]
     ig, iv, diagnostics = _recover_missing_table_images(
         Path(ctx.image_path), directory, outcome["payloads"], vlm, bool(vlm.enabled), 1,
-        source_dpi=ctx.render_dpi, previous=diagnostics, max_model_calls=budget-gc-vc)
+        source_dpi=ctx.render_dpi, previous=diagnostics, max_model_calls=budget-gc-vc, provider_plan=image_plan)
     calls["glm_ocr"] += ig
     calls["vlm_ocr"] += iv
     _attach_figure_assets(ctx.image_path, outcome["payloads"], ctx.page_no, source_dpi=ctx.render_dpi)

@@ -27,6 +27,9 @@
 - Documentation changes also require an explicit instruction to modify documentation or the relevant file.
 - Do not build, start, or restart containers; if that is needed, tell the user what to run.
 
+## DocIntel MCP responsibility boundary
+- Before implementing or changing any DocIntel-related MCP capability, read `../membership/docs/plans/2026-10-09-docs-conversion-boundary-design.md` and check the proposed responsibility against that document and the user's latest instructions. MCP executes explicitly requested recognition or other bounded tool operations; Membership Docs owns business classification, association, orchestration, recovery decisions, budgets, and document lifecycle. Reuse existing tools and services; do not add or duplicate business control in MCP.
+
 ## Testing Guidelines
 - No dedicated test framework is configured in this repo.
 - Use `node test_llm.js` for quick LLM connectivity checks when needed.

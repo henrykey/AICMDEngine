@@ -165,7 +165,15 @@ async def _process_task_page(
     vlm_used = _vlm_runtime_info(effective_vlm_config)
     page_timeout_sec = _resolve_page_timeout(effective_vlm_config)
     work_timeout_sec = page_timeout_sec
+    prior_result = None
     try:
+        if effective_routing_config.get("docs_recovery_phase") == "recover":
+            prior_task = manager.get_task(task_id)
+            prior_page = prior_task.pages.get(page_no)
+            prior_result = prior_page.result if prior_page else None
+            if not isinstance(prior_result, dict) or not isinstance(prior_result.get("_docs_raw_layout"), dict):
+                raise ValueError("missing_saved_layout")
+            effective_routing_config["__docs_saved_layout"] = prior_result["_docs_raw_layout"]
         await loop.run_in_executor(None, manager.update_page_running, task_id, page_no)
 
         task = manager.get_task(task_id)
@@ -221,11 +229,22 @@ async def _process_task_page(
                         raise asyncio.TimeoutError()
                 finally:
                     reservation.cancel()
+        if prior_result is not None:
+            prior_decision = prior_result.get("decision") or {}
+            decision = result.get("decision") or {}
+            for key in ("glm_calls", "vlm_calls", "physical_requests"):
+                if isinstance(prior_decision.get(key), int) and isinstance(decision.get(key), int):
+                    decision[key] += prior_decision[key]
+            previous_requests = prior_decision.get("provider_requests") or {}
+            requests = decision.get("provider_requests") or {}
+            for key in ("glm_ocr", "vlm_ocr"):
+                if isinstance(previous_requests.get(key), int) and isinstance(requests.get(key), int):
+                    requests[key] += previous_requests[key]
         await loop.run_in_executor(None, manager.update_page_result, task_id, page_no, result)
         res = {
             "task_id": task_id,
             "page_no": page_no,
-            "page_result": result,
+            "page_result": {key: value for key, value in result.items() if key != "_docs_raw_layout"},
             "next_context": result.get("next_context"),
             "route_selected": result.get("route_selected"),
             "bad_text_detected": result.get("bad_text_detected"),
@@ -235,7 +254,10 @@ async def _process_task_page(
         }
     except asyncio.TimeoutError:
         msg = f"process_task_page timeout after {work_timeout_sec}s"
-        await loop.run_in_executor(None, manager.update_page_failed, task_id, page_no, msg)
+        if prior_result is not None:
+            await loop.run_in_executor(None, manager.update_page_result, task_id, page_no, prior_result)
+        else:
+            await loop.run_in_executor(None, manager.update_page_failed, task_id, page_no, msg)
         logger.warning(
             "process_task_page timeout: task_id=%s page_no=%s timeout=%ss",
             task_id,
@@ -245,7 +267,10 @@ async def _process_task_page(
         res = {"task_id": task_id, "page_no": page_no, "error": msg, "vlm": vlm_used}
     except Exception as exc:
         try:
-            await loop.run_in_executor(None, manager.update_page_failed, task_id, page_no, str(exc))
+            if prior_result is not None:
+                await loop.run_in_executor(None, manager.update_page_result, task_id, page_no, prior_result)
+            else:
+                await loop.run_in_executor(None, manager.update_page_failed, task_id, page_no, str(exc))
         except ValueError as state_error:
             if str(state_error) == "document_run_already_finalized":
                 return json.dumps({"task_id": task_id, "page_no": page_no, "error": str(state_error)})

@@ -20,6 +20,29 @@ def geometry(block):
                                    'bbox_space': 'normalized_crop'}]}]}
 
 
+def process_explicitly(source_path, page_no, policy, vlm_config, routing_config, prev_context):
+    first = pp.process_page(source_path, page_no, policy, vlm_config,
+                            {**routing_config, 'docs_recovery_phase': 'recognize'}, prev_context)
+    assert first['decision']['glm_calls'] + first['decision']['vlm_calls'] >= 1
+    import json
+    json.dumps(first['_docs_raw_layout'])
+    layout = first.get('layout', [])
+    elements = first['rag']['elements']
+    ids = list(dict.fromkeys([item['layout_id'] for item in layout if item.get('type') == 'table']
+                             + [item['layout_id'] for item in elements.get('tables', []) if item.get('layout_id')]))
+    figs = [item['layout_id'] for item in elements.get('figures', []) if item.get('layout_id')]
+    request = {'tables': ids, 'table_images': ids, 'figures': figs, 'visual_types': figs,
+               'table_provider_plan': ['glm_ocr', 'vlm_ocr', 'vlm_ocr'],
+               'image_provider_plan': ['vlm_ocr', 'vlm_ocr'],
+               'visual_provider_plan': ['vlm_ocr', 'vlm_ocr'],
+               'table_model_budget': 3 * len(ids), 'image_model_budget': 2 * len(ids),
+               'visual_model_budget': 2 * len(figs)}
+    return pp.process_page(source_path, page_no, policy, vlm_config,
+                           {**routing_config, 'docs_recovery_phase': 'recover',
+                            '__docs_saved_layout': first['_docs_raw_layout'],
+                            'docs_recovery_selection': request}, prev_context)
+
+
 @pytest.mark.parametrize("layout_enabled", [True, False])
 @pytest.mark.parametrize("figure_semantics", [True, False])
 def test_conversion_preserves_complete_table_and_inspects_cell_images(tmp_path, monkeypatch, layout_enabled, figure_semantics):
@@ -56,7 +79,7 @@ def test_conversion_preserves_complete_table_and_inspects_cell_images(tmp_path, 
             return result
     monkeypatch.setattr(pp, 'OpenAICompatibleOcrClient', OCR)
     monkeypatch.setattr(pp, 'DynamicVLMClient', VLM)
-    result = pp.process_page(str(path), 1, 'auto', {'provider': 'fixture'},
+    result = process_explicitly(str(path), 1, 'auto', {'provider': 'fixture'},
         {'source_page_no': 7, 'render_dpi': 150, 'render_cleanup_with_llm': False,
          'layout_ledger_enabled': layout_enabled, 'figure_semantic_description_required': figure_semantics,
          'ocr_config': {'glm_ocr': {'enabled': True}}}, None)
@@ -297,7 +320,8 @@ def test_direct_entry_recovery_updates_counts(source_image):
     ctx = sp.SinglePageContext(source_path=source_image, image_path=source_image, input_type='image', page_no=3, page_text='')
     calls = {'glm_ocr': 1, 'vlm_ocr': 1}
     tables, figures = [table_target()], []
-    sp._attach_single_page_figure_assets(ctx, figures, tables, GeometryClient(), calls, 1)
+    sp._attach_single_page_figure_assets(ctx, figures, tables, GeometryClient(), calls, 1,
+        {'provider_plan': ['vlm_ocr', 'vlm_ocr'], 'max_model_calls': 2})
     assert calls == {'glm_ocr': 1, 'vlm_ocr': 2}
     assert figures[0]['image_asset']['status'] == 'available'
 
@@ -380,8 +404,10 @@ def test_non_layout_incomplete_ocr_table_runs_cell_image_recovery(tmp_path, monk
     doc.save(path)
     doc.close()
 
+    ocr_calls = []
     class OCR(LayoutLedgerGLMOcrClient):
         def extract_page(self, source):
+            ocr_calls.append(source)
             return sp.OcrResult(markdown=HTML, tables=[sp.OcrElement(
                 kind='table', source='glm_ocr', markdown=HTML,
                 raw={'bbox': [.2,.2,.8,.8], 'bbox_space': 'normalized_page',
@@ -396,15 +422,18 @@ def test_non_layout_incomplete_ocr_table_runs_cell_image_recovery(tmp_path, monk
             'image_regions': [{'image_id': 'diagram', 'bbox': [.3, .3, .5, .5],
                                'bbox_space': 'normalized_page'}],
         }])
-        return 0, 1, {}
+        return 0, 1, {'objects': [{'layout_id': payloads['tables'][0]['layout_id'],
+                                   'outcome': 'failed', 'attempts': [{'provider': 'vlm_ocr', 'reason': 'response_json_invalid'}]}]}
 
     monkeypatch.setattr(pp, 'OpenAICompatibleOcrClient', OCR)
     monkeypatch.setattr(pp, 'DynamicVLMClient', LayoutLedgerVLMClient)
     monkeypatch.setattr(pp, '_recover_missing_table_images', recover)
-    result = pp.process_page(str(path), 1, 'auto', {'provider': 'fixture'},
+    result = process_explicitly(str(path), 1, 'auto', {'provider': 'fixture'},
         {'source_page_no': 7, 'render_dpi': 150, 'render_cleanup_with_llm': False,
          'layout_ledger_enabled': False, 'ocr_config': {'glm_ocr': {'enabled': True}}}, None)
 
+    assert result['cell_image_recovery']['objects'][0]['attempts'][0]['reason'] == 'response_json_invalid'
+    assert len(ocr_calls) == 1
     assert len(calls) == 1
     assert calls[0][0]['tables'][0]['recovery_quality'] == 'degraded'
     figure = result['rag']['elements']['figures'][0]
@@ -444,7 +473,8 @@ def test_structure_target_shares_its_explicit_budget(source_image, tmp_path, mon
     monkeypatch.setattr(sp, 'DynamicVLMClient', VLM)
     ctx = sp.SinglePageContext(source_path=source_image, image_path=source_image, input_type='image', page_no=1, page_text='')
     target = {**table_target(), 'type': 'table', 'page_no': 1,
-              'source_sha1': hashlib.sha1(source_image.read_bytes()).hexdigest(), 'max_model_calls': 2}
+              'source_sha1': hashlib.sha1(source_image.read_bytes()).hexdigest(), 'max_model_calls': 2,
+              'content_provider_plan': ['vlm_ocr'], 'image_provider_plan': ['vlm_ocr']}
     out = sp._recover_structure_target('extract_page_tables', 'tables', ctx, target, 'en', {}, {}, tmp_path)
     assert out['model_calls'] == {'glm_ocr': 0, 'vlm_ocr': 2}
     assert out['structure_recovery']['status'] == 'complete'
@@ -582,7 +612,7 @@ def test_full_page_math_recovery_preserves_single_identity(source_image, tmp_pat
                     'complete': True, 'contains_images': False, 'source_cells': [], 'image_unresolved': []}
     monkeypatch.setattr(pp, 'OpenAICompatibleOcrClient', OCR)
     monkeypatch.setattr(pp, 'DynamicVLMClient', VLM)
-    result = pp.process_page(str(source_image), 1, 'auto', {'provider': 'fixture'},
+    result = process_explicitly(str(source_image), 1, 'auto', {'provider': 'fixture'},
         {'source_page_no': 23, 'render_cleanup_with_llm': False,
          'ocr_config': {'glm_ocr': {'enabled': True}}}, None)
     assert calls == ['content', 'cell_images']
@@ -669,7 +699,7 @@ def test_real_json_failure_keeps_table_and_serializes_attempt_diagnostics(tmp_pa
             return {}
     monkeypatch.setattr(pp, 'OpenAICompatibleOcrClient', OCR)
     monkeypatch.setattr(pp, 'DynamicVLMClient', VLM)
-    result = pp.process_page(str(root / 'dimension_page.png'), 1, 'auto', {'provider': 'fixture'},
+    result = process_explicitly(str(root / 'dimension_page.png'), 1, 'auto', {'provider': 'fixture'},
         {'source_page_no': 8, 'render_cleanup_with_llm': False, 'layout_ledger_enabled': True,
          'figure_semantic_description_required': False, 'ocr_config': {'glm_ocr': {'enabled': True}}}, None)
     actual = result['elements']['tables'][0]
@@ -739,3 +769,64 @@ def test_auto_crop_expansion_is_bounded_and_preserves_complete_crops(edge, size)
     assert boundary.expand_clipped_image_bbox(image, bbox, bbox) is None
     solid = Image.new('L', (size,size), 0)
     assert boundary.expand_clipped_image_bbox(solid, bbox, [.1,.1,.9,.9]) is None
+
+
+def test_single_page_assets_do_not_implicitly_recover_images(source_image):
+    ctx = sp.SinglePageContext(source_path=source_image, image_path=source_image, input_type='image', page_no=3, page_text='')
+    client = GeometryClient()
+    calls = {'glm_ocr': 0, 'vlm_ocr': 0}
+    sp._attach_single_page_figure_assets(ctx, [], [table_target()], client, calls, 1)
+    assert calls == {'glm_ocr': 0, 'vlm_ocr': 0}
+    assert client.calls == []
+
+
+def test_structure_target_requires_explicit_provider_plan(source_image, tmp_path, monkeypatch):
+    import hashlib
+    def unexpected(*args, **kwargs):
+        raise AssertionError('provider must not be initialized without an explicit plan')
+    monkeypatch.setattr(sp, 'DynamicVLMClient', unexpected)
+    ctx = sp.SinglePageContext(source_path=source_image, image_path=source_image, input_type='image', page_no=1, page_text='')
+    target = {**table_target(), 'type': 'table', 'page_no': 1,
+              'source_sha1': hashlib.sha1(source_image.read_bytes()).hexdigest(), 'max_model_calls': 2}
+    result = sp._recover_structure_target('extract_page_tables', 'tables', ctx, target, 'en', {}, {}, tmp_path)
+    assert result['structure_recovery']['reason'] == 'recovery_provider_plan_required'
+    assert result['model_calls'] == {'glm_ocr': 0, 'vlm_ocr': 0}
+
+
+def test_non_layout_successive_recoveries_preserve_previous_tables(tmp_path, monkeypatch):
+    path = tmp_path / 'page.pdf'
+    doc = fitz.open(); page = doc.new_page(width=100, height=100)
+    page.draw_rect(fitz.Rect(20, 20, 80, 80), color=(0, 0, 0), fill=(0, 0, 0))
+    doc.save(path); doc.close()
+    calls = []
+    class OCR(LayoutLedgerGLMOcrClient):
+        def extract_page(self, source):
+            calls.append(source)
+            return sp.OcrResult(markdown='page', tables=[
+                sp.OcrElement(kind='table', source='glm_ocr', markdown='<table><tr><td>A</td></tr></table>',
+                              raw={'bbox': [.1, .1, .9, .4], 'bbox_space': 'normalized_page'}),
+                sp.OcrElement(kind='table', source='glm_ocr', markdown='<table><tr><td>B</td></tr></table>',
+                              raw={'bbox': [.1, .5, .9, .9], 'bbox_space': 'normalized_page'})])
+    def recover(image_path, output_dir, payloads, vlm, enabled, max_objects, **kwargs):
+        for table in payloads['tables']:
+            table.update(cell_image_inspection_status='complete', image_unresolved=[])
+        return 0, 0, {'pending': len(payloads['tables']), 'attempted': len(payloads['tables']), 'objects': []}
+    monkeypatch.setattr(pp, 'OpenAICompatibleOcrClient', OCR)
+    monkeypatch.setattr(pp, 'DynamicVLMClient', LayoutLedgerVLMClient)
+    monkeypatch.setattr(pp, '_recover_missing_table_images', recover)
+    config = {'source_page_no': 7, 'render_dpi': 150, 'layout_ledger_enabled': False,
+              'ocr_config': {'glm_ocr': {'enabled': True}}}
+    first = pp.process_page(str(path), 1, 'auto', {'provider': 'fixture'}, config, None)
+    ids = [table['layout_id'] for table in first['rag']['elements']['tables']]
+    assert len(ids) == 2
+    def retry(state, target):
+        return pp.process_page(str(path), 1, 'auto', {'provider': 'fixture'},
+            {**config, 'docs_recovery_phase': 'recover', '__docs_saved_layout': state,
+             'docs_recovery_selection': {'table_images': [target], 'image_provider_plan': ['vlm_ocr'],
+                                         'image_model_budget': 1}}, None)
+    second = retry(first['_docs_raw_layout'], ids[0])
+    import json
+    json.dumps(second['_docs_raw_layout'])
+    third = retry(second['_docs_raw_layout'], ids[1])
+    assert [table.get('cell_image_inspection_status') for table in third['rag']['elements']['tables']] == ['complete', 'complete']
+    assert len(calls) == 1

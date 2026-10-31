@@ -1037,6 +1037,26 @@ def _run_layout_ledger_page(monkeypatch, raw, recovered=None, recovery_max_objec
         },
         prev_context=None,
     )
+    if ((recovered is not None or crop_results) and isinstance(result.get('_docs_raw_layout'), dict)
+            and '_docs_layout_snapshot' not in result['_docs_raw_layout']):
+        original_layout = result['_docs_raw_layout']
+        ids = [item['layout_id'] for item in result.get('layout', []) if item.get('type') == 'table']
+        figure_ids = [item['layout_id'] for item in result.get('layout', []) if item.get('type') == 'figure']
+        result = page_processor.process_page(
+            source_path='/tmp/layout-fixture.pdf', page_no=1, policy='force_direct',
+            vlm_config={'provider': 'fixture', 'table_analysis_max_model_calls': request_limit},
+            routing_config={'ocr_config': {'glm_ocr': {'enabled': True, 'model': 'glm-ocr',
+                'api_key': 'unused', 'base_url': 'local://fixture'}},
+                'layout_recovery_max_objects': recovery_max_objects, 'render_cleanup_with_llm': False,
+                'docs_recovery_phase': 'recover', '__docs_saved_layout': original_layout,
+                'docs_recovery_selection': {'tables': ids, 'table_images': ids,
+                    'figures': figure_ids, 'visual_types': figure_ids,
+                    'table_provider_plan': ['glm_ocr', 'vlm_ocr', 'vlm_ocr'],
+                    'image_provider_plan': ['vlm_ocr', 'vlm_ocr'],
+                    'visual_provider_plan': ['vlm_ocr', 'vlm_ocr'],
+                    'table_model_budget': 3 * min(len(ids), recovery_max_objects),
+                    'image_model_budget': 2 * min(len(ids), recovery_max_objects),
+                    'visual_model_budget': 2 * min(len(figure_ids), recovery_max_objects)}}, prev_context=None)
     result["_fixture_crop_calls"] = crop_calls
     return result
 
@@ -1278,7 +1298,7 @@ def test_incomplete_table_recovers_content_then_cell_images(monkeypatch):
     assert LayoutLedgerGLMOcrClient.crop_calls
     assert LayoutLedgerVLMClient.calls == 2
     assert result["decision"]["provider_requests"] == {
-        "glm_ocr": 2, "vlm_ocr": 2, "limits": {"glm_ocr": 2, "vlm_ocr": 2},
+        "glm_ocr": 1, "vlm_ocr": 2, "limits": {"glm_ocr": 2, "vlm_ocr": 2},
         "limit_scope": "per_object_operation",
     }
     assert LayoutLedgerVLMClient.last_blocks[0]["recovery_target"] == "cell_images"
@@ -1301,7 +1321,7 @@ def test_complete_ocr_crop_still_runs_vlm_and_keeps_ocr_table_source(monkeypatch
 
     assert 1 <= LayoutLedgerVLMClient.calls <= 2
     assert result["elements"]["tables"][0]["markdown"] == ocr_table
-    assert result["decision"]["provider_requests"]["glm_ocr"] == 2
+    assert result["decision"]["provider_requests"]["glm_ocr"] == 1
     assert result["decision"]["provider_requests"]["vlm_ocr"] == 2
 
 

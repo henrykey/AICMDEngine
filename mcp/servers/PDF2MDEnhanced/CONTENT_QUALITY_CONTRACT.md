@@ -89,6 +89,11 @@ been fixed. Those operations and their statistics remain Membership-owned.
 `extract_page_tables` accepts `context.structure_target` with `type=table`,
 `layout_id`, `bbox`, `bbox_space=normalized_page`, `page_no`, and `source_sha1`
 (the hash of the supplied file bytes, matching the normal source payload).
+The caller must also supply `content_provider_plan` and `image_provider_plan` as
+ordered lists of explicitly allowed model attempts. Content accepts `glm_ocr` and
+`vlm_ocr`; image recovery accepts `vlm_ocr`. Missing plans return
+`recovery_provider_plan_required` before constructing a provider. Each plan is
+bounded by the shared `max_model_calls`; no unlisted provider is attempted.
 Optional fields: `request_id`, `max_model_calls` (default 1, integer 0..4),
 `source_cells`, and `requires_previous_context`. Input is limited to 200,000 JSON
 characters and 2,000 supplied source cells. Validate source hash, page and geometry
