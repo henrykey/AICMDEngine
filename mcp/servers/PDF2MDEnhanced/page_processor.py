@@ -255,6 +255,10 @@ def process_page(
                 except Exception as exc:
                     raise ValueError(f"layout_conversion_failed: {exc}") from exc
 
+        if layout_driven and bool(rc.get("vlm_ocr_enabled") and vlm.enabled):
+            vlm_calls += _describe_missing_page_figures(
+                image_path, layout_outcome, vlm, description_language)
+
         if route_selected == "blank":
             markdown = ""
             structured = {"formulas": [], "tables": [], "figures": []}
@@ -2152,6 +2156,43 @@ def _build_output_elements(
         validate_descriptions(item, description_language)
         figures.append(item)
     return {"tables": tables, "formulas": formulas, "figures": figures}
+
+
+def _describe_missing_page_figures(image_path, layout_outcome, vlm, description_language):
+    """Reuse the page-level figure tool once for standalone figures missing descriptions."""
+    from types import SimpleNamespace
+    from .single_page_tools import _enhance_layout_figures_with_vlm
+
+    payloads = layout_outcome.get("payloads") or {}
+    figures = payloads.get("figures") or []
+    pending = [f for f in figures if isinstance(f, dict) and not f.get("parent_relation")
+               and isinstance(f.get("bbox"), list) and len(f["bbox"]) == 4
+               and not str(f.get("description") or f.get("semantic_desc") or f.get("semanticDesc") or "").strip()]
+    if not pending:
+        return 0
+    blocks, candidates = [], []
+    for index, figure in enumerate(pending, 1):
+        blocks.append({"index": index, "type": "image", "bbox": figure["bbox"]})
+        candidates.append({**figure, "block_index": index})
+    for block in layout_outcome.get("layout") or []:
+        if isinstance(block, dict) and block.get("type") == "text":
+            blocks.append({"index": block.get("reading_order"), "type": "text",
+                           "bbox": block.get("bbox"), "content": block.get("content", "")})
+    calls, warnings = {"vlm_ocr": 0}, []
+    ctx = SimpleNamespace(image_path=str(image_path), page_text=layout_outcome.get("markdown") or "",
+                          description_language=description_language)
+    enhanced = _enhance_layout_figures_with_vlm(ctx, candidates, blocks, vlm, calls, warnings)
+    for original, enriched in zip(pending, enhanced):
+        description = str(enriched.get("description") or "").strip()
+        if description:
+            original["description"] = description
+            original["semanticDesc"] = description
+            missing = original.get("missing_fields")
+            if isinstance(missing, list):
+                original["missing_fields"] = [field for field in missing if field != "description"]
+                if not original["missing_fields"]:
+                    original["semantic_status"] = "complete"
+    return calls["vlm_ocr"]
 
 
 def _build_layout_output_elements(
