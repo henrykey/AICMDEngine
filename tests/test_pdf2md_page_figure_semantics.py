@@ -65,3 +65,79 @@ def test_full_page_extraction_carries_reused_page_semantics_to_output(monkeypatc
     assert result['decision']['vlm_calls'] == 1
     assert not any(item.get('collection') == 'figures' and 'description' in item.get('missing_fields', [])
                    for item in result['semantic_status'].get('objects', []))
+
+
+def test_recovered_description_and_asset_reconcile_existing_figure():
+    ledger = importlib.import_module(package.__name__ + '.layout_ledger')
+    box = [.205242, .128848, .795161, .708096]
+    layout = [{'layout_id': 'p30-o001-figure', 'type': 'figure', 'status': 'FAILED',
+               'review_required': True, 'bbox': box, 'bbox_space': 'normalized_page',
+               'error': {'code': 'layout_figure_content_missing', 'stage': 'layout_content'}}]
+    figure = {'layout_id': 'p30-o001-figure', 'bbox': box, 'bbox_space': 'normalized_page',
+              'content_status': 'geometry_only', 'semantic_status': 'complete',
+              'description': '曲线图说明', 'image_asset': {'status': 'available', 'layout_id': 'p30-o001-figure'}}
+    result = ledger.reconcile_layout('EXTRACTED', layout, {'figures': [figure], 'tables': [], 'formulas': []})
+    assert result['complete'] is True
+    assert layout[0]['status'] == 'EXTRACTED'
+    assert layout[0]['error'] is None
+    assert layout[0]['review_required'] is False
+
+
+def test_calculation_table_mislabelled_text_is_preserved_as_table():
+    ledger = importlib.import_module(package.__name__ + '.layout_ledger')
+    source = ('Table 4.18.4\nEvaluation of F min and F max\n'
+              'Calculate the functions.\n$$Z_d(x)=x$$\nCalculate the minimum.\n$$F_t(x)=y$$')
+    raw = {'md_results': source, 'data_info': {'width': 100, 'height': 100},
+           'layout_details': [[{'index': 1, 'label': 'text', 'bbox_2d': [8, 9, 88, 53], 'content': source}]]}
+    outcome = ledger.build_layout_outcome(raw, 23, 100, 100)
+    assert len(outcome['payloads']['tables']) == 1
+    assert outcome['payloads']['tables'][0]['markdown'] == source
+    assert 'Table 4.18.4' in outcome['payloads']['tables'][0]['title']
+    assert outcome['layout'][0]['type'] == 'table'
+
+
+def test_ordinary_calculation_prose_is_not_invented_as_table():
+    ledger = importlib.import_module(package.__name__ + '.layout_ledger')
+    source = 'Calculate the functions.\n$$Z_d(x)=x$$\nCalculate the minimum.\n$$F_t(x)=y$$'
+    raw = {'md_results': source, 'data_info': {'width': 100, 'height': 100},
+           'layout_details': [[{'index': 1, 'label': 'text', 'bbox_2d': [8, 9, 88, 53], 'content': source}]]}
+    outcome = ledger.build_layout_outcome(raw, 23, 100, 100)
+    assert outcome['payloads']['tables'] == []
+
+
+def test_real_asme_page23_text_block_keeps_calculation_source():
+    import json
+    ledger = importlib.import_module(package.__name__ + '.layout_ledger')
+    raw = json.loads((Path(__file__).parent / 'fixtures' / 'asme_page23_calculation_text.json').read_text())
+    outcome = ledger.build_layout_outcome(raw, 23, 1000, 1000)
+    assert len(outcome['payloads']['tables']) == 1
+    table = outcome['payloads']['tables'][0]
+    assert table['title'].startswith('Table 4.18.4 Evaluation of')
+    assert table['markdown'] == raw['layout_details'][0][0]['content']
+
+
+def test_real_asme_page23_calculation_is_in_page_output(monkeypatch):
+    import json
+    spec = importlib.util.spec_from_file_location('calculation_fixture', Path(__file__).with_name('test_pdf2md_enhanced_bad_text_policy.py'))
+    fixture = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fixture)
+    raw = json.loads((Path(__file__).parent / 'fixtures' / 'asme_page23_calculation_text.json').read_text())
+    result = fixture._run_layout_ledger_page(monkeypatch, raw)
+    assert len(result['elements']['tables']) == 1
+    assert result['elements']['tables'][0]['title'].startswith('Table 4.18.4 Evaluation of')
+    assert result['elements']['tables'][0]['markdown'] == raw['layout_details'][0][0]['content']
+
+
+def test_figure_without_description_or_asset_stays_unresolved():
+    ledger = importlib.import_module(package.__name__ + '.layout_ledger')
+    box = [.2, .1, .8, .7]
+    for description, asset in [('', {'status': 'available', 'layout_id': 'p30-o001-figure'}),
+                               ('曲线图说明', {'status': 'missing'})]:
+        layout = [{'layout_id': 'p30-o001-figure', 'type': 'figure', 'status': 'FAILED',
+                   'review_required': True, 'bbox': box, 'bbox_space': 'normalized_page',
+                   'error': {'code': 'layout_figure_content_missing', 'stage': 'layout_content'}}]
+        figure = {'layout_id': 'p30-o001-figure', 'bbox': box, 'bbox_space': 'normalized_page',
+                  'content_status': 'geometry_only', 'semantic_status': 'complete',
+                  'description': description, 'image_asset': asset}
+        result = ledger.reconcile_layout('EXTRACTED', layout, {'figures': [figure], 'tables': [], 'formulas': []})
+        assert result['complete'] is False

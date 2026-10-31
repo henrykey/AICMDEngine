@@ -1,0 +1,22 @@
+{
+  "md_results": "Table 4.18.4\n\nEvaluation of $F_{t,\\min}$ and $F_{t,\\max}$\n\nEquations for the Determination of $F_{t,\\min}$ and $F_{t,\\max}$\n\nCalculate the Kelvin functions, the $\\Psi_i$ functions and $Z_a$ from Table 4.18.3.\n\nCalculate functions $Z_d(x)$ and $Z_w(x)$ relative to $x$.\n\n$$Z_d(x) = \\frac{\\Psi_2(X_a) \\cdot ber(x) + \\Psi_1(X_a) \\cdot bei(x)}{X_a^3 \\cdot Z_a}$$\n\n$$Z_w(x) = \\frac{ber'(X_a) \\cdot ber(x) + bei'(X_a) \\cdot bei(x)}{X_a^2 \\cdot Z_a}$$\n\nFor each loading case, calculate $F_t(x)$ relative to $x$.\n\nWhen $P_e \\neq 0$\n\n$$F_t(x) = \\left[ Z_d(x) + Q_3 \\cdot Z_w(x) \\right] \\cdot \\frac{X_a^4}{2}$$\n\nWhen $P_e = 0$\n\n$$F_t(x) = Z_w(x) \\cdot \\frac{X_a^4}{2}$$\n\nCalculate the minimum and maximum values, $F_{t,\\min}$ and $F_{t,\\max}$, of $F_t(x)$ as $x$ varies from $0 \\rightarrow X_a$ such that $0 \\leq x \\leq X_a$. $F_{t,\\min}$ and $F_{t,\\max}$ may be positive or negative.\n\n$$F_{t,\\min} = \\min\\left[F_t(x)\\right]$$\n\n$$F_{t,\\max} = \\max\\left[F_t(x)\\right]$$\n\nGENERAL NOTE: When $P_e \\neq 0$, see ASME PTB-7 for a graphical representation of $F_{t,\\min}$ and $F_{t,\\max}$.",
+  "data_info": {
+    "width": 1000,
+    "height": 1000
+  },
+  "layout_details": [
+    [
+      {
+        "index": 1,
+        "label": "text",
+        "bbox_2d": [
+          81,
+          92,
+          883,
+          530
+        ],
+        "content": "Table 4.18.4\n\nEvaluation of $F_{t,\\min}$ and $F_{t,\\max}$\n\nEquations for the Determination of $F_{t,\\min}$ and $F_{t,\\max}$\n\nCalculate the Kelvin functions, the $\\Psi_i$ functions and $Z_a$ from Table 4.18.3.\n\nCalculate functions $Z_d(x)$ and $Z_w(x)$ relative to $x$.\n\n$$Z_d(x) = \\frac{\\Psi_2(X_a) \\cdot ber(x) + \\Psi_1(X_a) \\cdot bei(x)}{X_a^3 \\cdot Z_a}$$\n\n$$Z_w(x) = \\frac{ber'(X_a) \\cdot ber(x) + bei'(X_a) \\cdot bei(x)}{X_a^2 \\cdot Z_a}$$\n\nFor each loading case, calculate $F_t(x)$ relative to $x$.\n\nWhen $P_e \\neq 0$\n\n$$F_t(x) = \\left[ Z_d(x) + Q_3 \\cdot Z_w(x) \\right] \\cdot \\frac{X_a^4}{2}$$\n\nWhen $P_e = 0$\n\n$$F_t(x) = Z_w(x) \\cdot \\frac{X_a^4}{2}$$\n\nCalculate the minimum and maximum values, $F_{t,\\min}$ and $F_{t,\\max}$, of $F_t(x)$ as $x$ varies from $0 \\rightarrow X_a$ such that $0 \\leq x \\leq X_a$. $F_{t,\\min}$ and $F_{t,\\max}$ may be positive or negative.\n\n$$F_{t,\\min} = \\min\\left[F_t(x)\\right]$$\n\n$$F_{t,\\max} = \\max\\left[F_t(x)\\right]$$\n\nGENERAL NOTE: When $P_e \\neq 0$, see ASME PTB-7 for a graphical representation of $F_{t,\\min}$ and $F_{t,\\max}$."
+      }
+    ]
+  ]
+}
