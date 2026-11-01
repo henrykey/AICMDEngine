@@ -228,6 +228,7 @@ def process_page(
                         )
                     if phase == "recover":
                         _bind_requested_source_tables(layout_outcome, selection.get("source_tables", []))
+                        _bind_requested_figure_plates(layout_outcome, selection.get("figure_plates", []))
                     pending_tables = [
                         {**block, "recovery_target": "table_content_with_cell_images"}
                         for block in recovery_blocks(layout_outcome)
@@ -629,6 +630,37 @@ def process_page(
         result["_docs_raw_layout"] = {"_docs_non_layout_snapshot": {"markdown": markdown,
             "rag_page_text": rag_page_text, "structured": saved_structured, "route_selected": route_selected}}
     return result
+
+
+def _bind_requested_figure_plates(outcome: Dict[str, Any], requests: Any) -> None:
+    """Apply caller-selected figure plates using their existing layout geometry."""
+    if not isinstance(requests, list):
+        raise ValueError("invalid_figure_plate_selection")
+    for layout_id in requests:
+        entries = [b for b in outcome.get("layout", []) if b.get("layout_id") == layout_id]
+        tables = [t for t in outcome.get("payloads", {}).get("tables", []) if t.get("layout_id") == layout_id]
+        if len(entries) != 1 or len(tables) != 1 or entries[0].get("type") != "table":
+            raise ValueError("figure_plate_layout_mismatch")
+        entry, table = entries[0], tables[0]
+        if not reliable_normalized_bbox(entry):
+            raise ValueError("figure_plate_geometry_missing")
+        blocks = outcome["layout"]
+        index = blocks.index(entry)
+        if index == 0:
+            raise ValueError("figure_plate_caption_missing")
+        caption = html.unescape(re.sub(r"<[^>]+>", " ", str(blocks[index - 1].get("content") or ""))).strip()
+        body = str(entry.get("content") or "")
+        markdown = str(outcome.get("markdown") or "")
+        if not caption or not body or markdown.count(body) != 1:
+            raise ValueError("figure_plate_source_mismatch")
+        text = _figure_plain_text(re.sub(r"(?i)</t[dh]>", " ", body))
+        placeholder = "[FIGURE:" + layout_id + "]"
+        outcome["markdown"] = markdown.replace(body, placeholder + "\n\n" + text, 1)
+        entry.update(type="figure", original_type="table", content=placeholder, payload_ref=None, error=None, review_required=False)
+        outcome["payloads"]["tables"].remove(table)
+        outcome["payloads"]["figures"].append({"layout_id": layout_id, "bbox": entry["bbox"],
+            "bbox_space": entry["bbox_space"], "caption": caption, "description": "",
+            "content_status": "geometry_only", "semantic_status": "missing", "missing_fields": ["description"]})
 
 
 def _bind_requested_source_tables(outcome: Dict[str, Any], requests: Any) -> None:
@@ -2266,6 +2298,10 @@ def _describe_missing_page_figures(image_path, layout_outcome, vlm, description_
                           description_language=description_language)
     enhanced = _enhance_layout_figures_with_vlm(ctx, candidates, blocks, vlm, calls, warnings)
     for original, enriched in zip(pending, enhanced):
+        caption = str(enriched.get("_vlm_caption") or "").strip()
+        if caption and not any(str(original.get(key) or "").strip()
+                               for key in ("caption", "capture", "name", "figureName")):
+            original["caption"] = caption
         description = str(enriched.get("description") or "").strip()
         if description:
             original["description"] = description

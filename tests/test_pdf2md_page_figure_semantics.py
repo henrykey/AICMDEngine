@@ -36,6 +36,102 @@ def test_full_page_figures_reuse_one_page_call_and_keep_existing_caption(monkeyp
     assert figures[2]['description'] == 'existing description'
 
 
+def test_caption_writeback_keeps_ocr_and_uses_only_matching_vlm_caption(monkeypatch):
+    def fake(ctx, figures, blocks, vlm, counts, warnings):
+        counts["vlm_ocr"] += 1
+        return [{**figures[0], "description": "first", "_vlm_caption": "Figure 3.17 model"},
+                {**figures[1], "description": "second", "_vlm_caption": "Figure 3.18 HAZ Impact Specimen Removal"},
+                {**figures[2], "description": "third", "caption": "Figure 3.17 unrelated"}]
+    monkeypatch.setattr(single_page_tools, "_enhance_layout_figures_with_vlm", fake)
+    figures = [
+        {"layout_id": "p12-o002-figure", "bbox": [.1, .1, .9, .4], "caption": "Figure 3.17 OCR"},
+        {"layout_id": "p12-o003-figure", "bbox": [.1, .5, .9, .8], "caption": ""},
+        {"layout_id": "p12-o004-figure", "bbox": [.1, .8, .9, .9], "caption": ""},
+    ]
+    page = {"payloads": {"figures": figures}}
+    assert page_processor._describe_missing_page_figures("/tmp/page.png", page, SimpleNamespace(enabled=True), "en") == 1
+    assert [f["caption"] for f in figures] == ["Figure 3.17 OCR", "Figure 3.18 HAZ Impact Specimen Removal", ""]
+    assert [f["description"] for f in figures] == ["first", "second", "third"]
+
+
+def test_vlm_results_are_matched_by_block_without_using_another_page_caption(monkeypatch):
+    ocr = importlib.import_module(package.__name__ + ".ocr_clients")
+    response = ocr.OcrResult(figures=[
+        ocr.OcrElement(kind="figure", source="vlm", caption="Figure 3.18 HAZ Impact Specimen Removal", description="weld diagram", raw={"block_index": 2}),
+        ocr.OcrElement(kind="figure", source="vlm", description="curve graph", raw={"block_index": 1}),
+    ])
+    monkeypatch.setattr(single_page_tools, "_call_vlm_structured", lambda *args: response)
+    figures = [{"layout_id": "p12-o002-figure", "bbox": [.1, .1, .9, .4], "caption": "Figure 3.17 OCR"},
+               {"layout_id": "p12-o003-figure", "bbox": [.1, .5, .9, .8], "caption": ""}]
+    page = {"markdown": "Figure 3.17 OCR", "payloads": {"figures": figures}}
+    assert page_processor._describe_missing_page_figures("/tmp/page.png", page, SimpleNamespace(enabled=True), "en") == 1
+    assert figures[0]["caption"] == "Figure 3.17 OCR"
+    assert figures[1]["caption"] == "Figure 3.18 HAZ Impact Specimen Removal"
+    assert figures[1]["description"] == "weld diagram"
+
+
+def test_requested_figure_plate_reuses_table_geometry_and_preserves_text():
+    table_html = "<table><tr><td>A</td><td>CHANNEL AND REMOVABLE COVER</td></tr></table>"
+    bbox = [.14, .07, .88, .8]
+    outcome = {"layout": [
+        {"layout_id": "caption", "type": "text", "content": "<div>FIGURE N-1.2</div>"},
+        {"layout_id": "p2-o002-table", "type": "table", "content": table_html, "bbox": bbox, "bbox_space": "normalized_page", "status": "EXTRACTED"},
+    ], "markdown": "FIGURE N-1.2\n\n" + table_html, "payloads": {"tables": [
+        {"layout_id": "p2-o002-table", "bbox": bbox, "bbox_space": "normalized_page", "markdown": table_html}], "figures": [], "formulas": []}}
+    page_processor._bind_requested_figure_plates(outcome, ["p2-o002-table"])
+    assert outcome["payloads"]["tables"] == []
+    figure = outcome["payloads"]["figures"][0]
+    assert figure["bbox"] == bbox and figure["caption"] == "FIGURE N-1.2"
+    assert "[FIGURE:p2-o002-table]" in outcome["markdown"]
+    assert "CHANNEL AND REMOVABLE COVER" in outcome["markdown"]
+
+
+def test_figure_plate_crops_existing_page_image(tmp_path):
+    from PIL import Image
+    image = tmp_path / "page.png"
+    Image.new("RGB", (200, 300), "white").save(image)
+    figure = {"layout_id": "p2-o002-table", "bbox": [.1, .2, .9, .8], "bbox_space": "normalized_page"}
+    page_processor._attach_figure_assets(image, {"tables": [], "figures": [figure]}, 2)
+    asset = figure["image_asset"]
+    assert asset["status"] == "available" and asset["width"] > 0 and asset["height"] > 0
+    assert asset["data"].startswith("data:image/png;base64,")
+
+
+def test_figure_plate_uses_saved_ocr_and_existing_page_semantics(monkeypatch):
+    spec = importlib.util.spec_from_file_location("plate_fixture", Path(__file__).with_name("test_pdf2md_enhanced_bad_text_policy.py"))
+    fixture = importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture)
+    processor = fixture.page_processor
+    tools = importlib.import_module(fixture.PACKAGE_NAME + ".single_page_tools")
+    calls = []
+    def describe(ctx, figures, blocks, vlm, counts, warnings):
+        calls.append([f["layout_id"] for f in figures]); counts["vlm_ocr"] += 1
+        return [{**f, "description": "A plate of exchanger types"} for f in figures]
+    monkeypatch.setattr(tools, "_enhance_layout_figures_with_vlm", describe)
+    def assets(image, payloads, page_no, source_dpi=150):
+        for f in payloads["figures"]:
+            f["image_asset"] = {"status": "available", "layout_id": f["layout_id"]}
+    monkeypatch.setattr(processor, "_attach_figure_assets", assets)
+    original = processor.process_page
+    def rounds(source_path, page_no, policy, vlm_config, routing_config, prev_context):
+        first = original(source_path, page_no, policy, vlm_config, {**routing_config, "docs_recovery_phase": "recognize"}, prev_context)
+        return original(source_path, page_no, policy, vlm_config, {**routing_config, "docs_recovery_phase": "recover",
+            "__docs_saved_layout": first["_docs_raw_layout"], "docs_recovery_selection": {
+                "figure_plates": ["p1-o002-table"], "figures": ["p1-o002-table"]}}, prev_context)
+    monkeypatch.setattr(processor, "process_page", rounds)
+    table = "<table><tr><td>A</td><td>CHANNEL</td></tr></table>"
+    raw = fixture._layout_raw([{"label": "text", "bbox_2d": [40, 4, 60, 8], "content": "FIGURE N-1.2"},
+                               {"label": "table", "bbox_2d": [10, 8, 90, 90], "content": table}],
+                              markdown="FIGURE N-1.2\n\n" + table)
+    result = fixture._run_layout_ledger_page(monkeypatch, raw)
+    assert len(fixture.LayoutLedgerGLMOcrClient.calls) == 1
+    assert calls == [["p1-o002-table"]]
+    assert result["rag"]["elements"]["tables"] == []
+    figure = result["rag"]["elements"]["figures"][0]
+    assert figure["caption"] == "FIGURE N-1.2" and figure["description"] == "A plate of exchanger types"
+    assert figure["image_asset"]["status"] == "available"
+    assert "CHANNEL" in result["rag"]["page_text"]
+
+
 def test_selected_standalone_figures_with_unresolved_parent_are_batched(monkeypatch):
     calls = []
     def fake(ctx, figures, blocks, vlm, counts, warnings):

@@ -1779,6 +1779,8 @@ def _enhance_layout_figures_with_vlm(
             continue
         enriched = dict(figure)
         detail = _figure_item(item, ctx.page_text)
+        # Keep the model's own caption separate from page-wide fallback inference.
+        enriched["_vlm_caption"] = str(item.caption or item.title or "").strip()
         enriched.update(
             {
                 "source": "glm_ocr_layout+vlm_ocr",
