@@ -462,7 +462,30 @@ def test_missing_provider_is_explicit(source_image, tmp_path):
     assert any(issue['reason'] == 'provider_unavailable' for issue in table['image_unresolved'])
 
 
-def test_structure_target_shares_its_explicit_budget(source_image, tmp_path, monkeypatch):
+def test_legacy_automatic_table_image_plan_is_rejected(source_image, monkeypatch):
+    def unexpected(*args, **kwargs):
+        raise AssertionError("legacy plan must not start OCR or a provider")
+    monkeypatch.setattr(sp, 'DynamicVLMClient', unexpected)
+    with pytest.raises(ValueError, match='table_image_recovery_replaced_by_table_image_target'):
+        sp.extract_page_tables_direct(file_path=str(source_image), input_type='image',
+            context={'table_image_recovery': {'provider_plan': ['vlm_ocr'], 'max_model_calls': 1}})
+
+
+def test_structure_target_rejects_multiple_model_steps(source_image, tmp_path, monkeypatch):
+    import hashlib
+    def unexpected(*args, **kwargs):
+        raise AssertionError("multiple steps must be decided by the caller")
+    monkeypatch.setattr(sp, 'DynamicVLMClient', unexpected)
+    ctx = sp.SinglePageContext(source_path=source_image, image_path=source_image, input_type='image', page_no=1, page_text='')
+    target = {**table_target(), 'type': 'table', 'page_no': 1,
+              'source_sha1': hashlib.sha1(source_image.read_bytes()).hexdigest(), 'max_model_calls': 2,
+              'content_provider_plan': ['vlm_ocr'], 'image_provider_plan': ['vlm_ocr']}
+    out = sp._recover_structure_target('extract_page_tables', 'tables', ctx, target, 'en', {}, {}, tmp_path)
+    assert out['structure_recovery']['reason'] == 'invalid_recovery_provider_plan'
+    assert out['model_calls'] == {'glm_ocr': 0, 'vlm_ocr': 0}
+
+
+def test_structure_target_then_selected_image_each_use_one_call(source_image, tmp_path, monkeypatch):
     import hashlib
     class VLM(GeometryClient):
         def __init__(self, cfg):
@@ -472,18 +495,17 @@ def test_structure_target_shares_its_explicit_budget(source_image, tmp_path, mon
             return HTML
     monkeypatch.setattr(sp, 'DynamicVLMClient', VLM)
     ctx = sp.SinglePageContext(source_path=source_image, image_path=source_image, input_type='image', page_no=1, page_text='')
+    source_hash = hashlib.sha1(source_image.read_bytes()).hexdigest()
     target = {**table_target(), 'type': 'table', 'page_no': 1,
-              'source_sha1': hashlib.sha1(source_image.read_bytes()).hexdigest(), 'max_model_calls': 2,
-              'content_provider_plan': ['vlm_ocr'], 'image_provider_plan': ['vlm_ocr']}
-    out = sp._recover_structure_target('extract_page_tables', 'tables', ctx, target, 'en', {}, {}, tmp_path)
-    assert out['model_calls'] == {'glm_ocr': 0, 'vlm_ocr': 2}
-    assert out['structure_recovery']['status'] == 'complete'
-    assert out['figures'][0]['image_asset']['status'] == 'available'
-    target['max_model_calls'] = 1
+              'source_sha1': source_hash, 'max_model_calls': 1,
+              'content_provider_plan': ['vlm_ocr'], 'image_provider_plan': []}
     out = sp._recover_structure_target('extract_page_tables', 'tables', ctx, target, 'en', {}, {}, tmp_path)
     assert out['model_calls'] == {'glm_ocr': 0, 'vlm_ocr': 1}
-    assert out['structure_recovery']['status'] == 'unresolved'
     assert out['figures'] == []
+    image_target = {'table': out['tables'][0], 'page_no': 1, 'source_sha1': source_hash, 'provider': 'vlm_ocr'}
+    recovered = sp._recover_single_table_image('extract_page_tables', ctx, image_target, 'en', {}, {}, tmp_path)
+    assert recovered['model_calls'] == {'glm_ocr': 0, 'vlm_ocr': 1}
+    assert recovered['figures'][0]['image_asset']['status'] == 'available'
 
 
 def test_partial_failure_preserves_existing_asset_evidence(source_image, tmp_path):
@@ -830,3 +852,106 @@ def test_non_layout_successive_recoveries_preserve_previous_tables(tmp_path, mon
     third = retry(second['_docs_raw_layout'], ids[1])
     assert [table.get('cell_image_inspection_status') for table in third['rag']['elements']['tables']] == ['complete', 'complete']
     assert len(calls) == 1
+
+
+def test_selected_table_image_attempt_reuses_table_and_runs_one_model(source_image, tmp_path, monkeypatch):
+    import hashlib
+    client = GeometryClient()
+    monkeypatch.setattr(sp, 'DynamicVLMClient', lambda config: client)
+    ctx = sp.SinglePageContext(source_path=source_image, image_path=source_image, input_type='image', page_no=3, page_text='')
+    table = table_target()
+    target = {'table': table, 'source_sha1': hashlib.sha1(source_image.read_bytes()).hexdigest(),
+              'page_no': 3, 'provider': 'vlm_ocr'}
+    result = sp._recover_single_table_image('extract_page_tables', ctx, target, 'en', {}, {}, tmp_path)
+    assert result['model_calls'] == {'glm_ocr': 0, 'vlm_ocr': 1}
+    assert len(client.calls) == 1
+    assert result['items'][0]['markdown'] == table['markdown']
+    assert result['items'][0]['layout_id'] == table['layout_id']
+    assert result['figures'][0]['image_asset']['status'] == 'available'
+
+
+def test_asme_p5_recorded_cell_image_regions_keep_three_drawings():
+    import json
+    from pathlib import Path
+    root = Path(__file__).parent / 'fixtures' / 'cell_image_crop'
+    recorded = json.loads((root / 'asme_p5_recorded.json').read_text())
+    table = recorded['table']
+    response = geometry(table)
+    response['source_cells'] = copy.deepcopy(recorded['cells'])
+    for cell in response['source_cells']:
+        cell.pop('has_image_id', None)
+        cell['image_regions'] = cell.pop('regions')
+        for region in cell['image_regions']:
+            region.pop('has_image_id', None)
+            region['image_id'] = 'drawing-' + str(cell['row'])
+    reason, recovered = pp._validate_cell_image_recovery(table, response, recorded['crop'], root / 'asme_p5_page.png')
+    assert reason == ''
+    assert len(recovered['source_cells']) == 3
+    assert recovered['markdown'] == table['markdown']
+    # Reviewed ink extents include the detached dimension labels and row-3 note.
+    expected = [(1627, 646, 2005, 1046), (1505, 1103, 2128, 1575), (1433, 1627, 2202, 2017)]
+    from PIL import Image
+    with Image.open(root / 'asme_p5_page.png') as image:
+        for cell, (x0, y0, x1, y1) in zip(recovered['source_cells'], expected):
+            box = cell['image_regions'][0]['bbox']
+            actual = [round(v * scale) for v, scale in zip(box, image.size * 2)]
+            assert actual[0] <= x0 and actual[1] <= y0
+            assert actual[2] >= x1 and actual[3] >= y1
+    payload = {'tables': [recovered], 'figures': []}
+    pp._attach_figure_assets(root / 'asme_p5_page.png', payload, 5)
+    assert len(payload['figures']) == 3
+    assert all(f['image_asset']['status'] == 'available' for f in payload['figures'])
+
+
+def test_long_drawing_stroke_is_not_mistaken_for_a_table_separator():
+    from PIL import Image, ImageDraw
+    from importlib import import_module
+    blocks = import_module(sp.__package__ + '.calculation_blocks')
+    image = Image.new('L', (400, 400), 255)
+    draw = ImageDraw.Draw(image)
+    draw.line((120, 45, 120, 355), fill=0, width=2)
+    draw.line((150, 150, 250, 150), fill=0, width=2)
+    original = [100, 100, 300, 300]
+    assert blocks._trim_crossed_table_rules(image, original, [40, 40, 360, 360], 4) == original
+
+
+def test_table_separator_is_not_trimmed_when_it_would_remove_adjacent_content():
+    from PIL import Image, ImageDraw
+    from importlib import import_module
+    blocks = import_module(sp.__package__ + '.calculation_blocks')
+    image = Image.new('L', (400, 400), 255)
+    draw = ImageDraw.Draw(image)
+    for x in (80, 120, 320): draw.line((x, 60, x, 340), fill=0, width=2)
+    for y in (60, 200, 340): draw.line((80, y, 320, y), fill=0, width=2)
+    draw.rectangle((105, 110, 110, 120), fill=0)
+    original = [100, 90, 300, 180]
+    result = blocks._trim_crossed_table_rules(image, original, [80, 60, 321, 341], 4)
+    assert result[0] == original[0]
+
+
+def test_long_dimension_inside_grid_is_not_trimmed_as_a_column():
+    from PIL import Image, ImageDraw
+    from importlib import import_module
+    blocks = import_module(sp.__package__ + '.calculation_blocks')
+    image = Image.new('L', (400, 400), 255)
+    draw = ImageDraw.Draw(image)
+    for x in (40, 360): draw.line((x, 40, x, 360), fill=0, width=2)
+    for y in (40, 360): draw.line((40, y, 360, y), fill=0, width=2)
+    draw.line((118, 42, 118, 358), fill=0, width=2)
+    draw.rectangle((180, 150, 250, 250), outline=0, width=2)
+    original = [.25, .2, .75, .8]
+    result = blocks.expand_clipped_image_bbox(image, original, [.1, .1, .905, .905])
+    assert result is None or result[0] <= 118 / 400
+
+
+def test_drawing_line_in_multirow_grid_is_not_removed_when_grid_count_conflicts():
+    from PIL import Image, ImageDraw
+    from importlib import import_module
+    blocks = import_module(sp.__package__ + '.calculation_blocks')
+    image = Image.new('L', (400, 400), 255)
+    draw = ImageDraw.Draw(image)
+    for x in (40, 360): draw.line((x, 40, x, 360), fill=0, width=2)
+    for y in (40, 145, 250, 360): draw.line((40, y, 360, y), fill=0, width=2)
+    draw.line((118, 42, 118, 358), fill=0, width=2)
+    original = [100, 80, 300, 320]
+    assert blocks._trim_crossed_table_rules(image, original, [40, 40, 362, 362], 4, (3, 1)) == original

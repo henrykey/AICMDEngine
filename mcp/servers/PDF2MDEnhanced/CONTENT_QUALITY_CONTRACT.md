@@ -90,10 +90,12 @@ been fixed. Those operations and their statistics remain Membership-owned.
 `layout_id`, `bbox`, `bbox_space=normalized_page`, `page_no`, and `source_sha1`
 (the hash of the supplied file bytes, matching the normal source payload).
 The caller must also supply `content_provider_plan` and `image_provider_plan` as
-ordered lists of explicitly allowed model attempts. Content accepts `glm_ocr` and
-`vlm_ocr`; image recovery accepts `vlm_ocr`. Missing plans return
-`recovery_provider_plan_required` before constructing a provider. Each plan is
-bounded by the shared `max_model_calls`; no unlisted provider is attempted.
+lists specifying exactly one content attempt (`glm_ocr` or `vlm_ocr`) and an
+empty image plan. Missing plans return `recovery_provider_plan_required`; multiple
+steps return `invalid_recovery_provider_plan` before constructing a provider.
+The caller may then request one cell-image attempt using `context.table_image_target`
+with the returned table, source hash, page number and `provider=vlm_ocr`. This
+second call reuses the table and does not repeat page OCR. The former `table_image_recovery` plan is rejected; callers must select each table and attempt explicitly.
 Optional fields: `request_id`, `max_model_calls` (default 1, integer 0..4),
 `source_cells`, and `requires_previous_context`. Input is limited to 200,000 JSON
 characters and 2,000 supplied source cells. Validate source hash, page and geometry
@@ -104,7 +106,7 @@ authorization or current-version checks.
 
 The existing `_recover_layout_objects` and crop helper recover exactly the chosen
 rectangle with zero padding; no layout discovery, page scan or adjacent-page fetch
-is triggered. The call cap is shared across GLM/VLM attempts. Return `tables`,
+is triggered. The call makes at most one content model attempt. Return `tables`,
 `figures`, actual `model_calls`, and `structure_recovery` containing binding,
 diagnostics and complete/unresolved. Completion means validated structural payload,
 not complete semantic fields or original-image quality acceptance. Continued-table

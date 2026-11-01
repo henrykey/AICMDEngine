@@ -1,0 +1,104 @@
+{
+  "table": {
+    "layout_id": "p5-o003-table",
+    "bbox": [
+      0.087451,
+      0.134283,
+      0.88,
+      0.628675
+    ],
+    "bbox_space": "normalized_page",
+    "markdown": "<table border=\"1\"><tr><td>Detail</td><td>Joint Type</td><td>Joint Category</td><td>Design Notes</td><td>Figure</td></tr><tr><td>5</td><td>7</td><td>D</td><td>$ \\cdot $ $ t_{c} \\geq \\min[0.7t_{n},6\\text{ mm}(0.25\\text{ in.})] $ $ \\cdot $ $ r_{3} \\geq \\min[0.25t,3\\text{ mm}(0.125\\text{ in.})] $ alternatively,a chamfer of $ r_{3} \\geq \\min[0.25t,3\\text{ mm}(0.125\\text{ in.})] $ at 45 deg</td><td>$ \\cdot $ $ t_{n}$ $ t_{c}$ $ r_{3}$ $ r_{3}$</td></tr><tr><td>6</td><td>7</td><td>D</td><td>$ \\cdot $ $ t_{c} \\geq \\min[0.7t_{n},6\\text{ mm}(0.25\\text{ in.})] $ $ \\cdot $ $ r_{1} \\geq \\min[0.25t,3\\text{ mm}(0.125\\text{ in.})] $</td><td>$ \\cdot $ $ t_{n}$ $ t_{c}$ $ r_{1}$</td></tr><tr><td>7</td><td>7</td><td>D</td><td>$ \\cdot $ $ t_{c} \\geq \\min[0.7t_{n},6\\text{ mm}(0.25\\text{ in.})] $ $ \\cdot $ $ r_{1} \\geq \\min[0.25t,3\\text{ mm}(0.125\\text{ in.})] $</td><td>Optional backing strip shall be removed after welding</td></tr></table>"
+  },
+  "crop": {
+    "pixel_bbox": [
+      223,
+      442,
+      2244,
+      2074
+    ],
+    "width": 1010,
+    "height": 816,
+    "padding_ratio": 0.0
+  },
+  "cells": [
+    {
+      "bbox": [
+        0.557,
+        0.104,
+        0.998,
+        0.383
+      ],
+      "bbox_space": "normalized_crop",
+      "has_image_id": false,
+      "row": 1,
+      "col": 4,
+      "rowspan": 1,
+      "colspan": 1,
+      "regions": [
+        {
+          "bbox": [
+            0.622,
+            0.113,
+            0.918,
+            0.372
+          ],
+          "bbox_space": "normalized_crop",
+          "has_image_id": true
+        }
+      ]
+    },
+    {
+      "bbox": [
+        0.557,
+        0.383,
+        0.998,
+        0.681
+      ],
+      "bbox_space": "normalized_crop",
+      "has_image_id": false,
+      "row": 2,
+      "col": 4,
+      "rowspan": 1,
+      "colspan": 1,
+      "regions": [
+        {
+          "bbox": [
+            0.562,
+            0.404,
+            0.962,
+            0.672
+          ],
+          "bbox_space": "normalized_crop",
+          "has_image_id": true
+        }
+      ]
+    },
+    {
+      "bbox": [
+        0.557,
+        0.681,
+        0.998,
+        0.999
+      ],
+      "bbox_space": "normalized_crop",
+      "has_image_id": false,
+      "row": 3,
+      "col": 4,
+      "rowspan": 1,
+      "colspan": 1,
+      "regions": [
+        {
+          "bbox": [
+            0.562,
+            0.703,
+            0.992,
+            0.972
+          ],
+          "bbox_space": "normalized_crop",
+          "has_image_id": true
+        }
+      ]
+    }
+  ]
+}

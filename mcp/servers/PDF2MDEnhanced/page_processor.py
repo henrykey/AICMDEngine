@@ -1555,7 +1555,9 @@ def _validate_cell_image_recovery(block, candidate, crop_info, image_path):
                     return "cell_image_nonvisual_content", None
                 if not boundary_intersects_content(page_image, region["bbox"], allow_thin_rules=False):
                     continue
-                expanded = expand_clipped_image_bbox(page_image, region["bbox"], block.get("bbox"))
+                rows = max(c["row"] + c.get("rowspan", 1) for c in origins.values())
+                cols = max(c["col"] + c.get("colspan", 1) for c in origins.values())
+                expanded = expand_clipped_image_bbox(page_image, region["bbox"], block.get("bbox"), grid_shape=(rows, cols))
                 if expanded is None:
                     return "cell_image_boundary_intersects_content", None
                 region["bbox"] = expanded

@@ -572,6 +572,11 @@ def _extract_single_page(
             input_type=input_type,
             routing_config=routing_config,
         )
+        if context and "table_image_recovery" in context:
+            raise ValueError("table_image_recovery_replaced_by_table_image_target")
+        if context and "table_image_target" in context:
+            return _recover_single_table_image(tool, ctx, context["table_image_target"],
+                                               description_language, vlm_config, ocr_config, Path(work_dir))
         if context and "structure_target" in context:
             return _recover_structure_target(tool, target, ctx, context["structure_target"],
                                              description_language, vlm_config, ocr_config, Path(work_dir))
@@ -592,9 +597,7 @@ def _extract_single_page(
                         item["title_source"] = "header_fallback" if (_should_replace_table_title(item) or re.fullmatch(r"Table\s+\d+", str(item.get("title") or ""))) else "extracted"
             cell_figures = []
             if not (context and context.get("object_crop")):
-                _attach_single_page_figure_assets(ctx, cell_figures, items, vlm, model_calls,
-                                                 rc["layout_recovery_max_objects"],
-                                                 (context or {}).get("table_image_recovery"))
+                _attach_single_page_figure_assets(ctx, cell_figures, items)
             result = _base_result(tool, ctx, model_calls, warnings, items=items)
             if cell_figures:
                 result["figures"] = cell_figures
@@ -613,9 +616,7 @@ def _extract_single_page(
         tables = _extract_tables(ctx, glm, vlm, describe, model_calls, warnings, description_language, allow_native=True, table_rows_format=table_rows_format)
         formulas = _extract_formulas(ctx, glm, vlm, describe, model_calls, warnings, description_language)
         figures = _extract_figures(ctx, glm, vlm, model_calls, warnings, description_language)
-        _attach_single_page_figure_assets(ctx, figures, tables, vlm, model_calls,
-                                         rc["layout_recovery_max_objects"],
-                                         (context or {}).get("table_image_recovery"))
+        _attach_single_page_figure_assets(ctx, figures, tables)
         for item in tables + formulas + figures:
             if validate_descriptions(item, ctx.description_language):
                 warnings.append("vlm_ocr_failed_description_language_mismatch")
@@ -3604,10 +3605,37 @@ def _dedupe(items: List[str]) -> List[str]:
 
 
 
+def _recover_single_table_image(tool, ctx, target, language, vlm_config, ocr_config, directory):
+    """Run one specified cell-image attempt against already recognized table content."""
+    from .layout_ledger import reliable_normalized_bbox
+    calls = {"glm_ocr": 0, "vlm_ocr": 0}
+    def failed(reason):
+        return _base_result(tool, ctx, calls, [reason], [])
+    if not isinstance(target, dict) or target.get("provider") != "vlm_ocr":
+        return failed("invalid_image_recovery_target")
+    table = target.get("table")
+    if (not isinstance(table, dict) or not isinstance(table.get("layout_id"), str)
+            or not table["layout_id"] or not reliable_normalized_bbox(table)
+            or not isinstance(table.get("markdown"), str) or not table["markdown"].strip()):
+        return failed("invalid_image_recovery_target")
+    if target.get("page_no") != ctx.page_no or target.get("source_sha1") != _file_sha1(ctx.source_path):
+        return failed("image_recovery_source_mismatch")
+    _initialize_description_language(ctx, language)
+    vlm = DynamicVLMClient({**(vlm_config or _vlm_ocr_config(ocr_config) or {}),
+                            "description_language": _effective_description_language(ctx), "max_retries": 0})
+    figures = []
+    table = deepcopy(table)
+    _attach_single_page_figure_assets(ctx, figures, [table], vlm, calls, 1,
+                                      {"provider_plan": ["vlm_ocr"], "max_model_calls": 1})
+    result = _base_result(tool, ctx, calls, [], [table])
+    result["figures"] = figures
+    return result
+
+
 def _recover_structure_target(tool, kind, ctx, target, language, vlm_config, ocr_config, directory):
     """Recover one explicitly identified missing parent, never scan surrounding pages."""
     from .layout_ledger import reliable_normalized_bbox
-    from .page_processor import _recover_layout_objects, _build_layout_output_elements, _attach_figure_assets, _recover_missing_table_images
+    from .page_processor import _recover_layout_objects, _build_layout_output_elements, _attach_figure_assets
     calls = {"glm_ocr": 0, "vlm_ocr": 0}
     def failed(reason):
         out = _base_result(tool, ctx, calls, [reason], [])
@@ -3635,7 +3663,7 @@ def _recover_structure_target(tool, kind, ctx, target, language, vlm_config, ocr
         return failed("recovery_provider_plan_required")
     if (any(provider not in {"glm_ocr", "vlm_ocr"} for provider in content_plan)
             or any(provider != "vlm_ocr" for provider in image_plan)
-            or len(content_plan) > budget or len(image_plan) > budget):
+            or len(content_plan) != 1 or image_plan or budget < 1):
         return failed("invalid_recovery_provider_plan")
     _initialize_description_language(ctx, language)
     try:
@@ -3662,11 +3690,6 @@ def _recover_structure_target(tool, kind, ctx, target, language, vlm_config, ocr
         for key in ("contains_images", "image_unresolved"):
             if key in target:
                 table[key] = target[key]
-    ig, iv, diagnostics = _recover_missing_table_images(
-        Path(ctx.image_path), directory, outcome["payloads"], vlm, bool(vlm.enabled), 1,
-        source_dpi=ctx.render_dpi, previous=diagnostics, max_model_calls=budget-gc-vc, provider_plan=image_plan)
-    calls["glm_ocr"] += ig
-    calls["vlm_ocr"] += iv
     _attach_figure_assets(ctx.image_path, outcome["payloads"], ctx.page_no, source_dpi=ctx.render_dpi)
     elements = _build_layout_output_elements("", outcome["payloads"], "full_glm_ocr", ctx.description_language)
     out = _base_result(tool, ctx, calls, [], elements["tables"])

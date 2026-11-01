@@ -99,7 +99,70 @@ def image_has_foreground(image, bbox, table_bbox):
     return False
 
 
-def expand_clipped_image_bbox(image, bbox, table_bbox):
+def _trim_crossed_table_rules(image, box, limits, margin, grid_shape=None):
+    """Remove only table-spanning rules and blank space at a crop edge."""
+    from PIL import ImageDraw
+    if (not isinstance(grid_shape, tuple) or len(grid_shape) != 2
+            or any(type(n) is not int or n < 1 for n in grid_shape)):
+        return box
+    ink = image.convert('L').point(lambda p: 255 if p < 200 else 0)
+    mask = ink.copy()
+    draw = ImageDraw.Draw(mask)
+    rules = [[], []]
+    for axis in (0, 1):
+        start = max(0, limits[axis] - margin * 2)
+        end = min(image.size[axis], limits[axis + 2] + margin * 2)
+        length = limits[3 - axis] - limits[1 - axis]
+        for position in range(start, end):
+            strip = ((position, limits[1], position + 1, limits[3]) if axis == 0
+                     else (limits[0], position, limits[2], position + 1))
+            if ink.crop(strip).histogram()[255] >= .75 * length:
+                if rules[axis] and position == rules[axis][-1][-1] + 1:
+                    rules[axis][-1].append(position)
+                else:
+                    rules[axis].append([position])
+    # A single long dimension line is not enough to establish a table rule.
+    if any(len(groups) < 2 for groups in rules):
+        return box
+    for axis in (0, 1):
+        rules[axis] = [group for group in rules[axis] if len(group) <= margin * 2]
+        for group in rules[axis]:
+            a, b = group[0] - 2, group[-1] + 2
+            draw.rectangle((a, limits[1], b, limits[3]) if axis == 0
+                           else (limits[0], a, limits[2], b), fill=0)
+    if any(len(groups) < 2 for groups in rules):
+        return box
+    # Require the complete expected grid and evidence for both outer edges;
+    # otherwise a drawing stroke could replace an unseen separator.
+    for axis, expected in ((0, grid_shape[1] + 1), (1, grid_shape[0] + 1)):
+        groups = rules[axis]
+        tolerance = max(margin * 2, round((limits[axis + 2] - limits[axis]) * (.01 if axis == 0 else .06)))
+        if (len(groups) != expected or abs(groups[0][0] - limits[axis]) > tolerance
+                or abs(limits[axis + 2] - groups[-1][-1]) > tolerance):
+            return box
+    trimmed = list(box)
+    for edge in range(4):
+        axis = edge % 2
+        extent = box[axis + 2] - box[axis]
+        for group in rules[axis]:
+            a, b = group[0], group[-1]
+            if edge < 2 and box[edge] <= a and b - box[edge] <= extent * .1:
+                cut = b + margin + 1
+                strip = list(trimmed); strip[axis + 2] = cut
+            elif edge >= 2 and box[edge] >= b and box[edge] - a <= extent * .1:
+                cut = a - margin
+                strip = list(trimmed); strip[axis] = cut
+            else:
+                continue
+            if cut <= trimmed[axis] or cut >= trimmed[axis + 2]:
+                continue
+            if mask.crop(tuple(strip)).getbbox() is None:
+                trimmed[edge] = cut
+                break
+    return trimmed
+
+
+def expand_clipped_image_bbox(image, bbox, table_bbox, *, grid_shape=None):
     """Move cut edges to nearby blank bands, bounded by the source table.
 
     Trim only an adjacent full-table separator; otherwise only expand. Never
@@ -114,6 +177,7 @@ def expand_clipped_image_bbox(image, bbox, table_bbox):
     box = list(original)
     ink = image.convert('L').point(lambda p: 255 if p < 200 else 0)
     margin = max(4, round(min(image.size) / 400))
+    box = _trim_crossed_table_rules(image, box, limits, margin, grid_shape)
     # A crop may include the adjacent full-width table separator. It cannot
     # reach a blank vertical edge until that separator alone is trimmed away.
     # Only recognize rules spanning the entire table, never short dimensions.
