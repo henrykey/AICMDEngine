@@ -2247,7 +2247,8 @@ def _describe_missing_page_figures(image_path, layout_outcome, vlm, description_
 
     payloads = layout_outcome.get("payloads") or {}
     figures = payloads.get("figures") or []
-    pending = [f for f in figures if isinstance(f, dict) and (selected_ids is None or f.get("layout_id") in selected_ids) and not f.get("parent_relation")
+    pending = [f for f in figures if isinstance(f, dict) and (selected_ids is None or f.get("layout_id") in selected_ids) and (not f.get("parent_relation") or (f["parent_relation"].get("status") == "unresolved"
+                    and f["parent_relation"].get("reason") == "no_containing_table"))
                and isinstance(f.get("bbox"), list) and len(f["bbox"]) == 4
                and not str(f.get("description") or f.get("semantic_desc") or f.get("semanticDesc") or "").strip()]
     if not pending:

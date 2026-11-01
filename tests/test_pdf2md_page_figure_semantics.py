@@ -36,6 +36,22 @@ def test_full_page_figures_reuse_one_page_call_and_keep_existing_caption(monkeyp
     assert figures[2]['description'] == 'existing description'
 
 
+def test_selected_standalone_figures_with_unresolved_parent_are_batched(monkeypatch):
+    calls = []
+    def fake(ctx, figures, blocks, vlm, counts, warnings):
+        calls.append([f["layout_id"] for f in figures])
+        counts["vlm_ocr"] += 1
+        return [{**f, "description": "curve chart"} for f in figures]
+    monkeypatch.setattr(single_page_tools, "_enhance_layout_figures_with_vlm", fake)
+    page = {"payloads": {"figures": [
+        {"layout_id": "p7-o003-figure", "bbox": [.1, .1, .8, .8], "parent_relation": {"status": "unresolved", "reason": "no_containing_table"}},
+        {"layout_id": "cell", "bbox": [.1, .1, .2, .2], "parent_relation": {"status": "resolved"}},
+    ]}}
+    assert page_processor._describe_missing_page_figures("/tmp/page.png", page, SimpleNamespace(enabled=True), "en", ["p7-o003-figure", "cell"]) == 1
+    assert calls == [["p7-o003-figure"]]
+    assert page["payloads"]["figures"][0]["description"] == "curve chart"
+
+
 def test_no_missing_figure_means_no_model_call(monkeypatch):
     def fail(*args, **kwargs):
         raise AssertionError('model should not be called')
