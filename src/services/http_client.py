@@ -180,13 +180,12 @@ class HTTPClient:
 
         # Don't attempt refresh if token is None or invalid
         if not current_token or current_token == "None" or not isinstance(current_token, str):
-            logger.warning(f"Cannot refresh token: invalid token value '{current_token}'")
+            logger.warning("Cannot refresh token: invalid token")
             return None
 
         try:
             refresh_url = urljoin(self.membership_url, "/v2/auth/token/refresh")
             logger.info(f"Refreshing token from {refresh_url}")
-            logger.debug(f"Current token (first 20 chars): {current_token[:20] if current_token else 'None'}...")
 
             response = await asyncio.wait_for(
                 self.client.post(

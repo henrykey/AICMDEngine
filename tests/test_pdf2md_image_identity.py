@@ -13,6 +13,20 @@ def identity(**changes):
                 source_file_sha256='a'*64, render_dpi=300, **changes)
 
 
+@pytest.mark.parametrize('dpi', [150, 180, 220, 300])
+def test_render_dpi_is_preserved_for_task_and_finalize(tmp_path, dpi):
+    path = tmp_path / 'page.png'
+    Image.new('RGB', (120, 180), 'white').save(path)
+    manager = TaskManager(str(tmp_path / 'output'))
+    scope = {**identity(), 'render_dpi': dpi, 'run_pages': [17]}
+    task = manager.start_task('page', file_data=base64.b64encode(path.read_bytes()).decode(),
+                              pages=[1], source_identity=scope)
+    assert task.source_identity['render_dpi'] == dpi
+    manager.update_page_result(task.task_id, 1, {'render': {'markdown': 'ok'}})
+    manager.finalize_task(task.task_id)
+    assert manager.finalize_document_run(task.task_id, scope)['status'] == 'FINALIZED'
+
+
 def test_task_and_source_snapshot_keep_original_scope_and_image_provenance(tmp_path):
     path=tmp_path/'page.png';Image.new('RGB',(120,180),'white').save(path)
     manager=TaskManager(str(tmp_path/'output'))
@@ -46,7 +60,7 @@ def test_task_and_source_snapshot_keep_original_scope_and_image_provenance(tmp_p
 
 
 
-@pytest.mark.parametrize('field,value',[('tenant_id',''),('version',0),('source_page_no',True),('source_file_sha256','bad'),('render_dpi',150)])
+@pytest.mark.parametrize('field,value',[('tenant_id',''),('version',0),('source_page_no',True),('source_file_sha256','bad'),('render_dpi',0),('render_dpi',True)])
 def test_incomplete_or_invalid_source_identity_fails_before_task_creation(tmp_path,field,value):
     manager=TaskManager(str(tmp_path/'output'))
     bad={**identity(),field:value}

@@ -1,4 +1,5 @@
 import asyncio
+from unittest.mock import AsyncMock, patch
 import importlib.util
 import sys
 from pathlib import Path
@@ -199,6 +200,7 @@ class FakeApp:
 class FakeRequest:
     def __init__(self, registry):
         self.app = FakeApp(registry)
+        self.headers = {"authorization": "Bearer session"}
 
     async def json(self):
         return {"file_path": "/tmp/page.pdf"}
@@ -207,13 +209,14 @@ class FakeRequest:
 def _rest_execute(tool_name, schemas=None, request_cls=FakeRequest):
     registry = FakeSchemaRegistry(schemas or {tool_name: _tool_info("vlm_config", "ocr_config")})
 
-    response = asyncio.run(
-        mcp_router.execute_mcp_tool(
-            server_name="pdf2md-enhanced",
-            tool_name=tool_name,
-            request=request_cls(registry),
+    with patch.object(mcp_router.MCPJWTAuth, "validate_token", AsyncMock(return_value={"tenant_id": 6})):
+        response = asyncio.run(
+            mcp_router.execute_mcp_tool(
+                server_name="pdf2md-enhanced",
+                tool_name=tool_name,
+                request=request_cls(registry),
+            )
         )
-    )
     return response, registry
 
 

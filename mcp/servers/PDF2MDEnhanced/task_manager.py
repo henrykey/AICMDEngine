@@ -46,7 +46,7 @@ class TaskManager:
             if (set(identity) != keys
                     or any(not isinstance(identity[k], str) or not 0 < len(identity[k].strip()) <= 256 for k in strings)
                     or any(type(identity[k]) is not int or identity[k] < 1 for k in ('version', 'source_page_no'))
-                    or type(identity['render_dpi']) is not int or identity['render_dpi'] < 300
+                    or type(identity['render_dpi']) is not int or identity['render_dpi'] < 1
                     or not isinstance(identity['source_file_sha256'], str)
                     or not re.fullmatch(r'[a-f0-9]{64}', identity['source_file_sha256'])):
                 raise ValueError('invalid_source_identity')
@@ -337,7 +337,7 @@ class TaskManager:
                 or type(identity.get('version')) is not int or identity['version'] < 1
                 or type(identity.get('source_page_no')) is not int
                 or identity['source_page_no'] not in identity['run_pages']
-                or type(identity.get('render_dpi')) is not int or identity['render_dpi'] < 300
+                or type(identity.get('render_dpi')) is not int or identity['render_dpi'] < 1
                 or not isinstance(identity.get('source_file_sha256'), str)
                 or not re.fullmatch(r'[a-f0-9]{64}', identity['source_file_sha256'])):
             raise ValueError('invalid_document_run_identity')

@@ -17,9 +17,9 @@ def test_image_identity_rejected_before_provider_injection_or_execution(tenant, 
     registry = SimpleNamespace(execute_command=AsyncMock())
     message = MCPMessage(method='tools/call', params={
         'name': 'pdf2md-enhanced.start_task', 'arguments': {'source_identity': identity}})
-    with pytest.raises(ValueError, match='source_identity_tenant_mismatch'):
+    with pytest.raises(ValueError, match='source_identity_tenant_mismatch|Authenticated tenant required'):
         asyncio.run(handler._handle_tools_call(message, {
-            'registry': registry, 'client_info': {'tenant_id': tenant}}))
+            'registry': registry, 'jwt_token': 'session', 'client_info': {'tenant_id': tenant}}))
     handler._inject_external_model_configs.assert_not_awaited()
     registry.execute_command.assert_not_awaited()
 
@@ -27,11 +27,11 @@ def test_image_identity_rejected_before_provider_injection_or_execution(tenant, 
 def test_image_identity_uses_authenticated_tenant():
     handler = MCPProtocolHandler()
     args = {'source_identity': {'tenant_id': '6', 'doc_id': 'document'}}
-    handler._inject_external_model_configs = AsyncMock(return_value=args)
+    handler._inject_external_model_configs = AsyncMock(side_effect=lambda **kwargs: kwargs["arguments"])
     registry = SimpleNamespace(execute_command=AsyncMock(return_value=SimpleNamespace(content='ok', is_error=False)))
     message = MCPMessage(method='tools/call', params={
         'name': 'pdf2md-enhanced.start_task', 'arguments': args})
     result = asyncio.run(handler._handle_tools_call(message, {
-        'registry': registry, 'client_info': {'tenant_id': '6'}}))
+        'registry': registry, 'jwt_token': 'session', 'client_info': {'tenant_id': '6'}}))
     assert not result['isError']
     assert registry.execute_command.await_args.kwargs['source_identity'] == args['source_identity']

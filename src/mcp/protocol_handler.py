@@ -316,11 +316,6 @@ class MCPProtocolHandler:
         if not registry:
             raise ValueError("Registry not available")
 
-        # 获取JWT token和tenant_id用于工具调用
-        jwt_token = context.get("jwt_token")
-        client_info = context.get("client_info", {})
-        tenant_id = client_info.get("tenant_id")
-
         params = message.params or {}
         tool_name = params.get("name")
         arguments = params.get("arguments", {}) or {}
@@ -335,41 +330,11 @@ class MCPProtocolHandler:
 
         mcp_name, tool_name = parts
 
-        if mcp_name == "pdf2md-enhanced" and "source_identity" in arguments:
-            identity = arguments["source_identity"]
-            if (not isinstance(identity, dict) or not tenant_id
-                    or identity.get("tenant_id") != str(tenant_id)):
-                raise ValueError("source_identity_tenant_mismatch")
-
         waiting = (mcp_name == "pdf2md-enhanced" and tool_name == "process_task_page"
                    and arguments.get("routing_config", {}).get("calculation_poll") is True)
         (logger.debug if waiting else logger.info)("Executing tool: %s.%s", mcp_name, tool_name)
 
-        # ===== Membership API 推送的系统服务 token 处理 =====
-        # 如果 Membership API 推送了 system_service_token，缓存到 MembershipMCPServer
-        # 这样后续 audit 回调可以使用缓存的 token（24小时有效）
-        system_service_token = arguments.get("system_service_token")
-        pushed_tenant_id = arguments.get("_tenant_id") or arguments.get("tenant_id")
-
-        if system_service_token and pushed_tenant_id:
-            membership_mcp = registry.get_mcp("membership")
-            if membership_mcp and hasattr(membership_mcp, "_audit_system_tokens"):
-                # Issue #3 fix: Validate tenant claims consistency before caching
-                if self._validate_system_token_claims(system_service_token, pushed_tenant_id):
-                    membership_mcp._audit_system_tokens[pushed_tenant_id] = system_service_token
-                    logger.debug(
-                        f"Cached system service token for tenant {pushed_tenant_id} "
-                        f"(pushed by Membership API, 24h validity, claims validated)"
-                    )
-                else:
-                    logger.warning(
-                        f"Skipped caching system token for tenant {pushed_tenant_id}: "
-                        f"claims validation failed (tenant mismatch or invalid subject)"
-                    )
-
-        # 从 arguments 中移除 system_service_token（它是传递给 MCP Router 的元数据，不是工具参数）
-        if "system_service_token" in arguments:
-            arguments = {k: v for k, v in arguments.items() if k != "system_service_token"}
+        arguments = await self.bind_authenticated_arguments(arguments, context, mcp_name, tool_name)
 
         # Inject per-MCP model provider configuration for external OCR/VLM MCPs.
         arguments = await self._inject_external_model_configs(
@@ -381,14 +346,10 @@ class MCPProtocolHandler:
 
         # 执行工具（传递JWT token和tenant_id）
         try:
-            effective_arguments = dict(arguments)
-            effective_arguments.setdefault("auth_token", jwt_token)
-            effective_arguments.setdefault("tenant_id", tenant_id)
-
             result = await registry.execute_command(
                 mcp_name=mcp_name,
                 tool_name=tool_name,
-                **effective_arguments
+                **arguments
             )
 
             return {
@@ -402,6 +363,54 @@ class MCPProtocolHandler:
         except Exception as e:
             logger.error(f"Tool execution error: {e}")
             raise
+
+    async def bind_authenticated_arguments(
+        self, arguments: dict, context: dict, mcp_name: str, tool_name: str
+    ) -> dict:
+        """Bind execution identity before processing any caller-supplied metadata."""
+        token = context.get("jwt_token")
+        tenant = context.get("client_info", {}).get("tenant_id")
+        if not isinstance(token, str) or not token.strip():
+            raise ValueError("Authenticated token required")
+        if isinstance(tenant, bool) or tenant is None or not str(tenant).isdigit() or int(tenant) <= 0:
+            raise ValueError("Authenticated tenant required")
+        if not isinstance(arguments, dict):
+            raise ValueError("Tool arguments must be an object")
+        args = dict(arguments)
+        if "auth_token" in args and args["auth_token"] != token:
+            raise ValueError("auth_token conflicts with authenticated identity")
+        for key in ("tenant_id", "_tenant_id"):
+            if key in args and (isinstance(args[key], bool) or str(args[key]) != str(tenant)):
+                raise ValueError(f"{key} conflicts with authenticated identity")
+        args["auth_token"] = token
+        args["tenant_id"] = tenant
+        if mcp_name == "pdf2md-enhanced" and "source_identity" in args:
+            identity = args["source_identity"]
+            if not isinstance(identity, dict) or identity.get("tenant_id") != str(tenant):
+                raise ValueError("source_identity_tenant_mismatch")
+        if mcp_name == "membership" and tool_name == "submit_audit_events_batch":
+            events = args.get("events")
+            if not isinstance(events, list) or not events or any(
+                not isinstance(event, dict) or str(event.get("tenant_id")) != str(tenant)
+                or ("tenantId" in event and str(event["tenantId"]) != str(tenant))
+                for event in events
+            ):
+                raise ValueError("Audit event tenant conflicts with authenticated identity")
+        system_token = args.pop("system_service_token", None)
+        args.pop("_tenant_id", None)
+        if system_token:
+            # Validate with the authority; decoding unsigned claims cannot authorize caching.
+            from src.mcp.auth_jwt import MCPJWTAuth, JWTAuthConfig
+            from src.core.config import settings
+            auth = MCPJWTAuth(JWTAuthConfig(settings.membership_service_url))
+            claims = await auth.validate_token(system_token)
+            if (str(claims.get("tenant_id")) != str(tenant)
+                    or not str(claims.get("sub", "")).startswith("system-service-")):
+                raise ValueError("Invalid audit service identity")
+            membership = context["registry"].get_mcp("membership")
+            if membership is not None and hasattr(membership, "_audit_system_tokens"):
+                membership._audit_system_tokens[tenant] = system_token
+        return args
 
     async def _inject_external_model_configs(
         self,
@@ -522,75 +531,6 @@ class MCPProtocolHandler:
         if len(value) <= 8:
             return "***"
         return f"{value[:4]}***{value[-4:]}"
-
-    @staticmethod
-    def _validate_system_token_claims(token: str, expected_tenant_id: Any) -> bool:
-        """
-        Issue #3 fix: Validate tenant claims consistency before caching.
-
-        This is a lightweight sanity check, NOT a security boundary.
-        Real security validation is done by Membership API when verifying the token.
-
-        Checks:
-        1. Decode JWT payload (without signature verification)
-        2. If payload has tenantId/tenant_id, verify it matches expected_tenant_id
-        3. If payload has 'sub' field, verify it follows system-service pattern
-
-        Args:
-            token: JWT token string
-            expected_tenant_id: Expected tenant ID from arguments
-
-        Returns:
-            True if claims are consistent (allow caching)
-            False if claims mismatch, token format invalid, or decode fails (skip caching)
-        """
-        import base64
-        import json
-
-        try:
-            # JWT format: header.payload.signature
-            parts = token.split('.')
-            if len(parts) != 3:
-                logger.warning("Invalid JWT format, refusing to cache")
-                return False  # Refuse caching for invalid format
-
-            # Decode payload (second part)
-            payload = parts[1]
-            # Add padding if needed
-            padding = 4 - len(payload) % 4
-            if padding != 4:
-                payload += '=' * padding
-
-            decoded = base64.urlsafe_b64decode(payload)
-            claims = json.loads(decoded)
-
-            # Check tenant ID consistency
-            token_tenant_id = claims.get("tenantId") or claims.get("tenant_id")
-            if token_tenant_id is not None:
-                # Convert to same type for comparison
-                if str(token_tenant_id) != str(expected_tenant_id):
-                    logger.warning(
-                        f"Token tenant mismatch: token has {token_tenant_id}, "
-                        f"expected {expected_tenant_id}, refusing to cache"
-                    )
-                    return False
-
-            # Check subject pattern for system service account
-            # Expected: system-service-t{tenantId} or similar pattern (must start with system-service-)
-            sub = claims.get("sub")
-            if sub:
-                if not sub.startswith("system-service-"):
-                    logger.warning(
-                        f"Token subject '{sub}' doesn't match system service pattern, "
-                        f"refusing to cache"
-                    )
-                    return False
-
-            return True
-
-        except Exception as e:
-            logger.warning(f"Failed to decode token claims: {e}, refusing to cache")
-            return False  # Refuse caching if validation fails
 
     async def _handle_resources_list(
         self,

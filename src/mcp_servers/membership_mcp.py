@@ -19,6 +19,8 @@ from ..services.llm_client import llm_client
 
 logger = logging.getLogger(__name__)
 
+_UNSET = object()
+
 
 class MembershipMCPServer(BaseMCPServer):
     """
@@ -36,13 +38,25 @@ class MembershipMCPServer(BaseMCPServer):
             auth_token: Authorization token for API calls
         """
         super().__init__("membership", "2.0")
-        self.tenant_id = tenant_id or settings.fixed_tenant_id
+        self.tenant_id = tenant_id
         self.auth_token = auth_token
         self.base_url = settings.membership_service_url
         # Pass membership_url as well so token refresh can work on 401
         self.http_client = HTTPClient(base_url=self.base_url, membership_url=self.base_url)
         self._audit_system_tokens: Dict[int, str] = {}
         self._register_tools()
+
+    def _execution_token(self, value):
+        token = self.auth_token if value is _UNSET else value
+        if not isinstance(token, str) or not token.strip():
+            raise ValueError("Explicit authentication token required")
+        return token
+
+    def _execution_tenant(self, value):
+        tenant = self.tenant_id if value is _UNSET else value
+        if isinstance(tenant, bool) or tenant is None or not str(tenant).isdigit() or int(tenant) <= 0:
+            raise ValueError("Explicit tenant required")
+        return tenant
 
     def _register_tools(self) -> None:
         """Register all Membership API tools."""
@@ -1817,14 +1831,14 @@ class MembershipMCPServer(BaseMCPServer):
         page: int = 1,
         limit: int = 10,
         search: Optional[str] = None,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET
     ) -> ToolResult:
         """List members."""
         try:
             # Determine which auth_token and tenant_id to use
-            effective_token = auth_token or self.auth_token
-            effective_tenant = tenant_id or self.tenant_id
+            effective_token = self._execution_token(auth_token)
+            effective_tenant = self._execution_tenant(tenant_id)
 
             # Validate that we have the required authentication
             if not effective_token:
@@ -1833,14 +1847,6 @@ class MembershipMCPServer(BaseMCPServer):
                     content="Authentication required. Please provide auth_token parameter.",
                     error_code="AUTH_REQUIRED"
                 )
-
-            # If no tenant_id, use default (for superadmin or system users)
-            if not effective_tenant:
-                logger.info("No tenant_id provided, using default tenant_id=1")
-                effective_tenant = 1
-
-            # Log for debugging
-            logger.debug(f"list_members called with token: {effective_token[:20] if effective_token else 'None'}..., tenant: {effective_tenant}")
 
             params = {
                 "query": {
@@ -1957,8 +1963,8 @@ class MembershipMCPServer(BaseMCPServer):
         response = await self.http_client.execute(
             command="GET /v2/roles",
             params={"query": {"page": 1, "limit": 100, "search": role_query}},
-            auth_token=auth_token or self.auth_token,
-            tenant_id=tenant_id or self.tenant_id,
+            auth_token=self._execution_token(auth_token),
+            tenant_id=self._execution_tenant(tenant_id),
         )
         roles = response.get("data", response.get("roles", []))
         candidates = [item for item in roles if isinstance(item, dict)]
@@ -1996,8 +2002,8 @@ class MembershipMCPServer(BaseMCPServer):
         response = await self.http_client.execute(
             command="GET /v2/resources",
             params=params,
-            auth_token=auth_token or self.auth_token,
-            tenant_id=tenant_id or self.tenant_id,
+            auth_token=self._execution_token(auth_token),
+            tenant_id=self._execution_tenant(tenant_id),
         )
         resources = response.get("data", response.get("resources", []))
         candidates = [item for item in resources if isinstance(item, dict)]
@@ -2027,8 +2033,8 @@ class MembershipMCPServer(BaseMCPServer):
         response = await self.http_client.execute(
             command="GET /v2/orgs",
             params={"query": {"page": 1, "limit": 100, "search": query}},
-            auth_token=auth_token or self.auth_token,
-            tenant_id=tenant_id or self.tenant_id,
+            auth_token=self._execution_token(auth_token),
+            tenant_id=self._execution_tenant(tenant_id),
         )
         orgs = response.get("data", response.get("orgs", []))
         candidates = [item for item in orgs if isinstance(item, dict)]
@@ -2101,8 +2107,8 @@ class MembershipMCPServer(BaseMCPServer):
         query: str,
         members: Optional[List[Dict[str, Any]]] = None,
         match_fields: Optional[List[str]] = None,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None,
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET,
     ) -> ToolResult:
         """Resolve a member ID from full member details or by querying the membership service."""
         try:
@@ -2112,12 +2118,12 @@ class MembershipMCPServer(BaseMCPServer):
                     error_code="INVALID_MEMBER_QUERY",
                 )
 
-            effective_token = auth_token or self.auth_token
-            effective_tenant = tenant_id or self.tenant_id or 1
             fields = match_fields or ["username", "fullName", "email", "nickname", "alias", "name"]
 
             candidate_members = members
             if not candidate_members:
+                effective_token = self._execution_token(auth_token)
+                effective_tenant = self._execution_tenant(tenant_id)
                 if not effective_token:
                     return ToolResult.error(
                         content="Authentication required to fetch members for member ID resolution.",
@@ -2189,13 +2195,13 @@ class MembershipMCPServer(BaseMCPServer):
         self,
         member_id: Optional[str] = None,
         query: Optional[str] = None,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None,
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET,
     ) -> ToolResult:
         """Get member details."""
         try:
-            effective_token = auth_token or self.auth_token
-            effective_tenant = tenant_id or self.tenant_id
+            effective_token = self._execution_token(auth_token)
+            effective_tenant = self._execution_tenant(tenant_id)
             resolved_member_id = member_id
             resolved_member = None
 
@@ -2257,8 +2263,8 @@ class MembershipMCPServer(BaseMCPServer):
         query: str,
         roles: Optional[List[Dict[str, Any]]] = None,
         match_fields: Optional[List[str]] = None,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None,
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET,
     ) -> ToolResult:
         """Resolve a role ID from role details or by querying the membership service."""
         try:
@@ -2268,12 +2274,12 @@ class MembershipMCPServer(BaseMCPServer):
                     error_code="INVALID_ROLE_QUERY",
                 )
 
-            effective_token = auth_token or self.auth_token
-            effective_tenant = tenant_id or self.tenant_id or 1
             fields = match_fields or ["name", "code", "description"]
 
             candidate_roles = roles
             if not candidate_roles:
+                effective_token = self._execution_token(auth_token)
+                effective_tenant = self._execution_tenant(tenant_id)
                 if not effective_token:
                     return ToolResult.error(
                         content="Authentication required to fetch roles for role ID resolution.",
@@ -2331,8 +2337,8 @@ class MembershipMCPServer(BaseMCPServer):
         system_code: Optional[str] = None,
         resource_type: Optional[str] = None,
         match_fields: Optional[List[str]] = None,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None,
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET,
     ) -> ToolResult:
         """Resolve a resource ID from resource details or by querying the membership service."""
         try:
@@ -2342,12 +2348,12 @@ class MembershipMCPServer(BaseMCPServer):
                     error_code="INVALID_RESOURCE_QUERY",
                 )
 
-            effective_token = auth_token or self.auth_token
-            effective_tenant = tenant_id or self.tenant_id or 1
             fields = match_fields or ["name", "system_code", "description", "type"]
 
             candidate_resources = resources
             if not candidate_resources:
+                effective_token = self._execution_token(auth_token)
+                effective_tenant = self._execution_tenant(tenant_id)
                 if not effective_token:
                     return ToolResult.error(
                         content="Authentication required to fetch resources for resource ID resolution.",
@@ -2409,8 +2415,8 @@ class MembershipMCPServer(BaseMCPServer):
         email: str,
         password: Optional[str] = None,
         is_virtual: bool = True,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET
     ) -> ToolResult:
         """Create a new member."""
         try:
@@ -2428,8 +2434,8 @@ class MembershipMCPServer(BaseMCPServer):
             response = await self.http_client.execute(
                 command="POST /v2/members",
                 params=params,
-                auth_token=auth_token or self.auth_token,
-                tenant_id=tenant_id or self.tenant_id
+                auth_token=self._execution_token(auth_token),
+                tenant_id=self._execution_tenant(tenant_id)
             )
 
             return ToolResult.success(
@@ -2449,8 +2455,8 @@ class MembershipMCPServer(BaseMCPServer):
         username: Optional[str] = None,
         email: Optional[str] = None,
         is_virtual: Optional[bool] = None,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET
     ) -> ToolResult:
         """Update member information."""
         try:
@@ -2477,8 +2483,8 @@ class MembershipMCPServer(BaseMCPServer):
             response = await self.http_client.execute(
                 command="PUT /v2/members/{member_id}",
                 params=params,
-                auth_token=auth_token or self.auth_token,
-                tenant_id=tenant_id or self.tenant_id
+                auth_token=self._execution_token(auth_token),
+                tenant_id=self._execution_tenant(tenant_id)
             )
 
             return ToolResult.success(
@@ -2492,7 +2498,7 @@ class MembershipMCPServer(BaseMCPServer):
                 error_code="UPDATE_MEMBER_FAILED"
             )
 
-    async def delete_member(self, member_id: str, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
+    async def delete_member(self, member_id: str, auth_token: Optional[str] = _UNSET, tenant_id: Optional[int] = _UNSET) -> ToolResult:
         """Delete a member."""
         try:
             params = {
@@ -2503,8 +2509,8 @@ class MembershipMCPServer(BaseMCPServer):
             response = await self.http_client.execute(
                 command="DELETE /v2/members/{member_id}",
                 params=params,
-                auth_token=auth_token or self.auth_token,
-                tenant_id=tenant_id or self.tenant_id
+                auth_token=self._execution_token(auth_token),
+                tenant_id=self._execution_tenant(tenant_id)
             )
 
             return ToolResult.success(
@@ -2522,8 +2528,8 @@ class MembershipMCPServer(BaseMCPServer):
         self,
         member_id: str,
         password: str,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET
     ) -> ToolResult:
         """Update a member's password."""
         try:
@@ -2544,8 +2550,8 @@ class MembershipMCPServer(BaseMCPServer):
             response = await self.http_client.execute(
                 command="POST /v2/members/{member_id}/password",
                 params=params,
-                auth_token=auth_token or self.auth_token,
-                tenant_id=tenant_id or self.tenant_id
+                auth_token=self._execution_token(auth_token),
+                tenant_id=self._execution_tenant(tenant_id)
             )
 
             return ToolResult.success(
@@ -2564,8 +2570,8 @@ class MembershipMCPServer(BaseMCPServer):
         page: int = 1,
         limit: int = 10,
         search: Optional[str] = None,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None,
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET,
     ) -> ToolResult:
         """List available roles."""
         try:
@@ -2580,8 +2586,8 @@ class MembershipMCPServer(BaseMCPServer):
             response = await self.http_client.execute(
                 command="GET /v2/roles",
                 params=params,
-                auth_token=auth_token or self.auth_token,
-                tenant_id=tenant_id or self.tenant_id
+                auth_token=self._execution_token(auth_token),
+                tenant_id=self._execution_tenant(tenant_id)
             )
 
             roles = response.get("data", response.get("roles", []))
@@ -2617,13 +2623,13 @@ class MembershipMCPServer(BaseMCPServer):
         description: Optional[str] = None,
         is_position: bool = False,
         active: bool = True,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET
     ) -> ToolResult:
         """Create a role in an organization."""
         try:
-            effective_token = auth_token or self.auth_token
-            effective_tenant = tenant_id or self.tenant_id
+            effective_token = self._execution_token(auth_token)
+            effective_tenant = self._execution_tenant(tenant_id)
             org_id_int = int(org_id)
 
             # Pre-check existing roles in this org:
@@ -2697,13 +2703,13 @@ class MembershipMCPServer(BaseMCPServer):
         role_id: Optional[str] = None,
         member_query: Optional[str] = None,
         role_query: Optional[str] = None,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None,
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET,
     ) -> ToolResult:
         """Assign a role to a member."""
         try:
-            effective_token = auth_token or self.auth_token
-            effective_tenant = tenant_id or self.tenant_id
+            effective_token = self._execution_token(auth_token)
+            effective_tenant = self._execution_tenant(tenant_id)
 
             resolved_member_id = member_id
             resolved_member = None
@@ -2766,8 +2772,8 @@ class MembershipMCPServer(BaseMCPServer):
         page: int = 1,
         limit: int = 10,
         search: Optional[str] = None,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None,
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET,
     ) -> ToolResult:
         """List all organization units."""
         try:
@@ -2782,8 +2788,8 @@ class MembershipMCPServer(BaseMCPServer):
             response = await self.http_client.execute(
                 command="GET /v2/orgs",
                 params=params,
-                auth_token=auth_token or self.auth_token,
-                tenant_id=tenant_id or self.tenant_id
+                auth_token=self._execution_token(auth_token),
+                tenant_id=self._execution_tenant(tenant_id)
             )
 
             orgs = response.get("data", response.get("orgs", []))
@@ -2816,8 +2822,8 @@ class MembershipMCPServer(BaseMCPServer):
         query: str,
         orgs: Optional[List[Dict[str, Any]]] = None,
         match_fields: Optional[List[str]] = None,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None,
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET,
     ) -> ToolResult:
         """Resolve an organization ID from organization details or by querying the membership service."""
         try:
@@ -2827,12 +2833,12 @@ class MembershipMCPServer(BaseMCPServer):
                     error_code="INVALID_ORG_QUERY",
                 )
 
-            effective_token = auth_token or self.auth_token
-            effective_tenant = tenant_id or self.tenant_id or 1
             fields = match_fields or ["name", "code", "type"]
 
             candidate_orgs = orgs
             if not candidate_orgs:
+                effective_token = self._execution_token(auth_token)
+                effective_tenant = self._execution_tenant(tenant_id)
                 if not effective_token:
                     return ToolResult.error(
                         content="Authentication required to fetch organizations for org ID resolution.",
@@ -2887,13 +2893,13 @@ class MembershipMCPServer(BaseMCPServer):
         self,
         org_id: Optional[str] = None,
         query: Optional[str] = None,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None,
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET,
     ) -> ToolResult:
         """Get organization unit details."""
         try:
-            effective_token = auth_token or self.auth_token
-            effective_tenant = tenant_id or self.tenant_id
+            effective_token = self._execution_token(auth_token)
+            effective_tenant = self._execution_tenant(tenant_id)
             resolved_org_id, resolved_org = await self._resolve_org_id(
                 org_id=org_id,
                 query=query,
@@ -2933,8 +2939,8 @@ class MembershipMCPServer(BaseMCPServer):
         org_id: str,
         direction: str = "both",
         max_depth: int = 5,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET
     ) -> ToolResult:
         """Get organization hierarchy (ancestors/descendants) by querying all orgs and building tree."""
         try:
@@ -2958,8 +2964,8 @@ class MembershipMCPServer(BaseMCPServer):
                 orgs_response = await self.http_client.execute(
                     command="GET /v2/orgs",
                     params={"query": {}},
-                    auth_token=auth_token or self.auth_token,
-                    tenant_id=tenant_id or self.tenant_id
+                    auth_token=self._execution_token(auth_token),
+                    tenant_id=self._execution_tenant(tenant_id)
                 )
                 
                 # Extract org list from response
@@ -3066,13 +3072,13 @@ class MembershipMCPServer(BaseMCPServer):
         include_inactive: bool = True,
         max_nodes: int = 80,
         direction: str = "TD",
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None,
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET,
     ) -> ToolResult:
         """Render organization tree as Mermaid markdown."""
         try:
-            effective_token = auth_token or self.auth_token
-            effective_tenant = tenant_id or self.tenant_id or 1
+            effective_token = self._execution_token(auth_token)
+            effective_tenant = self._execution_tenant(tenant_id)
 
             resolved_org_id: Optional[int] = None
             resolved_org: Optional[Dict[str, Any]] = None
@@ -3142,13 +3148,13 @@ class MembershipMCPServer(BaseMCPServer):
         is_temporary: bool = False,
         valid_until: Optional[str] = None,
         force_create: bool = False,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET
     ) -> ToolResult:
         """Create a new organization unit with semantic dedup safeguards."""
         try:
-            effective_token = auth_token or self.auth_token
-            effective_tenant = tenant_id or self.tenant_id
+            effective_token = self._execution_token(auth_token)
+            effective_tenant = self._execution_tenant(tenant_id)
 
             # Infer org type when omitted: root defaults to company, child defaults to dept
             inferred_type = type or ("company" if parent_id is None else "dept")
@@ -3243,8 +3249,8 @@ class MembershipMCPServer(BaseMCPServer):
         description: Optional[str] = None,
         is_temporary: Optional[bool] = None,
         valid_until: Optional[str] = None,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET
     ) -> ToolResult:
         """Update an organization unit."""
         try:
@@ -3273,8 +3279,8 @@ class MembershipMCPServer(BaseMCPServer):
             response = await self.http_client.execute(
                 command="PATCH /v2/orgs/{org_id}",
                 params=params,
-                auth_token=auth_token or self.auth_token,
-                tenant_id=tenant_id or self.tenant_id
+                auth_token=self._execution_token(auth_token),
+                tenant_id=self._execution_tenant(tenant_id)
             )
 
             return ToolResult.success(
@@ -3288,7 +3294,7 @@ class MembershipMCPServer(BaseMCPServer):
                 error_code="UPDATE_ORG_FAILED"
             )
 
-    async def delete_org(self, org_id: str, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
+    async def delete_org(self, org_id: str, auth_token: Optional[str] = _UNSET, tenant_id: Optional[int] = _UNSET) -> ToolResult:
         """Delete/archive an organization unit."""
         try:
             params = {
@@ -3299,8 +3305,8 @@ class MembershipMCPServer(BaseMCPServer):
             response = await self.http_client.execute(
                 command="DELETE /v2/orgs/{org_id}",
                 params=params,
-                auth_token=auth_token or self.auth_token,
-                tenant_id=tenant_id or self.tenant_id
+                auth_token=self._execution_token(auth_token),
+                tenant_id=self._execution_tenant(tenant_id)
             )
 
             return ToolResult.success(
@@ -3320,13 +3326,13 @@ class MembershipMCPServer(BaseMCPServer):
         org_id: Optional[str] = None,
         member_query: Optional[str] = None,
         org_query: Optional[str] = None,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None,
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET,
     ) -> ToolResult:
         """Assign a member to an organization unit."""
         try:
-            effective_token = auth_token or self.auth_token
-            effective_tenant = tenant_id or self.tenant_id
+            effective_token = self._execution_token(auth_token)
+            effective_tenant = self._execution_tenant(tenant_id)
 
             resolved_member_id = member_id
             resolved_member = None
@@ -3389,13 +3395,13 @@ class MembershipMCPServer(BaseMCPServer):
         member_id: Optional[str] = None,
         query: Optional[str] = None,
         org_id: Optional[int] = None,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None,
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET,
     ) -> ToolResult:
         """Get all roles a member has."""
         try:
-            effective_token = auth_token or self.auth_token
-            effective_tenant = tenant_id or self.tenant_id or 1
+            effective_token = self._execution_token(auth_token)
+            effective_tenant = self._execution_tenant(tenant_id)
             resolved_member_id = member_id
             resolved_member = None
 
@@ -3458,7 +3464,7 @@ class MembershipMCPServer(BaseMCPServer):
                 error_code="GET_MEMBER_ROLES_FAILED",
             )
 
-    async def get_member_orgs(self, member_id: str, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
+    async def get_member_orgs(self, member_id: str, auth_token: Optional[str] = _UNSET, tenant_id: Optional[int] = _UNSET) -> ToolResult:
         """Get all organizations a member belongs to."""
         try:
             params = {
@@ -3469,8 +3475,8 @@ class MembershipMCPServer(BaseMCPServer):
             response = await self.http_client.execute(
                 command="GET /v2/members/{member_id}/orgs",
                 params=params,
-                auth_token=auth_token or self.auth_token,
-                tenant_id=tenant_id or self.tenant_id
+                auth_token=self._execution_token(auth_token),
+                tenant_id=self._execution_tenant(tenant_id)
             )
 
             count = len(response.get("data", []))
@@ -3495,14 +3501,14 @@ class MembershipMCPServer(BaseMCPServer):
         ]
         return {key: kwargs[key] for key in allowed_fields if kwargs.get(key) is not None}
 
-    async def list_llm_providers(self, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
+    async def list_llm_providers(self, auth_token: Optional[str] = _UNSET, tenant_id: Optional[int] = _UNSET) -> ToolResult:
         """List all LLM providers."""
         try:
             response = await self.http_client.execute(
                 command="GET /v2/llm/providers",
                 params={},
-                auth_token=auth_token or self.auth_token,
-                tenant_id=tenant_id or self.tenant_id,
+                auth_token=self._execution_token(auth_token),
+                tenant_id=self._execution_tenant(tenant_id),
             )
             providers = response.get("providers", []) if isinstance(response, dict) else []
             return ToolResult.success(content=f"Found {len(providers)} LLM providers", data=response)
@@ -3510,14 +3516,14 @@ class MembershipMCPServer(BaseMCPServer):
             logger.error(f"Error listing LLM providers: {e}")
             return ToolResult.error(content=f"Failed to list LLM providers: {str(e)}", error_code="LIST_LLM_PROVIDERS_FAILED")
 
-    async def get_llm_provider(self, name: str, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
+    async def get_llm_provider(self, name: str, auth_token: Optional[str] = _UNSET, tenant_id: Optional[int] = _UNSET) -> ToolResult:
         """Get an LLM provider by name."""
         try:
             response = await self.http_client.execute(
                 command="GET /v2/llm/providers/{name}",
                 params={"path": {"name": name}},
-                auth_token=auth_token or self.auth_token,
-                tenant_id=tenant_id or self.tenant_id,
+                auth_token=self._execution_token(auth_token),
+                tenant_id=self._execution_tenant(tenant_id),
             )
             return ToolResult.success(content=f"Retrieved LLM provider {name}", data=response)
         except Exception as e:
@@ -3546,8 +3552,8 @@ class MembershipMCPServer(BaseMCPServer):
         supportedFormats: Optional[List[str]] = None,
         embeddingDimensions: Optional[int] = None,
         metadata: Optional[Dict[str, Any]] = None,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None,
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET,
     ) -> ToolResult:
         """Create an LLM provider."""
         try:
@@ -3555,8 +3561,8 @@ class MembershipMCPServer(BaseMCPServer):
             response = await self.http_client.execute(
                 command="POST /v2/llm/providers",
                 params={"body": payload},
-                auth_token=auth_token or self.auth_token,
-                tenant_id=tenant_id or self.tenant_id,
+                auth_token=self._execution_token(auth_token),
+                tenant_id=self._execution_tenant(tenant_id),
             )
             return ToolResult.success(content=f"Created LLM provider {name}", data=response)
         except Exception as e:
@@ -3585,8 +3591,8 @@ class MembershipMCPServer(BaseMCPServer):
         supportedFormats: Optional[List[str]] = None,
         embeddingDimensions: Optional[int] = None,
         metadata: Optional[Dict[str, Any]] = None,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None,
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET,
     ) -> ToolResult:
         """Update an LLM provider."""
         try:
@@ -3594,64 +3600,64 @@ class MembershipMCPServer(BaseMCPServer):
             response = await self.http_client.execute(
                 command="PUT /v2/llm/providers/{name}",
                 params={"path": {"name": name}, "body": payload},
-                auth_token=auth_token or self.auth_token,
-                tenant_id=tenant_id or self.tenant_id,
+                auth_token=self._execution_token(auth_token),
+                tenant_id=self._execution_tenant(tenant_id),
             )
             return ToolResult.success(content=f"Updated LLM provider {name}", data=response)
         except Exception as e:
             logger.error(f"Error updating LLM provider {name}: {e}")
             return ToolResult.error(content=f"Failed to update LLM provider: {str(e)}", error_code="UPDATE_LLM_PROVIDER_FAILED")
 
-    async def delete_llm_provider(self, name: str, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
+    async def delete_llm_provider(self, name: str, auth_token: Optional[str] = _UNSET, tenant_id: Optional[int] = _UNSET) -> ToolResult:
         """Delete an LLM provider by name."""
         try:
             response = await self.http_client.execute(
                 command="DELETE /v2/llm/providers/{name}",
                 params={"path": {"name": name}},
-                auth_token=auth_token or self.auth_token,
-                tenant_id=tenant_id or self.tenant_id,
+                auth_token=self._execution_token(auth_token),
+                tenant_id=self._execution_tenant(tenant_id),
             )
             return ToolResult.success(content=f"Deleted LLM provider {name}", data=response)
         except Exception as e:
             logger.error(f"Error deleting LLM provider {name}: {e}")
             return ToolResult.error(content=f"Failed to delete LLM provider: {str(e)}", error_code="DELETE_LLM_PROVIDER_FAILED")
 
-    async def set_llm_provider_enabled(self, name: str, enabled: bool, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
+    async def set_llm_provider_enabled(self, name: str, enabled: bool, auth_token: Optional[str] = _UNSET, tenant_id: Optional[int] = _UNSET) -> ToolResult:
         """Enable or disable an LLM provider."""
         try:
             response = await self.http_client.execute(
                 command="PATCH /v2/llm/providers/{name}/enabled",
                 params={"path": {"name": name}, "body": {"enabled": enabled}},
-                auth_token=auth_token or self.auth_token,
-                tenant_id=tenant_id or self.tenant_id,
+                auth_token=self._execution_token(auth_token),
+                tenant_id=self._execution_tenant(tenant_id),
             )
             return ToolResult.success(content=f"Set LLM provider {name} enabled={enabled}", data=response)
         except Exception as e:
             logger.error(f"Error setting LLM provider enabled state for {name}: {e}")
             return ToolResult.error(content=f"Failed to set LLM provider enabled state: {str(e)}", error_code="SET_LLM_PROVIDER_ENABLED_FAILED")
 
-    async def set_active_llm_provider(self, name: str, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
+    async def set_active_llm_provider(self, name: str, auth_token: Optional[str] = _UNSET, tenant_id: Optional[int] = _UNSET) -> ToolResult:
         """Set an LLM provider as active/default."""
         try:
             response = await self.http_client.execute(
                 command="PATCH /v2/llm/providers/{name}/active",
                 params={"path": {"name": name}},
-                auth_token=auth_token or self.auth_token,
-                tenant_id=tenant_id or self.tenant_id,
+                auth_token=self._execution_token(auth_token),
+                tenant_id=self._execution_tenant(tenant_id),
             )
             return ToolResult.success(content=f"Set active LLM provider to {name}", data=response)
         except Exception as e:
             logger.error(f"Error setting active LLM provider {name}: {e}")
             return ToolResult.error(content=f"Failed to set active LLM provider: {str(e)}", error_code="SET_ACTIVE_LLM_PROVIDER_FAILED")
 
-    async def list_llm_usage_configs(self, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
+    async def list_llm_usage_configs(self, auth_token: Optional[str] = _UNSET, tenant_id: Optional[int] = _UNSET) -> ToolResult:
         """List LLM usage configs."""
         try:
             response = await self.http_client.execute(
                 command="GET /v2/llm/usage-configs",
                 params={},
-                auth_token=auth_token or self.auth_token,
-                tenant_id=tenant_id or self.tenant_id,
+                auth_token=self._execution_token(auth_token),
+                tenant_id=self._execution_tenant(tenant_id),
             )
             configs = response.get("configs", []) if isinstance(response, dict) else []
             return ToolResult.success(content=f"Found {len(configs)} LLM usage configs", data=response)
@@ -3665,8 +3671,8 @@ class MembershipMCPServer(BaseMCPServer):
         providerNames: List[str],
         fallbackToEnv: bool = True,
         description: Optional[str] = None,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None,
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET,
     ) -> ToolResult:
         """Create or update an LLM usage config."""
         try:
@@ -3676,36 +3682,36 @@ class MembershipMCPServer(BaseMCPServer):
             response = await self.http_client.execute(
                 command="PUT /v2/llm/usage-configs/{purpose}",
                 params={"path": {"purpose": purpose}, "body": payload},
-                auth_token=auth_token or self.auth_token,
-                tenant_id=tenant_id or self.tenant_id,
+                auth_token=self._execution_token(auth_token),
+                tenant_id=self._execution_tenant(tenant_id),
             )
             return ToolResult.success(content=f"Saved LLM usage config {purpose}", data=response)
         except Exception as e:
             logger.error(f"Error upserting LLM usage config {purpose}: {e}")
             return ToolResult.error(content=f"Failed to upsert LLM usage config: {str(e)}", error_code="UPSERT_LLM_USAGE_CONFIG_FAILED")
 
-    async def delete_llm_usage_config(self, purpose: str, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
+    async def delete_llm_usage_config(self, purpose: str, auth_token: Optional[str] = _UNSET, tenant_id: Optional[int] = _UNSET) -> ToolResult:
         """Delete an LLM usage config."""
         try:
             response = await self.http_client.execute(
                 command="DELETE /v2/llm/usage-configs/{purpose}",
                 params={"path": {"purpose": purpose}},
-                auth_token=auth_token or self.auth_token,
-                tenant_id=tenant_id or self.tenant_id,
+                auth_token=self._execution_token(auth_token),
+                tenant_id=self._execution_tenant(tenant_id),
             )
             return ToolResult.success(content=f"Deleted LLM usage config {purpose}", data=response)
         except Exception as e:
             logger.error(f"Error deleting LLM usage config {purpose}: {e}")
             return ToolResult.error(content=f"Failed to delete LLM usage config: {str(e)}", error_code="DELETE_LLM_USAGE_CONFIG_FAILED")
 
-    async def resolve_llm_usage_config(self, purpose: str, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
+    async def resolve_llm_usage_config(self, purpose: str, auth_token: Optional[str] = _UNSET, tenant_id: Optional[int] = _UNSET) -> ToolResult:
         """Preview resolved providers for an LLM usage purpose."""
         try:
             response = await self.http_client.execute(
                 command="GET /v2/llm/usage-configs/{purpose}/resolved",
                 params={"path": {"purpose": purpose}},
-                auth_token=auth_token or self.auth_token,
-                tenant_id=tenant_id or self.tenant_id,
+                auth_token=self._execution_token(auth_token),
+                tenant_id=self._execution_tenant(tenant_id),
             )
             count = response.get("count", 0) if isinstance(response, dict) else 0
             return ToolResult.success(content=f"Resolved {count} providers for LLM usage {purpose}", data=response)
@@ -3722,13 +3728,13 @@ class MembershipMCPServer(BaseMCPServer):
         description: Optional[str] = None,
         page: int = 1,
         page_size: int = 20,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None,
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET,
     ) -> ToolResult:
         """Root/admin tenant management task tool."""
         try:
-            effective_token = auth_token or self.auth_token
-            effective_tenant = tenant_id or self.tenant_id or 1
+            effective_token = self._execution_token(auth_token)
+            effective_tenant = self._execution_tenant(tenant_id)
             normalized_action = str(action or "").strip().lower()
 
             if normalized_action == "list":
@@ -3882,13 +3888,13 @@ class MembershipMCPServer(BaseMCPServer):
         start_time: Optional[str] = None,
         end_time: Optional[str] = None,
         status: Optional[str] = None,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None,
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET,
     ) -> ToolResult:
         """Root/admin agent management task tool."""
         try:
-            effective_token = auth_token or self.auth_token
-            effective_tenant = tenant_id or self.tenant_id or 1
+            effective_token = self._execution_token(auth_token)
+            effective_tenant = self._execution_tenant(tenant_id)
             normalized_action = str(action or "").strip().lower()
 
             if normalized_action == "list":
@@ -3984,13 +3990,13 @@ class MembershipMCPServer(BaseMCPServer):
         key: Optional[str] = None,
         value: Optional[str] = None,
         description: Optional[str] = None,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None,
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET,
     ) -> ToolResult:
         """Root/admin settings management task tool."""
         try:
-            effective_token = auth_token or self.auth_token
-            effective_tenant = tenant_id or self.tenant_id or 1
+            effective_token = self._execution_token(auth_token)
+            effective_tenant = self._execution_tenant(tenant_id)
             normalized_action = str(action or "").strip().lower()
 
             if normalized_action == "list":
@@ -4055,8 +4061,8 @@ class MembershipMCPServer(BaseMCPServer):
         operator_id: Optional[int] = None,
         action_type: Optional[str] = None,
         target_type: Optional[str] = None,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None,
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET,
     ) -> ToolResult:
         """Query audit logs."""
         try:
@@ -4075,8 +4081,8 @@ class MembershipMCPServer(BaseMCPServer):
             response = await self.http_client.execute(
                 command="GET /v2/audit/logs",
                 params={"query": query},
-                auth_token=auth_token or self.auth_token,
-                tenant_id=tenant_id or self.tenant_id or 1,
+                auth_token=self._execution_token(auth_token),
+                tenant_id=self._execution_tenant(tenant_id),
             )
             logs = response.get("data", []) if isinstance(response, dict) else []
             return ToolResult.success(content=f"Found {len(logs)} audit logs", data=response)
@@ -4104,13 +4110,13 @@ class MembershipMCPServer(BaseMCPServer):
         permission_action: Optional[str] = None,
         org_id: Optional[int] = None,
         on_behalf_of: Optional[int] = None,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None,
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET,
     ) -> ToolResult:
         """Authentication/session management task tool."""
         try:
-            effective_token = auth_token or self.auth_token
-            effective_tenant = tenant_id or self.tenant_id or 1
+            effective_token = self._execution_token(auth_token)
+            effective_tenant = self._execution_tenant(tenant_id)
             normalized_action = str(action or "").strip().lower()
 
             if normalized_action == "issue_token":
@@ -4222,14 +4228,14 @@ class MembershipMCPServer(BaseMCPServer):
         subject_id: Optional[str] = None,
         query: Optional[str] = None,
         org_id: Optional[int] = None,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None,
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET,
     ) -> ToolResult:
         """Get permissions directly assigned to a subject."""
         try:
             normalized_subject_type = str(subject_type or "").strip().lower()
-            effective_token = auth_token or self.auth_token
-            effective_tenant = tenant_id or self.tenant_id or 1
+            effective_token = self._execution_token(auth_token)
+            effective_tenant = self._execution_tenant(tenant_id)
 
             # Detect language from query for bilingual output
             def _detect_language(text: Optional[str]) -> str:
@@ -4346,13 +4352,13 @@ class MembershipMCPServer(BaseMCPServer):
         member_id: Optional[str] = None,
         query: Optional[str] = None,
         org_id: Optional[int] = None,
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None,
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET,
     ) -> ToolResult:
         """Get a member's effective permissions from available APIs."""
         try:
-            effective_token = auth_token or self.auth_token
-            effective_tenant = tenant_id or self.tenant_id or 1
+            effective_token = self._execution_token(auth_token)
+            effective_tenant = self._execution_tenant(tenant_id)
 
             member_result = await self.get_member(
                 member_id=member_id,
@@ -4483,7 +4489,7 @@ class MembershipMCPServer(BaseMCPServer):
                 error_code="GET_MEMBER_EFFECTIVE_PERMISSIONS_FAILED",
             )
 
-    async def remove_member_from_org(self, member_id: str, org_id: str, auth_token: Optional[str] = None, tenant_id: Optional[int] = None) -> ToolResult:
+    async def remove_member_from_org(self, member_id: str, org_id: str, auth_token: Optional[str] = _UNSET, tenant_id: Optional[int] = _UNSET) -> ToolResult:
         """Remove a member from an organization unit."""
         try:
             params = {
@@ -4495,8 +4501,8 @@ class MembershipMCPServer(BaseMCPServer):
             response = await self.http_client.execute(
                 command="DELETE /v2/members/{member_id}/orgs/{org_id}",
                 params=params,
-                auth_token=auth_token or self.auth_token,
-                tenant_id=tenant_id or self.tenant_id
+                auth_token=self._execution_token(auth_token),
+                tenant_id=self._execution_tenant(tenant_id)
             )
 
             return ToolResult.success(
@@ -4517,8 +4523,8 @@ class MembershipMCPServer(BaseMCPServer):
         type: str,
         description: Optional[str] = None,
         access_mode: str = "whitelist",
-        auth_token: Optional[str] = None,
-        tenant_id: Optional[int] = None,
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET,
     ) -> ToolResult:
         """Create a new resource."""
         try:
@@ -4534,8 +4540,8 @@ class MembershipMCPServer(BaseMCPServer):
             response = await self.http_client.execute(
                 command="POST /v2/resources",
                 params={"body": payload},
-                auth_token=auth_token or self.auth_token,
-                tenant_id=tenant_id or self.tenant_id,
+                auth_token=self._execution_token(auth_token),
+                tenant_id=self._execution_tenant(tenant_id),
             )
 
             return ToolResult.success(
@@ -4737,7 +4743,7 @@ class MembershipMCPServer(BaseMCPServer):
             return cached
 
         # 优先级2（Fallback）：用用户 token 换取系统服务 token
-        source_token = user_token or self.auth_token
+        source_token = self.auth_token if user_token is _UNSET else user_token
         if not source_token:
             logger.warning(f"No valid auth token available for tenant {tenant_id}, audit will be skipped")
             return None
@@ -4786,7 +4792,7 @@ class MembershipMCPServer(BaseMCPServer):
         target: Optional[Dict[str, Any]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         occurred_at: Optional[str] = None,
-        auth_token: Optional[str] = None
+        auth_token: Optional[str] = _UNSET
     ) -> ToolResult:
         """Submit a single audit event."""
         import httpx  # For HTTPStatusError handling
@@ -4885,7 +4891,7 @@ class MembershipMCPServer(BaseMCPServer):
     async def submit_audit_events_batch(
         self,
         events: list,
-        auth_token: Optional[str] = None
+        auth_token: Optional[str] = _UNSET
     ) -> ToolResult:
         """Submit multiple audit events."""
         import httpx  # For HTTPStatusError handling

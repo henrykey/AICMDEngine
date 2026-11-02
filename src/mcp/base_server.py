@@ -107,7 +107,7 @@ class BaseMCPServer(ABC):
                 # If no input schema, pass all kwargs
                 filtered_kwargs = kwargs
 
-            logger.debug(f"Executing tool '{tool_name}' in MCP '{self.name}' with params: {filtered_kwargs}")
+            logger.debug("Executing tool %s in MCP %s", tool_name, self.name)
             result = await tool.handler(**filtered_kwargs)
             return result
         except TypeError as e:

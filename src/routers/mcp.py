@@ -10,7 +10,8 @@ import logging
 
 from src.core.config import settings
 from src.mcp.registry import MCPRegistry, ToolResult
-from src.mcp.protocol_handler import choose_vlm_injection_key, get_tool_schema_properties
+from src.mcp.auth_jwt import MCPJWTAuth, JWTAuthConfig
+from src.mcp.protocol_handler import MCPProtocolHandler, choose_vlm_injection_key, get_tool_schema_properties
 
 logger = logging.getLogger(__name__)
 
@@ -263,6 +264,19 @@ async def execute_mcp_tool(
 
     # Read parameters from request body
     kwargs = await request.json()
+
+    header = request.headers.get("authorization", "")
+    if not header.startswith("Bearer ") or not header[7:].strip():
+        raise HTTPException(status_code=401, detail="Bearer token required")
+    token = header[7:]
+    auth = MCPJWTAuth(JWTAuthConfig(settings.membership_service_url))
+    claims = await auth.validate_token(token)
+    try:
+        kwargs = await MCPProtocolHandler().bind_authenticated_arguments(kwargs, {
+            "jwt_token": token, "client_info": auth.extract_client_info(claims), "registry": registry,
+        }, server_name, tool_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     # Extract "llm" parameter if present
     llm_provider = kwargs.pop("llm", None)

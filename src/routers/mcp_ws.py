@@ -69,7 +69,7 @@ async def mcp_websocket_endpoint(
     # 保存原始JWT token用于后续API调用
     token = websocket.query_params.get("token")
     auth_header = websocket.headers.get("authorization", "")
-    if auth_header.startswith("Bearer "):
+    if not token and auth_header.startswith("Bearer "):
         token = auth_header[7:]
 
     if not token:
@@ -145,7 +145,7 @@ async def mcp_websocket_endpoint(
             try:
                 message = json.loads(raw_data)
                 message_id = message.get("id") if isinstance(message, dict) else None
-                logger.debug(f"Received message from {client_id}: {message}")
+                logger.debug("Received MCP message from %s", client_id)
 
                 response = await protocol_handler.handle_message(message, context)
 
@@ -248,7 +248,7 @@ async def _log_tool_execution(
         arguments = params.get("arguments", {})
 
         result = response_message.get("result", {})
-        is_error = result.get("isError", False)
+        is_error = bool(response_message.get("error")) or result.get("isError", False)
 
         if is_error:
             content = result.get("content", [{}])[0]

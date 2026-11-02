@@ -99,7 +99,7 @@ class MCPRegistry:
             else:
                 logger.info(f"[{mcp_name}] Using specified LLM provider: {llm_provider}")
 
-        logger.debug(f"Executing {mcp_name}.{tool_name} with params: {kwargs}")
+        logger.debug("Executing %s.%s", mcp_name, tool_name)
 
         # Add validated llm_provider to kwargs if provided and valid
         if llm_provider is not None:
