@@ -38,6 +38,9 @@ tests/__pycache__
 # Git worktrees
 .worktrees/
 
+# Machine-local Python version
+.python-version
+
 # Node frontend artifacts
 plan-ui/node_modules/
 plan2/node_modules/
