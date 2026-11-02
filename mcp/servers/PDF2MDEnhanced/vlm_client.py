@@ -1026,7 +1026,7 @@ class DynamicVLMClient:
             )
         if block.get("recovery_error"):
             prompt += " Previous validation error: " + str(block["recovery_error"]) + "."
-        budget = max(1, min(self.max_tokens, 16384))
+        budget = max(1, self.max_tokens if block.get("recovery_target") == "cell_images" else min(self.max_tokens, 16384))
         self.last_call_info = {}
         self.last_object_call_info = {}
         text = self._call_image_prompt(image_path, prompt, max_tokens=budget,

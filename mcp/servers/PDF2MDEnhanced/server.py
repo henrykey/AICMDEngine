@@ -26,7 +26,7 @@ PAGE_TIMEOUT_SEC = int(os.getenv("PDF2MD_ENH_PAGE_TIMEOUT_SEC", "600"))
 VLM_CALL_TIMEOUT_CAP_SEC = int(os.getenv("PDF2MD_ENH_VLM_CALL_TIMEOUT_CAP_SEC", "600"))
 PAGE_TIMEOUT_GUARD_SEC = int(os.getenv("PDF2MD_ENH_PAGE_TIMEOUT_GUARD_SEC", "20"))
 VLM_MAX_RETRIES_CAP = int(os.getenv("PDF2MD_ENH_VLM_MAX_RETRIES_CAP", "0"))
-VLM_MAX_TOKENS_CAP = int(os.getenv("PDF2MD_ENH_VLM_MAX_TOKENS_CAP", "16384"))
+VLM_MAX_TOKENS_CAP = int(os.getenv("PDF2MD_ENH_VLM_MAX_TOKENS_CAP", "32768"))
 logger = logging.getLogger(__name__)
 
 mcp = FastMCP(name="pdf2md-enhanced", mask_error_details=True)

@@ -163,6 +163,30 @@ def test_object_client_contract_is_crop_specific_budgeted_and_redacted(kind):
     assert client.last_object_call_info["finish_reason"] == "stop"
 
 
+def test_vlm_output_cap_is_configurable(monkeypatch):
+    from tests.test_pdf2md_enhanced_single_page_tools import server
+    monkeypatch.setattr(server, "VLM_MAX_TOKENS_CAP", 32768)
+    assert server._normalize_vlm_config({"max_tokens": 32768})["max_tokens"] == 32768
+    assert server._normalize_vlm_config({"max_tokens": 65536})["max_tokens"] == 32768
+    assert server._normalize_vlm_config({"max_tokens": 4096})["max_tokens"] == 4096
+
+
+def test_cell_image_recovery_uses_configured_output_budget():
+    client = VLMClient.__new__(VLMClient)
+    client.max_tokens = 32768
+    client.description_language = "unknown"
+    client.last_call_info = {}
+    calls = []
+    def mock_call(path, prompt, max_tokens, **kwargs):
+        calls.append(max_tokens)
+        client.last_call_info = {"mode": "stream", "finish_reason": "stop", "effective_max_tokens": max_tokens}
+        return json.dumps(candidate())
+    client._call_image_prompt = mock_call
+    client.extract_object_structured("crop.png", {**block(), "recovery_target": "cell_images"})
+    assert calls == [32768]
+    assert client.last_object_call_info["effective_max_tokens"] == 32768
+
+
 def test_object_client_never_raises_injected_budget_and_marks_invalid_json():
     client = VLMClient.__new__(VLMClient)
     client.max_tokens = 2048
