@@ -1331,8 +1331,9 @@ def _recover_layout_objects(
                 if not reason and recover_images:
                     table = next(t for t in layout_outcome["payloads"]["tables"] if t["layout_id"] == layout_id)
                     table.update(recovered_table)
-                    attempt.update(outcome="recovered", reason="validated_cell_images")
-                    item_diagnostics.update(outcome="recovered", provider=provider)
+                    partial = recovered_table.get("cell_image_inspection_status") == "partial"
+                    attempt.update(outcome="partial" if partial else "recovered", reason="partial_cell_images" if partial else "validated_cell_images")
+                    item_diagnostics.update(outcome="partial" if partial else "recovered", provider=provider)
                     break
                 if not reason:
                     recovered_type = validated_block["type"]
@@ -1462,7 +1463,7 @@ def _recover_missing_table_images(image_path, output_dir, payloads, vlm, enabled
         max(0, max_objects - len(prior_objects)), 0,
         source_dpi=source_dpi, max_model_calls=remaining, provider_plan=provider_plan)
     for obj in result["objects"]:
-        if obj["outcome"] != "recovered":
+        if obj["outcome"] not in ("recovered", "partial"):
             table = next(t for t in payloads["tables"] if t.get("layout_id") == obj["layout_id"])
             reason = obj.get("reason") or next((a.get("reason") for a in reversed(obj["attempts"]) if a.get("reason")), "missing_cell_image_geometry")
             table.setdefault("image_unresolved", []).append({"reason": reason, "stage": "cell_image_recovery"})
@@ -1578,28 +1579,38 @@ def _validate_cell_image_recovery(block, candidate, crop_info, image_path):
     # Reuse calculation-source cut validation before accepting or materializing it.
     from PIL import Image
     from .calculation_blocks import boundary_intersects_content, expand_clipped_image_bbox, image_has_foreground
+    failed_regions = []
     with Image.open(image_path) as page_image:
         for cell in result["source_cells"]:
+            valid_regions = []
             for region in cell.get("image_regions", []):
-                # Blank/pale background alone cannot establish an illustration. Keep
-                # the table and retry location rather than materializing a false figure.
+                reason = None
                 if not image_has_foreground(page_image, region["bbox"], block["bbox"]):
-                    return "cell_image_nonvisual_content", None
-                if not boundary_intersects_content(page_image, region["bbox"], allow_thin_rules=False):
-                    continue
-                rows = max(c["row"] + c.get("rowspan", 1) for c in origins.values())
-                cols = max(c["col"] + c.get("colspan", 1) for c in origins.values())
-                expanded = expand_clipped_image_bbox(page_image, region["bbox"], block.get("bbox"), grid_shape=(rows, cols))
-                if expanded is None:
-                    return "cell_image_boundary_intersects_content", None
-                region["bbox"] = expanded
-                # The provider may have clipped the cell and image together. Keep
-                # its parsed identity/spans, enlarging geometry only to contain ink.
-                cell["bbox"] = [min(cell["bbox"][0], expanded[0]), min(cell["bbox"][1], expanded[1]),
-                                max(cell["bbox"][2], expanded[2]), max(cell["bbox"][3], expanded[3])]
-        if _table_image_problem({**result, "image_unresolved": []}):
+                    reason = "cell_image_nonvisual_content"
+                elif boundary_intersects_content(page_image, region["bbox"], allow_thin_rules=False):
+                    rows = max(c["row"] + c.get("rowspan", 1) for c in origins.values())
+                    cols = max(c["col"] + c.get("colspan", 1) for c in origins.values())
+                    expanded = expand_clipped_image_bbox(page_image, region["bbox"], block.get("bbox"), grid_shape=(rows, cols))
+                    if expanded is None:
+                        reason = "cell_image_boundary_intersects_content"
+                    else:
+                        region["bbox"] = expanded
+                        cell["bbox"] = [min(cell["bbox"][0], expanded[0]), min(cell["bbox"][1], expanded[1]),
+                                        max(cell["bbox"][2], expanded[2]), max(cell["bbox"][3], expanded[3])]
+                if reason:
+                    failed_regions.append({"reason": reason, "stage": "cell_image_recovery",
+                                           "row": cell["row"], "col": cell["col"],
+                                           "image_id": region.get("image_id")})
+                else:
+                    valid_regions.append(region)
+            cell["image_regions"] = valid_regions
+        valid_cells = [cell for cell in result["source_cells"] if cell.get("image_regions")]
+        if not valid_cells and failed_regions:
+            return failed_regions[0]["reason"], None
+        if _table_image_problem({**result, "source_cells": valid_cells, "image_unresolved": []}):
             return "invalid_cell_image_geometry", None
-    result["cell_image_inspection_status"] = "complete"
+    result["image_unresolved"].extend(failed_regions)
+    result["cell_image_inspection_status"] = "partial" if failed_regions else "complete"
     result["manualReviewRequired"] = bool(result.get("image_unresolved") or result.get("degraded") or result.get("warnings")
         or result.get("table_kind", "data_table") != "data_table"
         or (block.get("manualReviewRequired") and not block.get("image_unresolved")))

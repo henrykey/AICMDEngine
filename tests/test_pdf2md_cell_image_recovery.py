@@ -955,3 +955,65 @@ def test_drawing_line_in_multirow_grid_is_not_removed_when_grid_count_conflicts(
     draw.line((118, 42, 118, 358), fill=0, width=2)
     original = [100, 80, 300, 320]
     assert blocks._trim_crossed_table_rules(image, original, [40, 40, 362, 362], 4, (3, 1)) == original
+
+
+def test_one_bad_region_does_not_discard_valid_region(source_image, monkeypatch):
+    blocks = importlib.import_module(sp.__package__ + '.calculation_blocks')
+    monkeypatch.setattr(blocks, 'image_has_foreground', lambda image, bbox, table: True)
+    monkeypatch.setattr(blocks, 'boundary_intersects_content', lambda image, bbox, **kwargs: bbox[0] > .5)
+    monkeypatch.setattr(blocks, 'expand_clipped_image_bbox', lambda *args, **kwargs: None)
+    target = table_target()
+    response = geometry(target)
+    response['source_cells'][0]['image_regions'] = [
+        {'image_id': 'ok', 'bbox': [.1, .2, .4, .8], 'bbox_space': 'normalized_crop'},
+        {'image_id': 'bad', 'bbox': [.6, .2, .9, .8], 'bbox_space': 'normalized_crop'},
+    ]
+    reason, table = pp._validate_cell_image_recovery(target, response, {'pixel_bbox': [40, 20, 160, 80]}, source_image)
+    assert reason == ''
+    assert [region['image_id'] for region in table['source_cells'][0]['image_regions']] == ['ok']
+    assert table['cell_image_inspection_status'] == 'partial'
+    assert any(issue['reason'] == 'cell_image_boundary_intersects_content'
+               and issue['row'] == 0 and issue['col'] == 0 for issue in table['image_unresolved'])
+
+
+def test_partial_recovery_materializes_valid_figure_and_preserves_failure(source_image, tmp_path, monkeypatch):
+    blocks = importlib.import_module(sp.__package__ + '.calculation_blocks')
+    monkeypatch.setattr(blocks, 'image_has_foreground', lambda image, bbox, table: True)
+    monkeypatch.setattr(blocks, 'boundary_intersects_content', lambda image, bbox, **kwargs: bbox[0] > .5)
+    monkeypatch.setattr(blocks, 'expand_clipped_image_bbox', lambda *args, **kwargs: None)
+    target = table_target()
+    response = geometry(target)
+    response['source_cells'][0]['image_regions'] = [
+        {'image_id': 'ok', 'bbox': [.1, .2, .4, .8], 'bbox_space': 'normalized_crop'},
+        {'image_id': 'bad', 'bbox': [.6, .2, .9, .8], 'bbox_space': 'normalized_crop'},
+    ]
+    payload = {'tables': [target], 'figures': []}
+    with monkeypatch.context() as context:
+        context.setattr(pp, '_crop_layout_block_image', lambda *args, **kwargs:
+                        (source_image, {'pixel_bbox': [40, 20, 160, 80], 'width': 120, 'height': 60}))
+        _, _, diagnostics = pp._recover_layout_objects(source_image, tmp_path, {'payloads': payload},
+            [{**target, 'type': 'table', 'recovery_target': 'cell_images'}], GeometryClient([response]), True, 1, 0,
+            max_model_calls=1, provider_plan=['vlm_ocr'])
+    assert diagnostics['objects'][0]['outcome'] == 'partial'
+    assert target['cell_image_inspection_status'] == 'partial'
+    assert target['image_unresolved'][0]['reason'] == 'cell_image_boundary_intersects_content'
+    pp._attach_figure_assets(source_image, payload, 3)
+    assert len(payload['figures']) == 1
+    assert payload['figures'][0]['image_asset']['status'] == 'available'
+    assert payload['figures'][0]['cell_image_source']['cell_source'] == 'r0c0'
+
+
+def test_partial_recovery_keeps_existing_non_image_cell(source_image, monkeypatch):
+    blocks = importlib.import_module(sp.__package__ + '.calculation_blocks')
+    monkeypatch.setattr(blocks, 'image_has_foreground', lambda image, bbox, table: True)
+    monkeypatch.setattr(blocks, 'boundary_intersects_content', lambda image, bbox, **kwargs: bbox[0] > .5)
+    monkeypatch.setattr(blocks, 'expand_clipped_image_bbox', lambda *args, **kwargs: None)
+    target = {**table_target(), 'markdown': '<table><tr><td>image</td><td>text</td></tr></table>',
+              'source_cells': [{'row': 0, 'col': 1, 'text': 'text', 'rowspan': 1, 'colspan': 1}]}
+    response = geometry(target)
+    response['source_cells'][0]['image_regions'] = [
+        {'image_id': 'ok', 'bbox': [.1, .2, .4, .8], 'bbox_space': 'normalized_crop'},
+        {'image_id': 'bad', 'bbox': [.6, .2, .9, .8], 'bbox_space': 'normalized_crop'}]
+    reason, table = pp._validate_cell_image_recovery(target, response, {'pixel_bbox': [40, 20, 160, 80]}, source_image)
+    assert reason == ''
+    assert any(cell['row'] == 0 and cell['col'] == 1 and cell['text'] == 'text' for cell in table['source_cells'])
