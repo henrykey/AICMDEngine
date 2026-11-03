@@ -75,13 +75,14 @@ def test_requested_figure_plate_reuses_table_geometry_and_preserves_text():
     bbox = [.14, .07, .88, .8]
     outcome = {"layout": [
         {"layout_id": "caption", "type": "text", "content": "<div>FIGURE N-1.2</div>"},
-        {"layout_id": "p2-o002-table", "type": "table", "content": table_html, "bbox": bbox, "bbox_space": "normalized_page", "status": "EXTRACTED"},
+        {"layout_id": "p2-o002-table", "type": "table", "content": table_html, "bbox": bbox, "bbox_space": "normalized_page", "status": "EXTRACTED", "reading_order": 2, "source_block_index": 1},
     ], "markdown": "FIGURE N-1.2\n\n" + table_html, "payloads": {"tables": [
         {"layout_id": "p2-o002-table", "bbox": bbox, "bbox_space": "normalized_page", "markdown": table_html}], "figures": [], "formulas": []}}
     page_processor._bind_requested_figure_plates(outcome, ["p2-o002-table"])
     assert outcome["payloads"]["tables"] == []
     figure = outcome["payloads"]["figures"][0]
     assert figure["bbox"] == bbox and figure["caption"] == "FIGURE N-1.2"
+    assert figure["reading_order"] == 2 and figure["source_block_index"] == 1
     assert "[FIGURE:p2-o002-table]" in outcome["markdown"]
     assert "CHANNEL AND REMOVABLE COVER" in outcome["markdown"]
 
@@ -120,7 +121,7 @@ def test_figure_plate_uses_saved_ocr_and_existing_page_semantics(monkeypatch):
     monkeypatch.setattr(processor, "process_page", rounds)
     table = "<table><tr><td>A</td><td>CHANNEL</td></tr></table>"
     raw = fixture._layout_raw([{"label": "text", "bbox_2d": [40, 4, 60, 8], "content": "FIGURE N-1.2"},
-                               {"label": "table", "bbox_2d": [10, 8, 90, 90], "content": table}],
+                               {"label": "table", "index": 1, "bbox_2d": [10, 8, 90, 90], "content": table}],
                               markdown="FIGURE N-1.2\n\n" + table)
     result = fixture._run_layout_ledger_page(monkeypatch, raw)
     assert len(fixture.LayoutLedgerGLMOcrClient.calls) == 1
@@ -129,6 +130,7 @@ def test_figure_plate_uses_saved_ocr_and_existing_page_semantics(monkeypatch):
     figure = result["rag"]["elements"]["figures"][0]
     assert figure["caption"] == "FIGURE N-1.2" and figure["description"] == "A plate of exchanger types"
     assert figure["image_asset"]["status"] == "available"
+    assert figure["reading_order"] == 2 and figure["source_block_index"] == 1
     assert "CHANNEL" in result["rag"]["page_text"]
 
 

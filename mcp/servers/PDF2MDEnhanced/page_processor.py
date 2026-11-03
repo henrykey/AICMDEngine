@@ -660,6 +660,8 @@ def _bind_requested_figure_plates(outcome: Dict[str, Any], requests: Any) -> Non
         outcome["payloads"]["tables"].remove(table)
         outcome["payloads"]["figures"].append({"layout_id": layout_id, "bbox": entry["bbox"],
             "bbox_space": entry["bbox_space"], "caption": caption, "description": "",
+            **{key: entry[key] for key in ("reading_order", "source_block_index")
+               if type(entry.get(key)) is int and entry[key] >= 0},
             "content_status": "geometry_only", "semantic_status": "missing", "missing_fields": ["description"]})
 
 
