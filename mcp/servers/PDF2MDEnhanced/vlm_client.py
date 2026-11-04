@@ -4,7 +4,7 @@ from .thinking_policy import normalize_thinking_mode, thinking_capabilities, thi
 from .stage_timing import timed_stage, provider_send
 from .calculation_sheet import classification_prompt, calculation_budget, PhysicalRequestBudgetExceeded
 
-from .semantic_language import normalize_language, validate_descriptions
+from .semantic_language import normalize_language, validate_descriptions, figure_description_instruction
 
 import base64
 import asyncio
@@ -467,7 +467,7 @@ class DynamicVLMClient:
             "\"formulas\":[{\"latex\":\"\",\"formula_name\":\"\",\"formula_no\":\"\",\"description\":\"\",\"variables\":\"\",\"context\":\"\",\"bbox\":[0,0,0,0],\"bbox_space\":\"normalized_page\",\"confidence\":0.0}],"
             "\"tables\":[{\"title\":\"\",\"markdown\":\"\",\"description\":\"\",\"columns\":[],\"normalized_rows\":[[]],\"bbox\":[0,0,0,0],\"bbox_space\":\"normalized_page\",\"source_cell_row_offset\":1,\"source_cells\":[]}],"
             "\"figures\":[{\"caption\":\"\",\"description\":\"\",\"bbox\":[0,0,0,0],\"bbox_space\":\"normalized_page\",\"confidence\":0.0}]}}}"
-        ) + _description_language_instruction(self.description_language) + _table_formula_semantic_instruction()
+        ) + _description_language_instruction(self.description_language) + _table_formula_semantic_instruction() + figure_description_instruction()
         prompt += classification_prompt() + _calculation_knowledge_instruction() + _table_image_instruction()
         if getattr(self, "conversion_only", False):
             prompt = _conversion_prompt(dual=True)
@@ -1009,6 +1009,8 @@ class DynamicVLMClient:
                               "table_bbox_in_crop": block.get("table_bbox_in_crop"),
                               "source_cells": block.get("source_cells", [])}, ensure_ascii=False)
             )
+        if object_type == "figure":
+            prompt += figure_description_instruction()
         if block.get("recovery_target") == "cell_image_semantics":
             prompt = (
                 "Inspect illustrations in ONE explicitly selected source table. Return compact JSON only: "

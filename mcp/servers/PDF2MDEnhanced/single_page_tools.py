@@ -6,7 +6,7 @@ from .calculation_sheet import (
     calculation_transcription_quality,
 )
 
-from .semantic_language import detect_description_language, normalize_language, validate_descriptions
+from .semantic_language import detect_description_language, normalize_language, validate_descriptions, figure_description_instruction
 
 import base64
 from contextlib import nullcontext
@@ -2258,8 +2258,9 @@ def _prompt_formula_page(page_text: str, describe: bool, description_language: s
 
 def _prompt_figures(page_text: str, description_language: str = "en") -> str:
     return (
+        figure_description_instruction() +
         f"{_description_language_instruction(description_language)}\n"
-        "只识别这张单页图片中的插图、示意图、结构图、曲线图或技术图，忽略表格和公式。"
+        "只识别这张单页图片中的插图，忽略表格和公式。"
         "请描述图像语义、可见标注、图题/图注和图类型。必须严格返回 JSON，不要输出解释："
         "{\"figures\":[{\"caption\":\"\",\"capture\":\"\",\"name\":\"\",\"figureName\":\"\","
         "\"type\":\"schematic|chart|diagram|figure|unknown\",\"description\":\"\",\"semanticDesc\":\"\","
@@ -2275,6 +2276,7 @@ def _prompt_figures(page_text: str, description_language: str = "en") -> str:
 
 def _prompt_figure_page(page_text: str, description_language: str = "en") -> str:
     return (
+        figure_description_instruction() +
         f"{_description_language_instruction(description_language)}\n"
         "识别这张单页图片中的含插图页面内容，只关注正文、图题、图注、插图位置和插图语义描述。"
         "忽略表格和公式的结构化抽取。请按页面自然阅读顺序输出严格 JSON："
@@ -2313,6 +2315,7 @@ def _prompt_layout_figures(blocks: List[Dict[str, Any]], page_text: str, descrip
         if str(block.get("type") or "").lower() in {"text", "title", "caption"}
     ][:12]
     return (
+        figure_description_instruction() +
         "这是一张已经做过版面识别的单页图片。请只描述给定 image blocks 对应位置中的插图/示意图/图表，"
         "不要重新抽取表格、公式或正文。你会看到整页图片，请根据每个 block 的 bbox 定位图像区域并生成语义描述。\n"
         "必须严格按 JSON 返回："
@@ -2321,7 +2324,7 @@ def _prompt_layout_figures(blocks: List[Dict[str, Any]], page_text: str, descrip
         "\"description\":\"\",\"semanticDesc\":\"\","
         "\"labels\":[],\"context\":\"\"}],\"tables\":[],\"formulas\":[]}。\n"
         "要求：每个输入 image block 最多返回一个对应 figure；block_index 和 bbox 必须原样保留；"
-        "description 要说明图中表达的对象、结构关系、关键标注和可读文字。"
+        "description 要保留理解图片所需的关键信息。"
         "字段要求：caption/capture/name/figureName 都表示图名/图题；有可见图题/图注时必须抄录原文并填入这些字段。"
         "description/semanticDesc 都表示图的语义描述，必须是纯文本；禁止 HTML、XML、Markdown、列表标记、标签和代码围栏。"
         "语种要求：图名必须抄录图片中可见图题/图注的原文；description/semanticDesc 和 context "

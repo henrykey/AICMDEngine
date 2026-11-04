@@ -724,7 +724,7 @@ class FakeVLMClient:
                     "formulas": [{"latex": "ignored"}],
                 }
             )
-        if "插图、示意图、结构图" in prompt:
+        if "只识别这张单页图片中的插图" in prompt:
             return json.dumps(
                 {
                     "figures": [

@@ -75,3 +75,11 @@ def valid_description(value, name: str = "") -> str:
     parts = re.split(r"(?<=[。!！;；])\s*|(?<=\.)(?!\d)\s*|\n+", description)
     invalid = r"包含\s*\d+\s*行|contains?\s+\d+\s+rows|语义(?:说明)?缺失|变量说明见原文|请?结合上下文解释|see the source document|refer to (?:the )?(?:source|context)|semantic (?:description )?(?:missing|unavailable)"
     return " ".join(part for part in parts if part.strip() and not re.search(invalid, part, re.I)).strip()
+
+
+def figure_description_instruction():
+    return (
+        " Briefly describe the image's main content, retaining the key information needed to understand it. "
+        "Avoid repetition and irrelevant details. Aim for no more than 1000 characters per image description. "
+        "Do not guess when uncertain, and do not assume a particular image type. "
+    )

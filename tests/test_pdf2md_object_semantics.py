@@ -208,3 +208,29 @@ def test_invalid_object_image_never_calls_provider():
     result = enhance_object_semantics(request("figure"), image_data="not-an-image", provider_factory=forbidden)
     assert result["model_calls"] == 0
     assert result["reason"] == "invalid_object_image"
+
+
+@pytest.mark.parametrize("kind", ["figure", "formula", "table"])
+def test_generic_figure_guidance_only_applies_to_figures(kind):
+    import json
+    observed = []
+    class Capture(Provider):
+        def _call_text_prompt(self, prompt, **kwargs):
+            observed.append(prompt)
+            return self.response
+    group = {"figure": "figures", "formula": "formulas", "table": "tables"}[kind]
+    provider = Capture(json.dumps({group: [{"element_id": "o1", "semantic_desc": "图片展示主要内容及相关信息。"}]}))
+    enhance_object_semantics(request(kind), provider_factory=lambda cfg: provider)
+    assert ("1000 characters" in observed[0]) == (kind == "figure")
+    if kind == "figure":
+        assert "Do not guess when uncertain" in observed[0]
+        assert "do not assume a particular image type" in observed[0]
+
+
+def test_figure_entry_prompts_share_generic_guidance():
+    for prompt in [single_page_tools._prompt_figures(""), single_page_tools._prompt_figure_page(""),
+                   single_page_tools._prompt_layout_figures([], "")]:
+        assert "1000 characters" in prompt
+        assert "key information needed to understand" in prompt
+        assert "Avoid repetition and irrelevant details" in prompt
+        assert "Do not guess when uncertain" in prompt

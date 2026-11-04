@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from .table_query import _object_image_args
-from .semantic_language import description_mismatch
+from .semantic_language import description_mismatch, figure_description_instruction
 from .vlm_client import DynamicVLMClient
 
 GROUPS = {"table": "tables", "formula": "formulas", "figure": "figures"}
@@ -46,6 +46,8 @@ def enhance_object_semantics(request, vlm_config=None, *, provider_factory=None,
         "Copy source names and titles verbatim; do not translate them. "
         f"Schema: {json.dumps(schema, ensure_ascii=False)}. Evidence: "
         + json.dumps(request, ensure_ascii=False))
+    if request["element_type"] == "figure":
+        prompt += figure_description_instruction()
     image_args = {}
     if image_data is not None:
         try:
