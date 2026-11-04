@@ -379,7 +379,7 @@ def process_page(
             attach_object_relationships(layout_outcome["payloads"], display_page_no)
             image_candidates = [
                 table for table in layout_outcome["payloads"].get("tables", [])
-                if selected("table_images", table) and _table_needs_cell_image_inspection(table)
+                if selected("table_images", table) and (selection.get("describe_cell_images") is True or _table_needs_cell_image_inspection(table))
             ]
             if image_candidates:
                 with tempfile.TemporaryDirectory(prefix="pdf2md_cell_recovery_") as directory:
@@ -389,6 +389,7 @@ def process_page(
                         rc["layout_recovery_max_objects"], source_dpi=rc["render_dpi"],
                         previous=layout_outcome.get("recovery"), provider_plan=selection.get("image_provider_plan", []),
                         max_model_calls=selection.get("image_model_budget", 0),
+                        describe_cell_images=selection.get("describe_cell_images") is True,
                     )
                 glm_calls += recovery_glm_calls
                 vlm_calls += recovery_vlm_calls
@@ -400,7 +401,7 @@ def process_page(
                 if reliable_normalized_bbox(table):
                     table.setdefault("layout_id", f"p{display_page_no}-table-{index}")
             table_payloads = {"tables": tables, "figures": cell_figures}
-            image_candidates = [table for table in tables if selected("table_images", table) and _table_needs_cell_image_inspection(table)]
+            image_candidates = [table for table in tables if selected("table_images", table) and (selection.get("describe_cell_images") is True or _table_needs_cell_image_inspection(table))]
             if image_candidates:
                 with tempfile.TemporaryDirectory(prefix="pdf2md_cell_recovery_") as directory:
                     recovery_glm_calls, recovery_vlm_calls, image_recovery = _recover_missing_table_images(
@@ -408,6 +409,7 @@ def process_page(
                         bool(rc.get("vlm_ocr_enabled") and vlm.enabled),
                         rc["layout_recovery_max_objects"], source_dpi=rc["render_dpi"],
                         provider_plan=selection.get("image_provider_plan", []), max_model_calls=selection.get("image_model_budget", 0),
+                        describe_cell_images=selection.get("describe_cell_images") is True,
                     )
                 glm_calls += recovery_glm_calls
                 vlm_calls += recovery_vlm_calls
@@ -1259,13 +1261,13 @@ def _recover_layout_objects(
             client.recovery_budget_key = (layout_id, "cell_images" if recover_images else "content")
             try:
                 if recover_images:
-                    from .single_page_tools import _normalize_table_contract
-                    source_structure = _normalize_table_contract(request_block.get("markdown") or "", "structured_json")
+                    from .single_page_tools import _cell_semantic_source
+                    source_text, source_cells, _ = _cell_semantic_source(request_block)
                     request_block["source_cell_origins"] = [
                         {"row": cell["row"], "col": cell["col"], "rowspan": cell.get("rowspan", 1),
                          "colspan": cell.get("colspan", 1),
                          **({"image_placeholder": True} if "[image]" in str(cell.get("text", "")).lower() else {})}
-                        for cell in source_structure.get("source_cells", [])]
+                        for cell in source_cells]
                     if image_path.is_file() and isinstance(crop_info.get("pixel_bbox"), list):
                         source_image = fitz.Pixmap(str(image_path))
                         left, top, right, bottom = crop_info["pixel_bbox"]
@@ -1289,7 +1291,9 @@ def _recover_layout_objects(
                     candidate = {"layout_id": layout_id, "type": "table", "status": "EXTRACTED",
                                  "complete": True, "markdown": html}
                 else:
-                    candidate = vlm.extract_object_structured(str(crop_path), request_block, compact=compact)
+                    candidate = vlm.extract_object_structured(
+                        str(crop_path), {**request_block, "markdown": source_text} if recover_images else request_block,
+                        compact=compact)
                 attempt.update(_safe_object_call_info(client))
                 if isinstance(candidate, dict) and object_type == "figure" and candidate.get("type") == "figure":
                     candidate = _normalize_recovered_figure(candidate)
@@ -1439,8 +1443,11 @@ def _table_needs_cell_image_inspection(table):
 
 @timed_stage("page_processor._recover_missing_table_images")
 def _recover_missing_table_images(image_path, output_dir, payloads, vlm, enabled, max_objects,
-                                  source_dpi=150, previous=None, max_model_calls=None, provider_plan=None):
+                                  source_dpi=150, previous=None, max_model_calls=None, provider_plan=None, describe_cell_images=False):
     """Schedule late image gaps through the existing bounded object recovery."""
+    if describe_cell_images:
+        return _recognize_table_cell_semantics(image_path, output_dir, payloads, vlm, enabled,
+            max_objects, source_dpi, max_model_calls, provider_plan)
     previous = previous or {}
     pending = []
     prior_objects = {obj["layout_id"]: obj for obj in previous.get("objects", [])}
@@ -1476,6 +1483,178 @@ def _recover_missing_table_images(image_path, output_dir, payloads, vlm, enabled
                     "objects": [*previous.get("objects", []), *result["objects"]]}
 
 
+def _recognize_table_cell_semantics(image_path, output_dir, payloads, vlm, enabled,
+                                    max_objects, source_dpi, max_model_calls, provider_plan):
+    """Execute only the caller-selected semantic operation, once per selected table."""
+    from .single_page_tools import _cell_semantic_source
+    if not isinstance(provider_plan, list) or any(p != "vlm_ocr" for p in provider_plan):
+        raise ValueError("invalid_image_recovery_provider_plan")
+    if type(max_model_calls) is not int or max_model_calls < 0:
+        raise ValueError("invalid_image_recovery_budget")
+    calls = 0
+    tables = payloads.get("tables", [])
+    limit = max(0, min(int(max_objects), 16))
+    diagnostics = {"contract": "object-crop-content-v1", "operation": "cell_image_semantics",
+                   "limit": limit, "pending": len(tables), "attempted": 0, "objects": []}
+    for index, table in enumerate(tables):
+        semantics = {"status": "not_attempted", "cells": copy.deepcopy(table.get("cell_image_semantics", {}).get("cells", [])), "issues": []}
+        table["cell_image_semantics"] = semantics
+        evidence = {"layout_id": table.get("layout_id"), "type": "table", "operation": "cell_image_semantics",
+                    "crop": None, "attempts": [], "outcome": "not_attempted"}
+        diagnostics["objects"].append(evidence)
+        try:
+            source_text, source_cells, source_field = _cell_semantic_source(table)
+        except ValueError as exc:
+            semantics["issues"] = [{"reason": "table_structure_unavailable", "detail": str(exc)}]
+            evidence.update(reason="table_structure_unavailable", review_required=True)
+            table["manualReviewRequired"] = True
+            continue
+        evidence["source_field"] = source_field
+        origins = [{**{k: c[k] for k in ("row", "col", "rowspan", "colspan")},
+                    **({"image_placeholder": True} if "[image]" in str(c.get("text", "")).lower() else {})}
+                   for c in source_cells]
+        reason = ("recovery_limit_exceeded" if index >= limit else
+                  "provider_unavailable" if not enabled else
+                  "model_budget_exhausted" if not provider_plan or calls >= max_model_calls else
+                  "table_structure_unavailable" if not origins or not table.get("layout_id") else None)
+        if reason:
+            semantics["issues"] = [{"reason": reason}]
+            evidence.update(reason=reason, review_required=True)
+            table["manualReviewRequired"] = True
+            continue
+        request = {**table, "type": "table", "recovery_target": "cell_image_semantics",
+                   "markdown": source_text, "source_cell_origins": origins, "semantic_input_scope": "source_page"}
+        input_path = image_path
+        if reliable_normalized_bbox(table):
+            try:
+                input_path, evidence["crop"] = _crop_layout_block_image(
+                    image_path, table, output_dir, padding_ratio=0, source_dpi=source_dpi)
+                request["semantic_input_scope"] = "table_crop"
+            except Exception:
+                # This is an input choice before the sole request, not another model attempt.
+                evidence["input_reason"] = "table_crop_unavailable"
+        evidence["input_scope"] = request["semantic_input_scope"]
+        attempt = {"attempt": 1, "attempt_sequence": 1, "mode": "initial", "provider": "vlm_ocr",
+                   "endpoint_kind": "image_chat_completions", "outcome": "failed"}
+        evidence["attempts"].append(attempt)
+        diagnostics["attempted"] += 1
+        calls += 1
+        vlm.last_object_call_info = {}
+        vlm.recovery_budget_key = (table["layout_id"], "cell_image_semantics")
+        try:
+            candidate = vlm.extract_object_structured(str(input_path), request, compact=False)
+            attempt.update(_safe_object_call_info(vlm))
+            semantics = _cell_image_semantics(request, candidate, attempt, getattr(vlm, "description_language", "unknown"))
+            table["cell_image_semantics"] = semantics
+        except Exception as exc:
+            attempt.update(_safe_object_call_info(vlm))
+            semantics.update(status="failed", issues=[{"reason": "provider_call_failed"}])
+            attempt["error_type"] = type(exc).__name__
+        finally:
+            vlm.recovery_budget_key = None
+        status = semantics["status"]
+        outcome = "recovered" if status == "complete" else status
+        reason = "validated_cell_image_semantics" if status == "complete" else (
+            "provider_output_truncated" if attempt.get("truncated") else "cell_image_semantics_incomplete")
+        evidence.update(outcome=outcome, reason=reason, review_required=status != "complete", provider="vlm_ocr")
+        attempt.update(outcome=outcome, reason=reason)
+        if status != "complete":
+            table["manualReviewRequired"] = True
+    return 0, calls, diagnostics
+
+
+def _cell_image_semantics(block, candidate, call, language):
+    """Retain source-cell prose independently of geometric acceptance."""
+    from .semantic_language import valid_description, description_mismatch
+    previous = copy.deepcopy(block.get("cell_image_semantics", {}).get("cells", []))
+    result = {"status": "failed", "cells": previous, "issues": []}
+    def issue(reason, **identity):
+        result["issues"].append({"reason": reason, **identity})
+    if not isinstance(candidate, dict) or candidate.get("layout_id") != block["layout_id"] or candidate.get("type") != "table":
+        issue("semantic_response_identity_invalid")
+        return result
+    raw = candidate.get("cell_image_semantics")
+    if not isinstance(raw, dict) or not isinstance(raw.get("cells"), list):
+        issue("cell_image_semantics_missing")
+        return result
+    if raw.get("target_identified") is False or (
+            block.get("semantic_input_scope") == "source_page" and raw.get("target_identified") is not True):
+        issue("semantic_target_unverified")
+        return result
+    result["cells"] = []
+    origins = {(c["row"], c["col"]): c for c in block.get("source_cell_origins", [])}
+    previous_by_origin = {(c.get("row"), c.get("col")): c for c in previous if isinstance(c, dict)}
+    seen = set()
+    cells = list(raw["cells"])
+    negative = raw.get("no_image_cells", [])
+    if not isinstance(negative, list):
+        issue("semantic_cell_identity_invalid")
+        negative = []
+    for pair in negative:
+        if not isinstance(pair, list) or len(pair) != 2 or any(type(v) is not int for v in pair):
+            issue("semantic_cell_identity_invalid")
+            continue
+        cells.append({"row": pair[0], "col": pair[1], "contains_image": False, "description": "", "status": "complete"})
+    for cell in cells:
+        if not isinstance(cell, dict) or any(type(cell.get(k)) is not int for k in ("row", "col")):
+            issue("semantic_cell_identity_invalid")
+            continue
+        key = (cell["row"], cell["col"])
+        identity = {k: cell[k] for k in ("row", "col")}
+        origin = origins.get(key)
+        if origin is None or any(k in cell and (type(cell[k]) is not int or cell[k] != origin[k]) for k in ("rowspan", "colspan")):
+            issue("semantic_cell_source_mismatch", **identity)
+            continue
+        identity.update({k: origin[k] for k in ("rowspan", "colspan")})
+        if key in seen:
+            issue("semantic_cell_duplicate", **identity)
+            for previous in result["cells"]:
+                if (previous["row"], previous["col"]) == key:
+                    previous["status"] = "unresolved"
+            continue
+        seen.add(key)
+        present = cell.get("contains_image")
+        present = present if type(present) is bool else None
+        description = valid_description(cell.get("description")) if isinstance(cell.get("description"), str) else ""
+        language_mismatch = description_mismatch(description, language)
+        complete = cell.get("status") == "complete" and present is not None and not language_mismatch and (present is False or bool(description))
+        prior = previous_by_origin.get(key, {})
+        prior_description = valid_description(prior.get("description"))
+        prior_image = prior.get("contains_image") is True and bool(prior_description) and not description_mismatch(prior_description, language)
+        if present is False:
+            description = ""
+        if prior_image and (present is not True or not complete):
+            if present is False:
+                issue("semantic_image_presence_conflict", **identity)
+            description = prior_description
+            present = True
+            complete = False
+        elif origin.get("image_placeholder") and present is False:
+            complete = False
+            issue("semantic_image_presence_conflict", **identity)
+        if not complete:
+            issue("description_language_mismatch" if language_mismatch else "semantic_cell_unresolved", **identity)
+        result["cells"].append({**identity, "contains_image": present, "description": description,
+                                "status": "complete" if complete else "unresolved"})
+    for key, origin in origins.items():
+        if key not in seen:
+            issue("semantic_cell_missing", row=key[0], col=key[1])
+            if key in previous_by_origin:
+                result["cells"].append({**previous_by_origin[key], "status": "unresolved"})
+    if not origins:
+        issue("table_structure_unavailable")
+    if raw.get("status") != "complete":
+        issue("provider_reported_semantics_incomplete")
+    if call.get("truncated") or call.get("finish_reason") == "length":
+        issue("provider_output_truncated")
+    if call.get("finish_reason") in {"content_filter", "tool_calls"}:
+        issue("provider_content_blocked")
+    if call.get("json_status") in {"empty", "invalid", "non_object"}:
+        issue("semantic_response_invalid")
+    result["status"] = "partial" if result["issues"] else "complete"
+    return result
+
+
 def _validate_cell_image_recovery(block, candidate, crop_info, image_path):
     if not isinstance(candidate, dict):
         return "response_invalid", None
@@ -1505,9 +1684,12 @@ def _validate_cell_image_recovery(block, candidate, crop_info, image_path):
         return "", result
     if candidate.get("contains_images") is not True or not isinstance(cells, list) or not cells or candidate.get("image_unresolved"):
         return "missing_cell_image_geometry", None
-    from .single_page_tools import _normalize_table_contract
-    structure = _normalize_table_contract(block.get("markdown") or "", "structured_json")
-    origins = {(cell["row"], cell["col"]): cell for cell in structure.get("source_cells", [])}
+    from .single_page_tools import _cell_semantic_source
+    try:
+        _, source_cells, _ = _cell_semantic_source(block)
+    except ValueError:
+        return "table_structure_unavailable", None
+    origins = {(cell["row"], cell["col"]): cell for cell in source_cells}
     if not origins:
         return "table_structure_unavailable", None
     source = fitz.Pixmap(str(image_path))
@@ -2404,7 +2586,7 @@ def _copy_optional_element_metadata(item: Dict[str, Any], metadata: Dict[str, An
         "normalized_rows",
         "source_cells",
         "contains_images",
-        "cell_image_inspection_status",
+        "cell_image_inspection_status", "cell_image_semantics",
         "image_unresolved",
         "cell_status",
         "source_cell_row_offset",
@@ -2769,7 +2951,7 @@ def _normalize_structured(value: Any) -> Dict[str, Any]:
             "normalized_rows",
             "source_cells",
             "contains_images",
-            "cell_image_inspection_status",
+            "cell_image_inspection_status", "cell_image_semantics",
             "image_unresolved",
             "cell_status",
             "source_cell_row_offset",
@@ -3001,7 +3183,7 @@ def _ocr_element_payload(item: Any, kind: str) -> Dict[str, Any]:
                 "normalized_rows",
                 "source_cells",
                 "contains_images",
-                "cell_image_inspection_status",
+                "cell_image_inspection_status", "cell_image_semantics",
                 "image_unresolved",
                 "cell_status",
                 "source_cell_row_offset",

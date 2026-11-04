@@ -1543,7 +1543,7 @@ def _figure_item(item: OcrElement, page_text: str, source: str = "vlm_ocr") -> D
 
 def _attach_single_page_figure_assets(ctx: SinglePageContext, figures: List[Dict[str, Any]],
                                       tables: Optional[List[Dict[str, Any]]] = None,
-                                      vlm=None, model_calls=None, recovery_limit=8, recovery_plan=None) -> None:
+                                      vlm=None, model_calls=None, recovery_limit=8, recovery_plan=None, describe_cell_images=False) -> None:
     from .layout_ledger import reliable_normalized_bbox
     from .page_processor import _attach_figure_assets, _recover_missing_table_images
     for index, table in enumerate(tables or []):
@@ -1562,7 +1562,8 @@ def _attach_single_page_figure_assets(ctx: SinglePageContext, figures: List[Dict
         with tempfile.TemporaryDirectory(prefix="pdf2md_cell_recovery_") as directory:
             gc, vc, diagnostics = _recover_missing_table_images(
                 Path(ctx.image_path), Path(directory), payloads, vlm, bool(vlm.enabled), recovery_limit,
-                source_dpi=ctx.render_dpi, provider_plan=providers, max_model_calls=budget)
+                source_dpi=ctx.render_dpi, provider_plan=providers, max_model_calls=budget,
+                describe_cell_images=describe_cell_images)
         model_calls["glm_ocr"] += gc
         model_calls["vlm_ocr"] += vc
         for table in tables:
@@ -1839,6 +1840,9 @@ def _base_result(
             result["semantic_status"]["complete"] = False
             result["semantic_status"]["missing"].append("cell_images")
             result["semantic_status"]["reason"] = "cell_images_incomplete"
+        if any(item.get("cell_image_semantics", {}).get("status") in {"partial", "failed", "not_attempted"} for item in items):
+            result["semantic_status"].update(complete=False, reason="cell_image_semantics_incomplete")
+            result["semantic_status"]["missing"].append("cell_image_semantics")
         if items:
             _promote_first_table_fields(result, items[0])
     return result
@@ -2366,6 +2370,25 @@ def _recover_table_from_result(result: OcrResult) -> tuple[str, str]:
 
 def _normalize_table_output(table_md: str) -> str:
     return _normalize_table_contract(table_md, "markdown")["markdown"]
+
+
+def _cell_semantic_source(table):
+    """Resolve source origins without guessing from normalized or repaired rows."""
+    from .table_query import _sources
+    for field in ("render_html", "raw_html", "sourceHtml", "html", "markdown"):
+        markup = table.get(field)
+        if not isinstance(markup, str) or not markup.strip():
+            continue
+        if field != "markdown" or re.search(r"(?i)<table\b", markup):
+            _, _, meta = _sources(markup, _html_table_to_grid)
+        else:
+            meta = _normalize_table_contract(markup, "structured_json")
+            if meta.get("warnings") or meta.get("degraded"):
+                raise ValueError("table_structure_unavailable")
+        if not meta.get("source_cells"):
+            raise ValueError("table_structure_unavailable")
+        return markup, meta["source_cells"], field
+    raise ValueError("table_structure_unavailable")
 
 
 def _normalize_table_contract(table_text: str, table_rows_format: str = "markdown") -> Dict[str, Any]:
@@ -3612,14 +3635,20 @@ def _recover_single_table_image(tool, ctx, target, language, vlm_config, ocr_con
     from .layout_ledger import reliable_normalized_bbox
     calls = {"glm_ocr": 0, "vlm_ocr": 0}
     def failed(reason):
-        return _base_result(tool, ctx, calls, [reason], [])
+        result = _base_result(tool, ctx, calls, [reason], [])
+        result["semantic_status"] = {"complete": False, "missing": ["cell_images"], "reason": reason}
+        return result
     if not isinstance(target, dict) or target.get("provider") != "vlm_ocr":
         return failed("invalid_image_recovery_target")
     table = target.get("table")
     if (not isinstance(table, dict) or not isinstance(table.get("layout_id"), str)
-            or not table["layout_id"] or not reliable_normalized_bbox(table)
-            or not isinstance(table.get("markdown"), str) or not table["markdown"].strip()):
+            or not table["layout_id"] or (target.get("describe_cell_images") is not True and not reliable_normalized_bbox(table))):
         return failed("invalid_image_recovery_target")
+    if target.get("describe_cell_images") is not True:
+        try:
+            _cell_semantic_source(table)
+        except ValueError:
+            return failed("table_structure_unavailable")
     if target.get("page_no") != ctx.page_no or target.get("source_sha1") != _file_sha1(ctx.source_path):
         return failed("image_recovery_source_mismatch")
     _initialize_description_language(ctx, language)
@@ -3628,7 +3657,8 @@ def _recover_single_table_image(tool, ctx, target, language, vlm_config, ocr_con
     figures = []
     table = deepcopy(table)
     _attach_single_page_figure_assets(ctx, figures, [table], vlm, calls, 1,
-                                      {"provider_plan": ["vlm_ocr"], "max_model_calls": 1})
+                                      {"provider_plan": ["vlm_ocr"], "max_model_calls": 1},
+                                      describe_cell_images=target.get("describe_cell_images") is True)
     result = _base_result(tool, ctx, calls, [], [table])
     result["figures"] = figures
     return result

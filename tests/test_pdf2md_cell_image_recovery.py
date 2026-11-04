@@ -196,7 +196,7 @@ def test_localization_copies_parsed_source_spans(source_image, tmp_path):
 def test_source_parse_failure_preserves_table_without_model_send(source_image, tmp_path, monkeypatch):
     def fail(*args, **kwargs):
         raise ValueError('invalid_table_source')
-    monkeypatch.setattr(sp, '_normalize_table_contract', fail)
+    monkeypatch.setattr(sp, '_cell_semantic_source', fail)
     table, client, counts = run_recovery(source_image, tmp_path)
     assert table['markdown'] == HTML
     assert table['image_unresolved']

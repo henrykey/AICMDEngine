@@ -1,0 +1,111 @@
+{
+  "provenance": "GB/T 16749-2018 page 10, recorded response; data rows are 1-based after three header rows",
+  "table_html": "<table border=1 cellspacing=0 cellpadding=4><thead><tr><th rowspan=3>序号</th><th>焊接类型</th><th colspan=4>变化形式（允许 A～D 组合）</th></tr><tr><th rowspan=2>通常设计</th><th>波根加强</th><th>套箍</th><th colspan=2>辅助套箍</th></tr><tr><th>A</th><th>B</th><th>C(单个)</th><th>D(两个)</th></tr></thead><tbody><tr><td>1</td><td>外套/角焊缝<br>图：外套/角焊缝通常设计示意图</td><td>—</td><td>图：外套/角焊缝套箍连接示意图</td><td>图：外套/角焊缝辅助套箍（单个）连接示意图</td><td>图：外套/角焊缝辅助套箍（两个）连接示意图</td></tr><tr><td>2</td><td>内插/角焊缝<br>图：内插/角焊缝通常设计示意图</td><td>图：内插/角焊缝波根加强示意图</td><td>图：内插/角焊缝套箍连接示意图</td><td>图：内插/角焊缝辅助套箍（单个）连接示意图</td><td>图：内插/角焊缝辅助套箍（两个）连接示意图</td></tr><tr><td>3</td><td>外套/坡口焊缝<br>图：外套/坡口焊缝通常设计示意图</td><td>—</td><td>图：外套/坡口焊缝套箍连接示意图</td><td>图：外套/坡口焊缝辅助套箍（单个）连接示意图</td><td>图：外套/坡口焊缝辅助套箍（两个）连接示意图</td></tr><tr><td>4</td><td>内插/坡口焊缝<br>图：内插/坡口焊缝通常设计示意图</td><td>图：内插/坡口焊缝波根加强示意图</td><td>图：内插/坡口焊缝套箍连接示意图</td><td>图：内插/坡口焊缝辅助套箍（单个）连接示意图</td><td>图：内插/坡口焊缝辅助套箍（两个）连接示意图</td></tr><tr><td>5</td><td>对接焊缝<br>图：对接焊缝通常设计示意图</td><td>—</td><td>图：对接焊缝套箍连接示意图</td><td>—</td><td>图：对接焊缝辅助套箍（两个）连接示意图</td></tr><tr><td colspan=6>在波纹管承压侧反面的连接件及套箍与波纹管和直边段接触的一侧应倒圆或倒角。<br>有套箍的波纹管连接焊缝应符合：<br>——若是角焊缝，焊缝高度“a”应当符合公式：a≥0.7nt；<br>——如果波纹管直边段长度L_t≥0.5√(mD_b)，建议设置套箍；<br>——套箍应通过焊接或机械装置沿轴向固定。<br>注：内插(或外套)坡口焊缝节点(焊接类型3、类型4)参见GB/T 3375 锁底对接接头(V形坡口)。</td></tr></tbody></table>",
+  "images": [
+    {
+      "row": 1,
+      "column": "通常设计",
+      "description": "外套/角焊缝通常设计示意图"
+    },
+    {
+      "row": 1,
+      "column": "套箍 B",
+      "description": "外套/角焊缝套箍连接示意图"
+    },
+    {
+      "row": 1,
+      "column": "辅助套箍 C(单个)",
+      "description": "外套/角焊缝辅助套箍（单个）连接示意图"
+    },
+    {
+      "row": 1,
+      "column": "辅助套箍 D(两个)",
+      "description": "外套/角焊缝辅助套箍（两个）连接示意图"
+    },
+    {
+      "row": 2,
+      "column": "通常设计",
+      "description": "内插/角焊缝通常设计示意图"
+    },
+    {
+      "row": 2,
+      "column": "波根加强 A",
+      "description": "内插/角焊缝波根加强示意图"
+    },
+    {
+      "row": 2,
+      "column": "套箍 B",
+      "description": "内插/角焊缝套箍连接示意图"
+    },
+    {
+      "row": 2,
+      "column": "辅助套箍 C(单个)",
+      "description": "内插/角焊缝辅助套箍（单个）连接示意图"
+    },
+    {
+      "row": 2,
+      "column": "辅助套箍 D(两个)",
+      "description": "内插/角焊缝辅助套箍（两个）连接示意图"
+    },
+    {
+      "row": 3,
+      "column": "通常设计",
+      "description": "外套/坡口焊缝通常设计示意图"
+    },
+    {
+      "row": 3,
+      "column": "套箍 B",
+      "description": "外套/坡口焊缝套箍连接示意图"
+    },
+    {
+      "row": 3,
+      "column": "辅助套箍 C(单个)",
+      "description": "外套/坡口焊缝辅助套箍（单个）连接示意图"
+    },
+    {
+      "row": 3,
+      "column": "辅助套箍 D(两个)",
+      "description": "外套/坡口焊缝辅助套箍（两个）连接示意图"
+    },
+    {
+      "row": 4,
+      "column": "通常设计",
+      "description": "内插/坡口焊缝通常设计示意图"
+    },
+    {
+      "row": 4,
+      "column": "波根加强 A",
+      "description": "内插/坡口焊缝波根加强示意图"
+    },
+    {
+      "row": 4,
+      "column": "套箍 B",
+      "description": "内插/坡口焊缝套箍连接示意图"
+    },
+    {
+      "row": 4,
+      "column": "辅助套箍 C(单个)",
+      "description": "内插/坡口焊缝辅助套箍（单个）连接示意图"
+    },
+    {
+      "row": 4,
+      "column": "辅助套箍 D(两个)",
+      "description": "内插/坡口焊缝辅助套箍（两个）连接示意图"
+    },
+    {
+      "row": 5,
+      "column": "通常设计",
+      "description": "对接焊缝通常设计示意图"
+    },
+    {
+      "row": 5,
+      "column": "套箍 B",
+      "description": "对接焊缝套箍连接示意图"
+    },
+    {
+      "row": 5,
+      "column": "辅助套箍 D(两个)",
+      "description": "对接焊缝辅助套箍（两个）连接示意图"
+    }
+  ]
+}
