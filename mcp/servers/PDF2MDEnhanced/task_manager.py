@@ -446,6 +446,43 @@ class TaskManager:
         if task.source_identity and self._document_run_path(task.source_identity).exists():
             raise ValueError('document_run_already_finalized')
 
+    def read_original_page(self, identity: Dict[str, Any]) -> tuple[bytes, Dict[str, Any]]:
+        """Read one persisted page only when its complete source identity matches."""
+        if not isinstance(identity, dict) or any(not identity.get(k) for k in
+                ("tenant_id", "doc_id", "run_id", "version", "source_page_no", "source_file_sha256", "render_dpi")):
+            raise ValueError("invalid_source_identity")
+        matches = [item for item in self._load_document_run_tasks(
+            identity["tenant_id"], identity["doc_id"], identity["run_id"])
+            if item.get("source_identity") == identity]
+        if not matches:
+            raise ValueError("original_page_unavailable")
+        if len(matches) != 1:
+            raise ValueError("original_page_not_unique")
+        task = matches[0]
+        task_id = task.get("task_id")
+        if not isinstance(task_id, str) or not re.fullmatch(r"task_[a-f0-9]{16}", task_id):
+            raise ValueError("invalid_original_page")
+        task_dir = self._root / "tasks" / task_id
+        if task_dir.is_symlink():
+            raise ValueError("invalid_original_page")
+        try:
+            result_path = task_dir / "page_1.json"
+            if result_path.is_symlink():
+                raise ValueError("invalid_original_page")
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            source = Path(task["source_path"])
+            uploads = (self._root / "uploads").resolve()
+            if source.is_symlink() or not source.resolve().is_relative_to(uploads):
+                raise ValueError("invalid_original_page")
+            image = source.read_bytes()
+            expected = (task.get("input_image") or {}).get("sha256")
+            if (result.get("source_identity") != identity or not expected
+                    or hashlib.sha256(image).hexdigest() != expected):
+                raise ValueError("original_page_identity_mismatch")
+            return image, result
+        except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("original_page_unavailable") from exc
+
     def _load_document_run_tasks(self, tenant_id: str, doc_id: str, run_id: str) -> List[Dict[str, Any]]:
         tasks_root = self._root / 'tasks'
         if not tasks_root.is_dir():

@@ -6,6 +6,8 @@ from .table_query import _object_image_args
 from .semantic_language import description_mismatch, figure_description_instruction
 from .vlm_client import DynamicVLMClient
 
+_extract_model_json = DynamicVLMClient._extract_json
+
 GROUPS = {"table": "tables", "formula": "formulas", "figure": "figures"}
 FIELDS = {"semantic_desc", "formula_name", "table_title"}
 
@@ -14,6 +16,9 @@ def enhance_object_semantics(request, vlm_config=None, *, provider_factory=None,
     calls = 0
     provider = None
     def failed(reason):
+        if reason == "invalid_object_proposal":
+            import logging
+            logging.getLogger(__name__).warning("object_semantic_invalid_proposal stage=%s", validation_stage)
         return {"status": "failed", "reason": reason, "model_calls": calls,
                 "physical_requests": getattr(provider, "physical_requests", 0),
                 "request_id": request.get("request_id") if isinstance(request, dict) else None}
@@ -76,22 +81,28 @@ def enhance_object_semantics(request, vlm_config=None, *, provider_factory=None,
     finally:
         if image_args.get("_owned_image_path"):
             Path(image_args["_owned_image_path"]).unlink(missing_ok=True)
+    validation_stage = "json_parse"
     try:
-        proposal = json.loads(raw)
+        proposal = _extract_model_json(None, raw)
+        validation_stage = "group_schema"
         if not isinstance(proposal, dict) or set(proposal) != {group}:
             return failed("invalid_object_proposal")
+        validation_stage = "object_count"
         repairs = proposal[group]
         if not isinstance(repairs, list) or len(repairs) != 1 or not isinstance(repairs[0], dict):
             return failed("invalid_object_proposal")
+        validation_stage = "identity_or_extra_fields"
         repair = repairs[0]
         allowed = {"element_id", "semantic_confidence"} | set(schema[group][0])
         if repair.get("element_id") != request["element_id"] or set(repair) - allowed:
             return failed("invalid_object_proposal")
+        validation_stage = "field_types"
         fields = ["title" if f == "table_title" else f for f in request["missing_fields"]]
         if not any(isinstance(repair.get(f), str) and repair[f].strip() for f in fields):
             return failed("requested_fields_not_repaired")
         if any(f in repair and not isinstance(repair[f], str) for f in fields):
             return failed("invalid_object_proposal")
+        validation_stage = "confidence"
         score = repair.get("semantic_confidence")
         if score is not None and (isinstance(score, bool) or not isinstance(score, (int, float)) or not 0 <= score <= 1):
             return failed("invalid_object_proposal")

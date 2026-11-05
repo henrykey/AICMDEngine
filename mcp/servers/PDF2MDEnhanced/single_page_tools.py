@@ -964,6 +964,95 @@ def _extract_tables(
     return []
 
 
+def _map_semantic_table_targets(targets, source_tables):
+    """Match requested table IDs to unique original layout IDs, without order guessing."""
+    if not isinstance(targets, list) or not isinstance(source_tables, list):
+        raise ValueError("invalid_table_mapping")
+    source_by_layout = {}
+    for source in source_tables:
+        if not isinstance(source, dict):
+            raise ValueError("invalid_table_mapping")
+        layout_id = source.get("layout_id")
+        if isinstance(layout_id, str) and layout_id.strip():
+            source_by_layout.setdefault(layout_id, []).append(source)
+    mapped = {}
+    used_layouts = set()
+    for target in targets:
+        if not isinstance(target, dict):
+            raise ValueError("invalid_table_mapping")
+        table_id, layout_id = target.get("table_id"), target.get("layout_id")
+        if (not isinstance(table_id, str) or not table_id.strip()
+                or not isinstance(layout_id, str) or not layout_id.strip()
+                or table_id in mapped or layout_id in used_layouts
+                or len(source_by_layout.get(layout_id, [])) != 1):
+            raise ValueError("ambiguous_table_mapping")
+        mapped[table_id] = source_by_layout[layout_id][0]
+        used_layouts.add(layout_id)
+    return mapped
+
+
+def enhance_saved_page_table_semantics(manager, identity, targets, vlm_config, description_language, fallback_page=None):
+    """Describe requested tables from the saved original or supplied page evidence."""
+    image = None
+    page = None
+    if identity:
+        try:
+            image, page = manager.read_original_page(identity)
+        except ValueError as exc:
+            if str(exc) != "original_page_unavailable":
+                raise
+    if page is None:
+        if not isinstance(fallback_page, dict) or not isinstance(fallback_page.get("tables"), list):
+            raise ValueError("original_page_unavailable")
+        page = {"elements": {"tables": fallback_page["tables"]},
+                "rag": {"page_text": fallback_page.get("page_text", "")}}
+    elements = page.get("elements") if isinstance(page.get("elements"), dict) else {}
+    mapped = _map_semantic_table_targets(targets, elements.get("tables"))
+    items = [deepcopy(mapped[target["table_id"]]) for target in targets]
+    rag = page.get("rag") if isinstance(page.get("rag"), dict) else {}
+    page_text = str(rag.get("page_text") or rag.get("content") or "")
+    vlm = DynamicVLMClient(vlm_config or {})
+    if not vlm.enabled:
+        raise ValueError("model_unavailable")
+    if image:
+        with tempfile.TemporaryDirectory(prefix="pdf2md_table_semantics_") as directory:
+            image_path = Path(directory) / "page.png"
+            image_path.write_bytes(image)
+            raw = _request_table_metadata(vlm, str(image_path), items, page_text, description_language)
+    else:
+        if not page_text.strip() and not any(item.get("raw_html") or item.get("render_html") or item.get("markdown") or item.get("rows") or item.get("raw_array") or item.get("columns") for item in items):
+            raise ValueError("page_evidence_unavailable")
+        prompt = (_description_language_instruction(description_language) +
+                  "\n根据以下整页文字和结构化表格，说明各表的用途和含义。不要编造。"
+                  "只返回 JSON：{\"tables\":[{\"index\":0,\"semanticDesc\":\"...\"}]}。\n"
+                  + "整页文字：\n" + page_text + "\n表格：\n" + json.dumps(items, ensure_ascii=False))
+        raw = vlm._call_text_prompt(prompt, max_tokens=min(vlm.max_tokens, 16384), safe_errors=True)
+    if getattr(vlm, "last_call_info", {}).get("finish_reason") in {"length", "content_filter", "tool_calls"}:
+        raise ValueError("incomplete_table_semantics")
+    metadata = _parse_table_metadata_response(raw)
+    indices = [_metadata_index(entry) for entry in metadata]
+    result = []
+    for index, target in enumerate(targets):
+        if indices.count(index) != 1:
+            continue
+        entry = metadata[indices.index(index)]
+        desc = _cell_to_text(entry.get("semanticDesc") or entry.get("description") or entry.get("summary"))
+        if desc:
+            result.append({"table_id": target["table_id"], "semantic_desc": desc})
+    return {"tables": result, "model_calls": 1}
+
+
+def _request_table_metadata(vlm, image_path, items, page_text, description_language):
+    """Request metadata for the selected tables using their original full-page image."""
+    with vlm.calculation_scope() if callable(getattr(vlm, 'calculation_scope', None)) else nullcontext():
+        return vlm._call_image_prompt(
+            image_path,
+            _prompt_table_metadata(items, page_text, description_language),
+            max_tokens=min(vlm.max_tokens, 16384),
+            safe_errors=True,
+        )
+
+
 def _enrich_table_metadata_with_vlm(
     ctx: SinglePageContext,
     vlm: DynamicVLMClient,
@@ -981,13 +1070,7 @@ def _enrich_table_metadata_with_vlm(
         return
     try:
         model_calls["vlm_ocr"] += 1
-        with vlm.calculation_scope() if callable(getattr(vlm, 'calculation_scope', None)) else nullcontext():
-            raw = vlm._call_image_prompt(
-                ctx.image_path,
-                _prompt_table_metadata(items, ctx.page_text, description_language),
-                max_tokens=min(vlm.max_tokens, 16384),
-                safe_errors=True,
-            )
+        raw = _request_table_metadata(vlm, ctx.image_path, items, ctx.page_text, description_language)
         if getattr(vlm, "last_call_info", {}).get("finish_reason") in {"length", "content_filter", "tool_calls"}:
             warnings.append("table_classification_response_incomplete")
             for item in items:

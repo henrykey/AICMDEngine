@@ -336,6 +336,29 @@ async def enhance_object_semantics(
     return json.dumps(result, ensure_ascii=False)
 
 
+@mcp.tool("enhance_page_object_semantics")
+async def enhance_page_object_semantics(
+    object_type: str,
+    targets: List[Dict[str, Any]],
+    source_identity: Optional[Dict[str, Any]] = None,
+    fallback_page: Optional[Dict[str, Any]] = None,
+    vlm_config: Optional[Dict[str, Any]] = None,
+    description_language: str = "unknown",
+) -> str:
+    """Enhance the requested objects on one persisted original page."""
+    if object_type != "table":
+        raise ValueError("unsupported_page_object_type")
+    from .single_page_tools import enhance_saved_page_table_semantics
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None,
+        lambda: enhance_saved_page_table_semantics(
+            manager, source_identity, targets, _normalize_vlm_config(vlm_config), description_language, fallback_page
+        ),
+    )
+    return json.dumps(result, ensure_ascii=False)
+
+
 @mcp.tool("analyze_page_layout")
 async def analyze_page_layout(
     file_path: Optional[str] = None,

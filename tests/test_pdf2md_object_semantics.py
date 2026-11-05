@@ -234,3 +234,126 @@ def test_figure_entry_prompts_share_generic_guidance():
         assert "key information needed to understand" in prompt
         assert "Avoid repetition and irrelevant details" in prompt
         assert "Do not guess when uncertain" in prompt
+
+
+def test_table_semantics_accepts_fenced_json_without_weakening_object_validation():
+    provider = Provider('```json\n{"tables":[{"element_id":"o1","semantic_desc":"本表用于根据焊接形式和检测范围选择系数。"}]}\n```')
+    result = enhance_object_semantics(request('table'), {}, provider_factory=lambda cfg: provider)
+    assert result['status'] == 'complete'
+    assert result['repairs']['tables'][0]['element_id'] == 'o1'
+    invalid = Provider('```json\n{"tables":[{"element_id":"other","semantic_desc":"表格说明"}]}\n```')
+    assert enhance_object_semantics(request('table'), {}, provider_factory=lambda cfg: invalid)['status'] == 'failed'
+
+
+def test_page_table_mapping_uses_unique_layout_identity_not_order():
+    originals = [{'layout_id': 'layout-a', 'markdown': 'A'}, {'layout_id': 'layout-b', 'markdown': 'B'}]
+    targets = [{'table_id': 'p11_t2', 'layout_id': 'layout-b'}, {'table_id': 'p11_t1', 'layout_id': 'layout-a'}]
+    mapped = single_page_tools._map_semantic_table_targets(targets, originals)
+    assert mapped['p11_t1']['markdown'] == 'A'
+    assert mapped['p11_t2']['markdown'] == 'B'
+
+
+@pytest.mark.parametrize('targets,originals', [
+    ([{'table_id': 'a', 'layout_id': 'l'}], []),
+    ([{'table_id': 'a', 'layout_id': 'l'}], [{'layout_id': 'l'}, {'layout_id': 'l'}]),
+    ([{'table_id': 'a', 'layout_id': 'l'}, {'table_id': 'b', 'layout_id': 'l'}], [{'layout_id': 'l'}]),
+    ([{'table_id': 'a', 'layout_id': 'l'}, {'table_id': 'a', 'layout_id': 'm'}], [{'layout_id': 'l'}, {'layout_id': 'm'}]),
+    ([{'table_id': 'a'}], [{'layout_id': 'l'}]),
+])
+def test_page_table_mapping_fails_closed_for_missing_or_ambiguous_identity(targets, originals):
+    with pytest.raises(ValueError):
+        single_page_tools._map_semantic_table_targets(targets, originals)
+
+
+def test_original_page_requires_exact_identity_and_matching_image_hash(tmp_path):
+    import hashlib
+    import json
+    from tests.test_pdf2md_enhanced_task_manager import TaskManager
+    root = tmp_path / 'output'; uploads = root / 'uploads'; uploads.mkdir(parents=True)
+    image = uploads / 'page.png'; image.write_bytes(b'original page')
+    task_id = 'task_1234567890abcdef'; task_dir = root / 'tasks' / task_id; task_dir.mkdir(parents=True)
+    identity = {'tenant_id': '33', 'doc_id': 'doc', 'run_id': 'run', 'version': 1,
+                'source_page_no': 11, 'source_file_sha256': 'a' * 64, 'render_dpi': 150}
+    record = {'task_id': task_id, 'source_identity': identity, 'source_path': str(image),
+              'input_image': {'sha256': hashlib.sha256(image.read_bytes()).hexdigest()}}
+    (task_dir / 'task.json').write_text(json.dumps(record))
+    (task_dir / 'page_1.json').write_text(json.dumps({'source_identity': identity, 'elements': {'tables': []}}))
+    manager = TaskManager(str(root))
+    content, result = manager.read_original_page(identity)
+    assert content == b'original page'
+    assert result['source_identity'] == identity
+    for field, wrong in [('tenant_id', '34'), ('doc_id', 'other'), ('version', 2), ('source_page_no', 12)]:
+        with pytest.raises(ValueError):
+            manager.read_original_page({**identity, field: wrong})
+    image.write_bytes(b'tampered')
+    with pytest.raises(ValueError, match='identity_mismatch'):
+        manager.read_original_page(identity)
+
+
+def test_saved_page_table_semantics_maps_results_by_original_identity(monkeypatch):
+    class Manager:
+        def read_original_page(self, identity):
+            assert identity == {'run_id': 'verified'}
+            return b'page', {'elements': {'tables': [
+                {'layout_id': 'a', 'markdown': '|a|'}, {'layout_id': 'b', 'markdown': '|b|'}]},
+                'rag': {'page_text': 'page context'}}
+    class Model:
+        enabled = True
+        max_tokens = 4096
+        last_call_info = {}
+        def __init__(self, config): pass
+        def _call_image_prompt(self, path, prompt, **kwargs):
+            assert 'page context' in prompt
+            return '{"tables":[{"index":1,"semanticDesc":"表格二的用途"},{"index":0,"semanticDesc":"表格一的用途"}]}'
+    monkeypatch.setattr(single_page_tools, 'DynamicVLMClient', Model)
+    targets = [{'table_id': 'first', 'layout_id': 'a'}, {'table_id': 'second', 'layout_id': 'b'}]
+    result = single_page_tools.enhance_saved_page_table_semantics(Manager(), {'run_id': 'verified'}, targets, {}, 'zh')
+    assert result == {'tables': [{'table_id': 'first', 'semantic_desc': '表格一的用途'},
+                                 {'table_id': 'second', 'semantic_desc': '表格二的用途'}], 'model_calls': 1}
+
+
+def test_page_semantic_tool_routes_table_and_rejects_other_types(monkeypatch):
+    import asyncio
+    import json
+    server = importlib.import_module(single_page_tools.__package__ + ".server")
+    calls = []
+    def describe(manager, identity, targets, config, language, fallback_page=None):
+        calls.append((identity, targets, language))
+        return {'tables': [{'table_id': 't1', 'semantic_desc': '表的用途'}], 'model_calls': 1}
+    monkeypatch.setattr(single_page_tools, 'enhance_saved_page_table_semantics', describe)
+    async def check():
+        tools = await server.mcp.list_tools()
+        assert 'enhance_page_object_semantics' in [tool.name for tool in tools]
+        # Call the registered tool so validation and routing follow the public contract.
+        tool = next(tool for tool in tools if tool.name == 'enhance_page_object_semantics')
+        result = await tool.run({'object_type': 'table', 'source_identity': {'tenant_id': '33'},
+                                 'targets': [{'table_id': 't1', 'layout_id': 'a'}],
+                                 'description_language': 'zh'})
+        assert '表的用途' in str(result)
+        with pytest.raises(Exception, match='unsupported_page_object_type'):
+            await tool.run({'object_type': 'formula', 'source_identity': {}, 'targets': []})
+    asyncio.run(check())
+    assert len(calls) == 1
+
+
+def test_page_table_semantics_falls_back_only_when_original_missing(monkeypatch):
+    class Manager:
+        def __init__(self, reason): self.reason = reason
+        def read_original_page(self, identity): raise ValueError(self.reason)
+    class Model:
+        enabled = True
+        max_tokens = 4096
+        last_call_info = {}
+        def __init__(self, config): pass
+        def _call_text_prompt(self, prompt, **kwargs):
+            assert "full page context" in prompt and "table evidence" in prompt
+            return '{"tables":[{"index":0,"semanticDesc":"说明表格用途"}]}'
+    monkeypatch.setattr(single_page_tools, "DynamicVLMClient", Model)
+    targets = [{"table_id": "t", "layout_id": "l"}]
+    fallback = {"page_text": "full page context", "tables": [{"layout_id": "l", "markdown": "table evidence"}]}
+    result = single_page_tools.enhance_saved_page_table_semantics(
+        Manager("original_page_unavailable"), {"tenant_id": "33"}, targets, {}, "zh", fallback)
+    assert result["tables"] == [{"table_id": "t", "semantic_desc": "说明表格用途"}]
+    with pytest.raises(ValueError, match="original_page_identity_mismatch"):
+        single_page_tools.enhance_saved_page_table_semantics(
+            Manager("original_page_identity_mismatch"), {"tenant_id": "33"}, targets, {}, "zh", fallback)
