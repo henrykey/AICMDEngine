@@ -312,6 +312,26 @@ def test_saved_page_table_semantics_maps_results_by_original_identity(monkeypatc
                                  {'table_id': 'second', 'semantic_desc': '表格二的用途'}], 'model_calls': 1}
 
 
+def test_saved_table_semantics_repairs_invalid_json_escape_without_accepting_truncation(monkeypatch):
+    class Manager:
+        def read_original_page(self, identity):
+            return b"page", {"elements": {"tables": [{"layout_id": "a", "markdown": "|a|"}]}, "rag": {"page_text": "context"}}
+    class Model:
+        enabled = True
+        max_tokens = 4096
+        last_call_info = {}
+        answer = r'{"tables":[{"index":0,"semanticDesc":"coefficient \phi selection"}]}'
+        def __init__(self, config): pass
+        def _call_image_prompt(self, path, prompt, **kwargs): return self.answer
+    monkeypatch.setattr(single_page_tools, "DynamicVLMClient", Model)
+    targets = [{"table_id": "first", "layout_id": "a"}]
+    result = single_page_tools.enhance_saved_page_table_semantics(Manager(), {"run_id": "verified"}, targets, {}, "en")
+    assert result["tables"] == [{"table_id": "first", "semantic_desc": r"coefficient \phi selection"}]
+    Model.answer = r'{"tables":[{"index":0,"semanticDesc":"coefficient \phi'
+    result = single_page_tools.enhance_saved_page_table_semantics(Manager(), {"run_id": "verified"}, targets, {}, "en")
+    assert result["tables"] == []
+
+
 def test_page_semantic_tool_routes_table_and_rejects_other_types(monkeypatch):
     import asyncio
     import json
@@ -375,11 +395,13 @@ def test_page_formula_semantics_original_and_text_fallback(monkeypatch):
         def _call_image_prompt(self, path, prompt, **kwargs):
             assert 'C=C1+C2' in prompt and '厚度与压力' in prompt
             assert kwargs['max_tokens'] == 4096
-            assert '公式的用途' in prompt and '不能只重复公式名称' in prompt and '说明应简洁' in prompt
+            assert 'concise purpose' in prompt and 'valid JSON' in prompt
+            assert kwargs['json_object'] is True
             return '{"formulas":[{"index":1,"description":"计算压力"},{"index":0,"description":"计算厚度"}]}'
         def _call_text_prompt(self, prompt, **kwargs):
             assert 'C=C1+C2' in prompt
             assert kwargs['max_tokens'] == 4096
+            assert kwargs['json_object'] is True
             return '{"formulas":[{"index":0,"description":"计算厚度"},{"index":1,"description":"计算压力"}]}'
     monkeypatch.setattr(single_page_tools, 'DynamicVLMClient', Model)
     targets = [{'formula_id': 'f1', 'layout_id': 'a'}, {'formula_id': 'f2', 'layout_id': 'b'}]
@@ -425,3 +447,49 @@ def test_single_formula_prompt_requires_relationships_not_just_title():
             return super()._call_text_prompt(prompt, **kwargs)
     provider = FormulaProvider('{"formulas":[{"element_id":"o1","semantic_desc":"说明变量间的计算关系"}]}')
     assert enhance_object_semantics(request(), {}, provider_factory=lambda cfg: provider)['status'] == 'complete'
+
+
+def test_page_formula_invalid_json_reports_retryable_reason(monkeypatch):
+    class Model:
+        enabled = True
+        max_tokens = 4096
+        last_call_info = {}
+        def __init__(self, config): pass
+        def _call_text_prompt(self, prompt, **kwargs):
+            return '{"formulas":[{"index":0,"description":"bad \\sigma"}]}'
+    monkeypatch.setattr(single_page_tools, 'DynamicVLMClient', Model)
+    fallback = {'page_no': 20, 'page_text': 'context', 'formulas': [{'layout_id': 'a', 'latex': 'x=y'}]}
+    result = single_page_tools.enhance_saved_page_formula_semantics(
+        None, None, [{'formula_id': 'f1', 'layout_id': 'a'}], {}, 'en', fallback)
+    assert result == {'formulas': [{'formula_id': 'f1', 'semantic_desc': r'bad \sigma'}], 'model_calls': 1}
+
+
+def test_page_formula_truncated_json_is_not_repaired(monkeypatch):
+    class Model:
+        enabled = True
+        max_tokens = 4096
+        last_call_info = {}
+        def __init__(self, config): pass
+        def _call_text_prompt(self, prompt, **kwargs):
+            return '{"formulas":[{"index":0,"description":"incomplete'
+    monkeypatch.setattr(single_page_tools, 'DynamicVLMClient', Model)
+    fallback = {'page_no': 20, 'page_text': 'context', 'formulas': [{'layout_id': 'a', 'latex': 'x=y'}]}
+    result = single_page_tools.enhance_saved_page_formula_semantics(
+        None, None, [{'formula_id': 'f1', 'layout_id': 'a'}], {}, 'en', fallback)
+    assert result == {'formulas': [], 'model_calls': 1, 'reason': 'invalid_formula_semantics_json'}
+
+
+def test_page_formula_fractional_or_boolean_index_never_maps_to_target(monkeypatch):
+    class Model:
+        enabled = True
+        max_tokens = 4096
+        last_call_info = {}
+        def __init__(self, config): pass
+        def _call_text_prompt(self, prompt, **kwargs):
+            return '{"formulas":[{"index":0.9,"description":"incorrect"},{"index":true,"description":"incorrect"}]}'
+    monkeypatch.setattr(single_page_tools, 'DynamicVLMClient', Model)
+    fallback = {'page_no': 20, 'page_text': 'context', 'formulas': [
+        {'layout_id': 'a', 'latex': 'x=y'}, {'layout_id': 'b', 'latex': 'z=q'}]}
+    result = single_page_tools.enhance_saved_page_formula_semantics(None, None,
+        [{'formula_id': 'f1', 'layout_id': 'a'}, {'formula_id': 'f2', 'layout_id': 'b'}], {}, 'en', fallback)
+    assert result == {'formulas': [], 'model_calls': 1}
