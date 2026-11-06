@@ -10,6 +10,8 @@ import tempfile
 from pathlib import Path
 import re
 
+from .thinking_policy import thinking_capabilities
+
 IDENTITY = ("tenant_id", "doc_id", "version", "table_id", "table_pk")
 NUMBER = r"-?\d+(?:\.\d+)?"
 REASONS = {
@@ -288,6 +290,11 @@ def validate_proposal(proposal, binding, sources, positions):
         for record in section.get("records", []):
             if not isinstance(record, dict) or set(record) - {"values", "conditions", "groups"}:
                 raise ValueError("content_conflict")
+            if isinstance(record.get("values"), list):
+                values = record["values"]
+                if len(values) != len(fields):
+                    raise ValueError("incomplete_record")
+                record = {**record, "values": {field["key"]: ref for field, ref in zip(fields, values)}}
             if not isinstance(record.get("values"), dict) or set(record["values"]) != field_keys:
                 raise ValueError("incomplete_record")
             records.append({"values": {name: bind(ref) for name, ref in record["values"].items()},
@@ -420,6 +427,14 @@ def enhance_table(request, parse_grid, vlm_factory, vlm_config=None, description
             config = {**(vlm_config or {}), "description_language": description_language, "max_retries": 0,
                       "_calculation_processing": "single_operation", "table_analysis_max_model_calls": 1,
                       "table_analysis_max_physical_requests": 1}
+            requested_thinking = request.get("thinking_mode")
+            if requested_thinking is not None:
+                if requested_thinking not in {"default", "high"}:
+                    raise ValueError("invalid_request")
+                supported = thinking_capabilities(config.get("base_url"), config.get("model"))["modes"]
+                actual_thinking = requested_thinking if requested_thinking in supported else "default"
+                config["thinking_mode"] = actual_thinking
+                out["thinking"] = {"requested": requested_thinking, "actual": actual_thinking}
             config["timeout_sec"] = max(1, min(int(config.get("timeout_sec", 60)), 60))
             prepared_image = _object_image_args(request)
             owned_image = prepared_image.pop("_owned_image_path", None)

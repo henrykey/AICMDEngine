@@ -582,3 +582,56 @@ def test_query_rejects_multi_attempt_business_budget(monkeypatch):
     out = run(req)['query_enhancement']
     assert calls == []
     assert any(issue['reason'] == 'invalid_model_budget' for issue in out['unresolved'])
+
+
+@pytest.mark.parametrize("base_url,model,expected", [
+    ("https://open.bigmodel.cn/api/paas/v4", "glm-5.3-flash", "high"),
+    ("https://open.bigmodel.cn/api/paas/v4", "glm-4.6v-flashx", "default"),
+])
+def test_query_uses_high_thinking_only_when_supported(base_url, model, expected):
+    req = request(); req.update(query_strategy="model_required", max_model_calls=1, thinking_mode="high")
+    captured = []
+    class Client:
+        last_call_info = {}
+        physical_requests = 1
+        def explain_table_query(self, *args, **kwargs): return {}
+    def factory(config):
+        captured.append(config)
+        return Client()
+    result = query.enhance_table(req, single_page_tools._html_table_to_grid, factory,
+                                 {"base_url": base_url, "model": model}, "zh")
+    assert captured[0]["thinking_mode"] == expected
+    assert result["query_enhancement"]["thinking"] == {"requested": "high", "actual": expected}
+
+
+def test_compact_record_references_are_validated_against_source(monkeypatch):
+    req = request(); req.update(query_strategy="semantic_review", max_model_calls=1)
+    p = proposal(req)
+    for record in p["lookup_sections"][0]["records"]:
+        record["values"] = list(record["values"].values())
+    monkeypatch.setattr(DynamicVLMClient, "explain_table_query", lambda *args: p)
+    out = run(req)["query_enhancement"]
+    assert out["lookup_status"] == "complete"
+    assert out["lookup_sections"][0]["records"][1]["values"]["c0"]["status"] == "merged_fill"
+    p["lookup_sections"][0]["records"][0]["values"].pop()
+    out = run(req)["query_enhancement"]
+    assert out["lookup_status"] == "unavailable"
+    assert "incomplete_record" in [i["reason"] for i in out["unresolved"]]
+
+
+def test_long_table_compact_records_preserve_all_cells(monkeypatch):
+    html = "<table><tr><th>Key</th><th>Value</th></tr>" + "".join(
+        f"<tr><td>k{i}</td><td>{i}</td></tr>" for i in range(150)) + "</table>"
+    req = request(html); req.update(query_strategy="semantic_review", max_model_calls=1)
+    p = proposal(req)
+    for record in p["lookup_sections"][0]["records"]:
+        record["values"] = list(record["values"].values())
+    monkeypatch.setattr(DynamicVLMClient, "explain_table_query", lambda *args: p)
+    out = run(req)["query_enhancement"]
+    assert out["lookup_status"] == "complete"
+    assert len(out["lookup_sections"][0]["records"]) == 150
+    assert out["lookup_sections"][0]["records"][-1]["values"]["c1"]["raw_text"] == "149"
+    p["lookup_sections"][0]["records"].pop()
+    out = run(req)["query_enhancement"]
+    assert out["lookup_status"] == "unavailable"
+    assert "unmapped_source_cells" in [i["reason"] for i in out["unresolved"]]
