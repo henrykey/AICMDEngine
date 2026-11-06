@@ -331,7 +331,7 @@ def test_page_semantic_tool_routes_table_and_rejects_other_types(monkeypatch):
                                  'description_language': 'zh'})
         assert '表的用途' in str(result)
         with pytest.raises(Exception, match='unsupported_page_object_type'):
-            await tool.run({'object_type': 'formula', 'source_identity': {}, 'targets': []})
+            await tool.run({'object_type': 'figure', 'source_identity': {}, 'targets': []})
     asyncio.run(check())
     assert len(calls) == 1
 
@@ -357,3 +357,71 @@ def test_page_table_semantics_falls_back_only_when_original_missing(monkeypatch)
     with pytest.raises(ValueError, match="original_page_identity_mismatch"):
         single_page_tools.enhance_saved_page_table_semantics(
             Manager("original_page_identity_mismatch"), {"tenant_id": "33"}, targets, {}, "zh", fallback)
+
+
+def test_page_formula_semantics_original_and_text_fallback(monkeypatch):
+    class Manager:
+        def read_original_page(self, identity):
+            if identity.get('missing'):
+                raise ValueError('original_page_unavailable')
+            return b'page', {'elements': {'formulas': [
+                {'layout_id': 'a', 'latex': 'C=C1+C2'}, {'layout_id': 'b', 'latex': 'P=F/A'}]},
+                'rag': {'page_text': '厚度与压力'}}
+    class Model:
+        enabled = True
+        max_tokens = 4096
+        last_call_info = {}
+        def __init__(self, config): pass
+        def _call_image_prompt(self, path, prompt, **kwargs):
+            assert 'C=C1+C2' in prompt and '厚度与压力' in prompt
+            assert kwargs['max_tokens'] == 4096
+            assert '公式的用途' in prompt and '不能只重复公式名称' in prompt and '说明应简洁' in prompt
+            return '{"formulas":[{"index":1,"description":"计算压力"},{"index":0,"description":"计算厚度"}]}'
+        def _call_text_prompt(self, prompt, **kwargs):
+            assert 'C=C1+C2' in prompt
+            assert kwargs['max_tokens'] == 4096
+            return '{"formulas":[{"index":0,"description":"计算厚度"},{"index":1,"description":"计算压力"}]}'
+    monkeypatch.setattr(single_page_tools, 'DynamicVLMClient', Model)
+    targets = [{'formula_id': 'f1', 'layout_id': 'a'}, {'formula_id': 'f2', 'layout_id': 'b'}]
+    expected = {'formulas': [{'formula_id': 'f1', 'semantic_desc': '计算厚度'},
+                             {'formula_id': 'f2', 'semantic_desc': '计算压力'}], 'model_calls': 1}
+    assert single_page_tools.enhance_saved_page_formula_semantics(Manager(), {'run_id': 'ok'}, targets, {}, 'zh') == expected
+    fallback = {'page_text': '厚度与压力', 'formulas': [{'layout_id': 'a', 'latex': 'C=C1+C2'}, {'layout_id': 'b', 'latex': 'P=F/A'}]}
+    assert single_page_tools.enhance_saved_page_formula_semantics(Manager(), {'missing': True}, targets, {}, 'zh', fallback) == expected
+    with pytest.raises(ValueError):
+        single_page_tools.enhance_saved_page_formula_semantics(Manager(), {'missing': True}, targets, {}, 'zh')
+
+
+def test_page_formula_semantics_rejects_ambiguous_mapping():
+    class Manager:
+        def read_original_page(self, identity):
+            return b'page', {'elements': {'formulas': [{'layout_id': 'a'}, {'layout_id': 'a'}]}}
+    with pytest.raises(ValueError, match='ambiguous'):
+        single_page_tools.enhance_saved_page_formula_semantics(Manager(), {'run_id': 'ok'}, [{'formula_id': 'f', 'layout_id': 'a'}], {}, 'zh')
+
+
+def test_registered_page_tool_routes_formula(monkeypatch):
+    import asyncio
+    server = importlib.import_module(single_page_tools.__package__ + ".server")
+    calls = []
+    def describe(manager, identity, targets, config, language, fallback_page=None):
+        calls.append(targets)
+        return {'formulas': [{'formula_id': 'f1', 'semantic_desc': '计算厚度'}], 'model_calls': 1}
+    monkeypatch.setattr(single_page_tools, 'enhance_saved_page_formula_semantics', describe)
+    async def check():
+        tool = next(tool for tool in await server.mcp.list_tools() if tool.name == 'enhance_page_object_semantics')
+        result = await tool.run({'object_type': 'formula', 'source_identity': {'tenant_id': '33'},
+                                 'targets': [{'formula_id': 'f1', 'layout_id': 'a'}], 'description_language': 'zh'})
+        assert '计算厚度' in str(result)
+    asyncio.run(check())
+    assert len(calls) == 1
+
+
+def test_single_formula_prompt_requires_relationships_not_just_title():
+    class FormulaProvider(Provider):
+        def _call_text_prompt(self, prompt, **kwargs):
+            assert 'how its terms determine the result' in prompt and 'Be concise' in prompt
+            assert 'title or name alone is not a description' in prompt
+            return super()._call_text_prompt(prompt, **kwargs)
+    provider = FormulaProvider('{"formulas":[{"element_id":"o1","semantic_desc":"说明变量间的计算关系"}]}')
+    assert enhance_object_semantics(request(), {}, provider_factory=lambda cfg: provider)['status'] == 'complete'

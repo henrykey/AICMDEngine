@@ -1042,6 +1042,61 @@ def enhance_saved_page_table_semantics(manager, identity, targets, vlm_config, d
     return {"tables": result, "model_calls": 1}
 
 
+
+def enhance_saved_page_formula_semantics(manager, identity, targets, vlm_config, description_language, fallback_page=None):
+    """Describe saved page formulas without changing their source content."""
+    image = None
+    page = None
+    if identity:
+        try:
+            image, page = manager.read_original_page(identity)
+        except ValueError as exc:
+            if str(exc) != "original_page_unavailable":
+                raise
+    if page is None:
+        if not isinstance(fallback_page, dict) or not isinstance(fallback_page.get("formulas"), list):
+            raise ValueError("original_page_unavailable")
+        page = {"elements": {"formulas": fallback_page["formulas"]},
+                "rag": {"page_text": fallback_page.get("page_text", "")}}
+    elements = page.get("elements") if isinstance(page.get("elements"), dict) else {}
+    source = elements.get("formulas")
+    # Reuse the exact-layout matching contract used by page tables.
+    mapped = _map_semantic_table_targets(
+        [{"table_id": target.get("formula_id"), "layout_id": target.get("layout_id")} for target in targets], source)
+    items = [deepcopy(mapped[target["formula_id"]]) for target in targets]
+    rag = page.get("rag") if isinstance(page.get("rag"), dict) else {}
+    page_text = str(rag.get("page_text") or rag.get("content") or "")
+    if not page_text.strip() and not any(item.get("latex") or item.get("formula") for item in items) and not image:
+        raise ValueError("page_evidence_unavailable")
+    vlm = DynamicVLMClient(vlm_config or {})
+    if not vlm.enabled:
+        raise ValueError("model_unavailable")
+    prompt = _prompt_formula_metadata(page_text, items, description_language)
+    if not image:
+        prompt = prompt.replace("图片中已识别的公式", "页面资料中已识别的公式")
+        prompt += "\n完整页面文字：\n" + page_text
+    if image:
+        with tempfile.TemporaryDirectory(prefix="pdf2md_formula_semantics_") as directory:
+            image_path = Path(directory) / "page.png"
+            image_path.write_bytes(image)
+            result = _request_formula_metadata(vlm, str(image_path), prompt, max_tokens=16384)
+    else:
+        result = _request_formula_metadata(vlm, None, prompt, max_tokens=16384)
+    if getattr(vlm, "last_call_info", {}).get("finish_reason") in {"length", "content_filter", "tool_calls"}:
+        raise ValueError("incomplete_formula_semantics")
+    metadata = result.formulas if isinstance(result, OcrResult) else []
+    indices = [_metadata_index(entry.raw) if isinstance(entry.raw, dict) else None for entry in metadata]
+    result = []
+    for index, target in enumerate(targets):
+        if indices.count(index) != 1:
+            continue
+        entry = metadata[indices.index(index)]
+        desc = _cell_to_text(entry.description)
+        if desc:
+            result.append({"formula_id": target["formula_id"], "semantic_desc": desc})
+    return {"formulas": result, "model_calls": 1}
+
+
 def _request_table_metadata(vlm, image_path, items, page_text, description_language):
     """Request metadata for the selected tables using their original full-page image."""
     with vlm.calculation_scope() if callable(getattr(vlm, 'calculation_scope', None)) else nullcontext():
@@ -1205,6 +1260,14 @@ def _extract_formula_page_result(
     return _formula_page_result(ctx, model_calls, warnings, page_markdown, items)
 
 
+
+def _request_formula_metadata(vlm, image_path, prompt, max_tokens=2048):
+    if image_path:
+        return _call_vlm_structured(vlm, image_path, prompt, max_tokens=min(vlm.max_tokens, max_tokens))
+    raw = vlm._call_text_prompt(prompt, max_tokens=min(vlm.max_tokens, max_tokens), safe_errors=True)
+    return normalize_text_response(raw, "vlm_ocr")
+
+
 def _enrich_formula_metadata_with_vlm(
     ctx: SinglePageContext,
     vlm: DynamicVLMClient,
@@ -1221,11 +1284,8 @@ def _enrich_formula_metadata_with_vlm(
         return
     try:
         model_calls["vlm_ocr"] += 1
-        result = _call_vlm_structured(
-            vlm, ctx.image_path,
-            _prompt_formula_metadata(ctx.page_text, items, description_language),
-            max_tokens=min(vlm.max_tokens, 2048),
-        )
+        result = _request_formula_metadata(
+            vlm, ctx.image_path, _prompt_formula_metadata(ctx.page_text, items, description_language))
         metadata = result.formulas if isinstance(result, OcrResult) else []
         matched = 0
         for entry in metadata:
@@ -2320,6 +2380,9 @@ def _prompt_formula_metadata(page_text: str, items: List[Dict[str, Any]], descri
     return (
         f"{_description_language_instruction(description_language)}\n"
         "为图片中已识别的公式补充语义描述，只输出严格 JSON。不要改写 LaTeX。"
+        "简要说明公式的用途及原页明确给出的适用条件，帮助读者理解公式用于解决什么问题。"
+        "不要解释或推测变量的含义，不复述算式或运算步骤。"
+        "不能只重复公式名称或标题。说明应简洁，不展开冗长推导。"
         "返回 schema：{\"formulas\":[{\"index\":0,\"description\":\"\"}]}。"
         f"已识别公式：{json.dumps(formulas, ensure_ascii=False)}\n"
         f"页面上下文：{_trim_context(page_text)}"

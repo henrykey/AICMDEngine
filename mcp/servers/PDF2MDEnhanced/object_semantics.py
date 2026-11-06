@@ -51,6 +51,15 @@ def enhance_object_semantics(request, vlm_config=None, *, provider_factory=None,
         "Copy source names and titles verbatim; do not translate them. "
         f"Schema: {json.dumps(schema, ensure_ascii=False)}. Evidence: "
         + json.dumps(request, ensure_ascii=False))
+    if request["element_type"] == "formula":
+        prompt += (" Explain the formula purpose and how its terms determine the result. Be concise; avoid lengthy derivations. "
+                   "Use variable definitions and applicable conditions only when supported by the supplied context; "
+                   "explain available input/output relationships. If the page does not explicitly define a symbol, "
+                   "do not infer its meaning from general knowledge; leave it undefined. "
+                   "Do not list variable definitions; use the original symbols when describing relationships. "
+                   "A formula title or name alone is not a description. "
+                   "For formula semantic_desc return exactly one concise sentence about its purpose and applicability. "
+                   "Do not copy the equation, numeric coefficients, symbols, variable definitions or calculation steps.")
     if request["element_type"] == "figure":
         prompt += figure_description_instruction()
     image_args = {}
