@@ -1,5 +1,29 @@
 # Changelog
 
+## v1.2.7 - 2026-11-07
+
+### Added
+
+- Added authenticated model thinking-capability discovery from bounded official sources, with separate thinking-switch and reasoning-effort evidence, tenant-scoped records, and HTTP acceptance probes.
+- Added page object semantic completion and compact references for table queries.
+
+### Changed
+
+- Improved figure and formula semantic descriptions, figure-plate provenance and caption recovery, and preservation of table cell-image semantics and HTML geometry.
+- Made page and table-image recovery caller-directed, preserved valid images during partial recovery, and made table-image recovery output budgets configurable.
+- Enabled the thinking switch for GLM-4.6V FlashX table queries when explicitly requested; discovered parameters retain an unverified effectiveness status.
+
+### Fixed
+
+- Bound MCP execution to authenticated identity, preserved render DPI, and improved figure reconciliation and table recognition.
+- Repaired escaped JSON in page semantic responses and preserved source drawings and table content during recovery.
+
+### Integration and verification
+
+- Membership Docs retains classification, orchestration, recovery decisions, budgets, and document lifecycle; MCP performs bounded requested operations.
+- Model discovery distinguishes exact-model evidence, family inference, unknown support, and HTTP acceptance. An HTTP 2xx response does not establish that a thinking setting takes effect.
+- The model-capability and PDF2MD focused offline suite passed 256 tests. Real-model checks observed GLM-5.3 Flash `reasoning_effort=high` evidence and HTTP acceptance; GLM-4.6V FlashX automatic discovery remained unknown. Deployment acceptance remains unverified.
+
 ## v1.2.6 - 2026-10-31
 
 ### Changed
