@@ -19,6 +19,21 @@ from urllib.parse import urlsplit
 logger = logging.getLogger(__name__)
 
 
+def valid_router_thinking(value):
+    if not isinstance(value, dict) or not value or set(value) - {"thinking", "enable_thinking", "reasoning_effort"}:
+        return False
+    if "thinking" in value and "enable_thinking" in value:
+        return False
+    if "thinking" in value and value["thinking"] not in ({"type": "enabled"}, {"type": "disabled"}):
+        return False
+    if "enable_thinking" in value and not isinstance(value["enable_thinking"], bool):
+        return False
+    if "reasoning_effort" in value and (not isinstance(value["reasoning_effort"], str)
+            or value["reasoning_effort"] not in {"none", "minimal", "low", "medium", "high", "xhigh", "max"}):
+        return False
+    return True
+
+
 def _table_image_instruction() -> str:
     return (
         " Inspect every table cell in the source image for diagrams, charts or pictures, including mixed text/image cells. "
@@ -162,6 +177,9 @@ class DynamicVLMClient:
         if thinking_mode not in thinking_capabilities(self.base_url, self.model)["modes"]:
             thinking_mode = "default"
         self.thinking_parameters = thinking_parameters(self.base_url, self.model, thinking_mode)
+        discovered = cfg.get("_router_discovered_thinking")
+        if valid_router_thinking(discovered):
+            self.thinking_parameters = dict(discovered)
         self.description_language = str(cfg.get("description_language") or "unknown")
         self._runtime_max_tokens_cap: Optional[int] = None
         self.last_dual_output_budget: Dict[str, Any] = {}

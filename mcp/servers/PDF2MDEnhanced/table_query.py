@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 
 from .thinking_policy import thinking_capabilities
+from .vlm_client import valid_router_thinking
 
 IDENTITY = ("tenant_id", "doc_id", "version", "table_id", "table_pk")
 NUMBER = r"-?\d+(?:\.\d+)?"
@@ -434,7 +435,11 @@ def enhance_table(request, parse_grid, vlm_factory, vlm_config=None, description
                 supported = thinking_capabilities(config.get("base_url"), config.get("model"))["modes"]
                 actual_thinking = requested_thinking if requested_thinking in supported else "default"
                 config["thinking_mode"] = actual_thinking
+                if requested_thinking == "high" and valid_router_thinking(config.get("_router_discovered_thinking")):
+                    actual_thinking = "unverified"
                 out["thinking"] = {"requested": requested_thinking, "actual": actual_thinking}
+                if actual_thinking == "unverified":
+                    out["thinking"]["probe_status"] = "http_accepted"
             config["timeout_sec"] = max(1, min(int(config.get("timeout_sec", 60)), 60))
             prepared_image = _object_image_args(request)
             owned_image = prepared_image.pop("_owned_image_path", None)

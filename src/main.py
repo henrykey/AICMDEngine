@@ -15,6 +15,7 @@ from src.mcp_servers.test_mcp import TestMCPServer
 from src.mcp_servers.kb_mcp import KBMCP
 from src.mcp_servers.bpmn_mcp import BPMN_MCP
 from src.mcp_servers.form_mcp import FORM_MCP
+from src.mcp_servers.model_capabilities_mcp import ModelCapabilitiesMCPServer
 from src.services.command_retriever import CommandRetriever
 from src.services.direct_mcp_executor import DirectMCPExecutor
 from src.services.docintel_client import DocIntelClient
@@ -114,6 +115,20 @@ async def startup_db_client():
         mcp_registry.register_mcp(kb_mcp)
         mcp_registry.register_mcp(bpmn_mcp)
         mcp_registry.register_mcp(form_mcp)
+        from src.llm.thinking_capability_store import ThinkingCapabilityStore
+        from src.llm.thinking_probe_client import ThinkingProbeClient, ThinkingSourceExtractor
+        from src.llm.runtime_thinking import RuntimeThinkingService
+        thinking_client = ThinkingProbeClient(settings.membership_service_url)
+        try:
+            await app.mongodb.thinking_capabilities.create_index("expires_at", expireAfterSeconds=0)
+        except Exception:
+            logger.warning("Could not configure thinking capability expiry index")
+        thinking_store = ThinkingCapabilityStore(app.mongodb.thinking_capabilities)
+        runtime_thinking = RuntimeThinkingService(mcp_registry, app.mongodb, getattr(app, "provider_manager", None), thinking_store)
+        mcp_registry.register_mcp(ModelCapabilitiesMCPServer(
+            client=thinking_client, extractor=ThinkingSourceExtractor(thinking_client),
+            store=thinking_store, runtime=runtime_thinking,
+        ))
 
         # Register external MCP servers from a reloadable file when configured.
         if settings.external_mcps_file:

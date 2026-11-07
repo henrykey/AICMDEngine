@@ -10,6 +10,7 @@ from .base_server import BaseMCPServer
 from .result import ToolResult
 
 logger = logging.getLogger(__name__)
+_UNSET = object()
 
 
 class MCPRegistry:
@@ -64,6 +65,7 @@ class MCPRegistry:
         mcp_name: str,
         tool_name: str,
         llm_provider: Optional[str] = None,
+        execution_context: Optional[Any] = _UNSET,
         **kwargs
     ) -> ToolResult:
         """
@@ -105,6 +107,13 @@ class MCPRegistry:
         if llm_provider is not None:
             kwargs['_llm_provider'] = llm_provider
 
+        if mcp_name == "model-capabilities":
+            params = ({"server_name": kwargs.get("server_name")} if tool_name in {"discover_runtime_thinking_capabilities", "get_runtime_thinking_capabilities"}
+                      else {"provider_id": kwargs.get("provider_id")})
+            return await mcp.execute_with_context(tool_name, None if execution_context is _UNSET else execution_context,
+                                                  **params)
+        if execution_context is not _UNSET:
+            kwargs["execution_context"] = execution_context
         return await mcp.execute_tool(tool_name, **kwargs)
 
     def get_registry_info(self) -> Dict[str, Any]:

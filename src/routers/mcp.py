@@ -294,6 +294,15 @@ async def execute_mcp_tool(
         if bound_provider:
             vlm_config = _build_vlm_config_from_provider(request, bound_provider)
             if vlm_config:
+                query = kwargs.get("query_enhancement")
+                server = (registry.get_mcp("model-capabilities") if server_name == "pdf2md-enhanced"
+                          and tool_name == "extract_page_tables" and isinstance(query, dict)
+                          and query.get("thinking_mode") == "high" else None)
+                runtime = getattr(server, "runtime", None)
+                if runtime:
+                    from src.mcp_servers.model_capabilities_mcp import CapabilityExecutionContext
+                    identity = CapabilityExecutionContext(str(auth.extract_client_info(claims)["tenant_id"]), token)
+                    vlm_config = await runtime.apply_table_query(server_name, tool_name, kwargs, vlm_config, identity)
                 kwargs[vlm_key] = vlm_config
         else:
             logger.info("[%s.%s] no MCP->LLM binding found; skip VLM injection", server_name, tool_name)
@@ -312,10 +321,16 @@ async def execute_mcp_tool(
             logger.info("[%s.%s] no MCP->GLM-OCR binding found; skip OCR injection", server_name, tool_name)
 
     try:
+        execution_context = {}
+        if server_name == "model-capabilities":
+            from src.mcp_servers.model_capabilities_mcp import CapabilityExecutionContext
+            execution_context["execution_context"] = CapabilityExecutionContext(
+                tenant_id=str(auth.extract_client_info(claims)["tenant_id"]), token=token)
         result = await registry.execute_command(
             mcp_name=server_name,
             tool_name=tool_name,
             llm_provider=llm_provider,
+            **execution_context,
             **kwargs
         )
         # Transform ToolResult to MCP standard format

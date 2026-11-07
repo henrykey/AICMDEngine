@@ -346,9 +346,15 @@ class MCPProtocolHandler:
 
         # 执行工具（传递JWT token和tenant_id）
         try:
+            execution_context = {}
+            if mcp_name == "model-capabilities":
+                from src.mcp_servers.model_capabilities_mcp import CapabilityExecutionContext
+                execution_context["execution_context"] = CapabilityExecutionContext(
+                    tenant_id=str(context["client_info"]["tenant_id"]), token=context["jwt_token"])
             result = await registry.execute_command(
                 mcp_name=mcp_name,
                 tool_name=tool_name,
+                **execution_context,
                 **arguments
             )
 
@@ -377,6 +383,13 @@ class MCPProtocolHandler:
         if not isinstance(arguments, dict):
             raise ValueError("Tool arguments must be an object")
         args = dict(arguments)
+        if mcp_name == "pdf2md-enhanced":
+            for config_key in ("vlm_config", "vlm_defaults"):
+                value = args.get(config_key)
+                if isinstance(value, dict) and "_router_discovered_thinking" in value:
+                    raise ValueError("Reserved Router model parameter")
+        if mcp_name == "model-capabilities" and "execution_context" in args:
+            raise ValueError("execution_context is reserved")
         if "auth_token" in args and args["auth_token"] != token:
             raise ValueError("auth_token conflicts with authenticated identity")
         for key in ("tenant_id", "_tenant_id"):
@@ -444,6 +457,15 @@ class MCPProtocolHandler:
             if provider_name:
                 vlm_config = self._build_model_config_from_provider(provider_manager, provider_name, mcp_name, "VLM")
                 if vlm_config:
+                    query = args.get("query_enhancement")
+                    server = (registry.get_mcp("model-capabilities") if registry and mcp_name == "pdf2md-enhanced"
+                              and tool_name == "extract_page_tables" and isinstance(query, dict)
+                              and query.get("thinking_mode") == "high" else None)
+                    runtime = getattr(server, "runtime", None)
+                    if runtime and context.get("jwt_token") and context.get("client_info", {}).get("tenant_id"):
+                        from src.mcp_servers.model_capabilities_mcp import CapabilityExecutionContext
+                        identity = CapabilityExecutionContext(str(context["client_info"]["tenant_id"]), context["jwt_token"])
+                        vlm_config = await runtime.apply_table_query(mcp_name, tool_name, args, vlm_config, identity)
                     args[vlm_key] = vlm_config
             else:
                 logger.info("[%s.%s] no MCP->LLM binding found; skip VLM injection", mcp_name, tool_name)
