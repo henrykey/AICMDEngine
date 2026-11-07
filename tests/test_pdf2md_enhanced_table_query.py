@@ -586,7 +586,7 @@ def test_query_rejects_multi_attempt_business_budget(monkeypatch):
 
 @pytest.mark.parametrize("base_url,model,expected", [
     ("https://open.bigmodel.cn/api/paas/v4", "glm-5.3-flash", "high"),
-    ("https://open.bigmodel.cn/api/paas/v4", "glm-4.6v-flashx", "default"),
+    ("https://open.bigmodel.cn/api/paas/v4", "glm-4.6v-flashx", "enabled"),
 ])
 def test_query_uses_high_thinking_only_when_supported(base_url, model, expected):
     req = request(); req.update(query_strategy="model_required", max_model_calls=1, thinking_mode="high")
@@ -600,7 +600,8 @@ def test_query_uses_high_thinking_only_when_supported(base_url, model, expected)
         return Client()
     result = query.enhance_table(req, single_page_tools._html_table_to_grid, factory,
                                  {"base_url": base_url, "model": model}, "zh")
-    assert captured[0]["thinking_mode"] == expected
+    assert captured[0]["thinking_mode"] == ("default" if expected == "enabled" else expected)
+    assert bool(captured[0].get("table_query_enable_thinking")) == (expected == "enabled")
     assert result["query_enhancement"]["thinking"] == {"requested": "high", "actual": expected}
 
 
@@ -635,3 +636,11 @@ def test_long_table_compact_records_preserve_all_cells(monkeypatch):
     out = run(req)["query_enhancement"]
     assert out["lookup_status"] == "unavailable"
     assert "unmapped_source_cells" in [i["reason"] for i in out["unresolved"]]
+
+
+def test_table_query_thinking_switch_is_scoped_to_explicit_flag():
+    config = {"base_url": "https://open.bigmodel.cn/api/paas/v4", "model": "glm-4.6v-flashx"}
+    normal = DynamicVLMClient(config)
+    enabled = DynamicVLMClient({**config, "table_query_enable_thinking": True})
+    assert normal.thinking_parameters == {}
+    assert enabled.thinking_parameters == {"thinking": {"type": "enabled"}}

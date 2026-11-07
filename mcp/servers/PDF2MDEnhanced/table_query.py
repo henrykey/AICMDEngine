@@ -8,6 +8,7 @@ import html
 import hashlib
 import tempfile
 from pathlib import Path
+from urllib.parse import urlsplit
 import re
 
 from .thinking_policy import thinking_capabilities
@@ -435,6 +436,11 @@ def enhance_table(request, parse_grid, vlm_factory, vlm_config=None, description
                 supported = thinking_capabilities(config.get("base_url"), config.get("model"))["modes"]
                 actual_thinking = requested_thinking if requested_thinking in supported else "default"
                 config["thinking_mode"] = actual_thinking
+                if (requested_thinking == "high" and actual_thinking == "default"
+                        and (urlsplit(str(config.get("base_url") or "")).hostname or "").lower() == "open.bigmodel.cn"
+                        and str(config.get("model") or "").lower() == "glm-4.6v-flashx"):
+                    config["table_query_enable_thinking"] = True
+                    actual_thinking = "enabled"
                 if requested_thinking == "high" and valid_router_thinking(config.get("_router_discovered_thinking")):
                     actual_thinking = "unverified"
                 out["thinking"] = {"requested": requested_thinking, "actual": actual_thinking}

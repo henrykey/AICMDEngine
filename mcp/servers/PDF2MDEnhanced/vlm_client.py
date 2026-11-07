@@ -177,6 +177,10 @@ class DynamicVLMClient:
         if thinking_mode not in thinking_capabilities(self.base_url, self.model)["modes"]:
             thinking_mode = "default"
         self.thinking_parameters = thinking_parameters(self.base_url, self.model, thinking_mode)
+        if (cfg.get("table_query_enable_thinking") is True
+                and (urlsplit(self.base_url).hostname or "").lower() == "open.bigmodel.cn"
+                and self.model.lower() == "glm-4.6v-flashx"):
+            self.thinking_parameters = {"thinking": {"type": "enabled"}}
         discovered = cfg.get("_router_discovered_thinking")
         if valid_router_thinking(discovered):
             self.thinking_parameters = dict(discovered)
