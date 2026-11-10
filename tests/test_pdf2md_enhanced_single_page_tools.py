@@ -1655,6 +1655,9 @@ def test_process_task_page_does_not_promote_single_page_table_schema(monkeypatch
         description_language = "unknown"
 
     class FakeManager:
+        def begin_page_worker(self, *args): pass
+        def finish_page_worker(self, *args): pass
+
         def validate_source_identity(self, task_id, source_identity):
             assert source_identity is None
 
@@ -1754,6 +1757,9 @@ def test_process_task_page_uses_task_description_language_when_request_is_unknow
         description_language = "zh"
 
     class FakeManager:
+        def begin_page_worker(self, *args): pass
+        def finish_page_worker(self, *args): pass
+
         def validate_source_identity(self, task_id, source_identity):
             assert source_identity is None
 
@@ -2570,6 +2576,9 @@ def test_calculation_page_handoff_keeps_one_worker_and_ordinary_sync(monkeypatch
     release = threading.Event()
     entered = threading.Event()
     class FakeManager:
+        def begin_page_worker(self, *args): pass
+        def finish_page_worker(self, *args): pass
+
         def validate_source_identity(self, task_id, source_identity):
             assert source_identity is None
 
@@ -2600,7 +2609,13 @@ def test_calculation_page_handoff_keeps_one_worker_and_ordinary_sync(monkeypatch
                     routing_config={'calculation_async': True})
         pending = asyncio.create_task(fn(**args))
         try:
-            while not entered.is_set(): await asyncio.sleep(.001)
+            async def wait_for_worker():
+                while not entered.is_set():
+                    if pending.done():
+                        await pending
+                        raise AssertionError('Page operation ended before the worker started')
+                    await asyncio.sleep(.001)
+            await asyncio.wait_for(wait_for_worker(), 1)
             if calculation:
                 first = json.loads(await asyncio.wait_for(asyncio.shield(pending), .2))
                 assert first['status'] == 'processing'
@@ -2621,7 +2636,7 @@ def test_calculation_page_handoff_keeps_one_worker_and_ordinary_sync(monkeypatch
             assert manager.calls == 1
         finally:
             release.set()
-            await pending
+            await asyncio.wait_for(pending, 1)
     asyncio.run(run())
 
 

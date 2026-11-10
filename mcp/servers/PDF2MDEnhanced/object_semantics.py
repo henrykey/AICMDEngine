@@ -5,6 +5,7 @@ from pathlib import Path
 from .table_query import _object_image_args
 from .semantic_language import description_mismatch, figure_description_instruction
 from .vlm_client import DynamicVLMClient
+from .model_errors import model_error_code
 
 _extract_model_json = DynamicVLMClient._extract_json
 
@@ -85,8 +86,13 @@ def enhance_object_semantics(request, vlm_config=None, *, provider_factory=None,
                 raw = provider._call_image_prompt(image_args["image_path"], prompt, max_tokens=4096, safe_errors=True)
             else:
                 raw = provider._call_text_prompt(prompt, max_tokens=4096, safe_errors=True)
-        except Exception:
-            return failed("provider_call_failed")
+        except Exception as exc:
+            code = model_error_code(exc)
+            result = failed("provider_call_failed")
+            if code:
+                result.update(error=code.lower(), error_code=code)
+                result.update(element_type=request["element_type"], element_id=request["element_id"])
+            return result
     finally:
         if image_args.get("_owned_image_path"):
             Path(image_args["_owned_image_path"]).unlink(missing_ok=True)

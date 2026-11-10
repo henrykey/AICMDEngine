@@ -4,6 +4,8 @@ import asyncio
 import json
 import os
 import logging
+import functools
+import inspect
 from typing import Any, Dict, List, Optional
 
 from fastmcp import FastMCP
@@ -32,6 +34,44 @@ logger = logging.getLogger(__name__)
 mcp = FastMCP(name="pdf2md-enhanced", mask_error_details=True)
 manager = TaskManager(output_dir=OUTPUT_DIR)
 _calculation_page_operations = {}
+
+
+from .model_errors import model_error_code as _model_error_code
+
+
+def _model_rate_limited(exc: Exception) -> bool:
+    return _model_error_code(exc) == "MODEL_RATE_LIMITED"
+
+
+def _model_error_response(func):
+    @functools.wraps(func)
+    async def wrapped(*args, **kwargs):
+        try:
+            return await func(*args, **kwargs)
+        except Exception as exc:
+            code = _model_error_code(exc)
+            if not code:
+                raise
+            values = inspect.signature(func).bind(*args, **kwargs)
+            values.apply_defaults()
+            values = values.arguments
+            result = {"error": code.lower(), "error_code": code}
+            if "page_no" in values:
+                result["page_no"] = values["page_no"]
+            if "object_type" in values:
+                result["object_type"] = values["object_type"]
+                identity = values.get("source_identity")
+                if isinstance(identity, dict):
+                    result["source_identity"] = {k: identity[k] for k in (
+                        "tenant_id", "doc_id", "run_id", "version", "source_page_no",
+                        "source_file_sha256", "render_dpi") if k in identity}
+                fallback = values.get("fallback_page")
+                if isinstance(fallback, dict) and type(fallback.get("page_no")) is int:
+                    result["page_no"] = fallback["page_no"]
+                result["targets"] = [{k: target[k] for k in ("table_id", "formula_id", "layout_id") if k in target}
+                                     for target in values.get("targets", []) if isinstance(target, dict)]
+            return json.dumps(result, ensure_ascii=False)
+    return wrapped
 
 
 @mcp.tool("health_check")
@@ -115,6 +155,11 @@ async def process_task_page(
                                         prev_context, description_language, routing_config)
     key = (task_id, page_no)
     entry = _calculation_page_operations.get(key)
+    if entry is not None and entry[0].done() and not (routing_config or {}).get("calculation_poll"):
+        previous = json.loads(entry[0].result())
+        if previous.get("error"):
+            _calculation_page_operations.pop(key, None)
+            entry = None
     if entry is None:
         if (routing_config or {}).get("calculation_poll"):
             return json.dumps({"task_id": task_id, "page_no": page_no, "error": "calculation_page_execution_missing"})
@@ -266,21 +311,27 @@ async def _process_task_page(
         )
         res = {"task_id": task_id, "page_no": page_no, "error": msg, "vlm": vlm_used}
     except Exception as exc:
+        error_code = _model_error_code(exc)
+        error = error_code.lower() if error_code else "page_processing_failed"
         try:
             if prior_result is not None:
                 await loop.run_in_executor(None, manager.update_page_result, task_id, page_no, prior_result)
             else:
-                await loop.run_in_executor(None, manager.update_page_failed, task_id, page_no, str(exc))
+                await loop.run_in_executor(None, manager.update_page_failed, task_id, page_no, error)
         except ValueError as state_error:
             if str(state_error) == "document_run_already_finalized":
                 return json.dumps({"task_id": task_id, "page_no": page_no, "error": str(state_error)})
             raise
-        logger.exception("process_task_page failed: task_id=%s page_no=%s", task_id, page_no)
-        res = {"task_id": task_id, "page_no": page_no, "error": str(exc), "vlm": vlm_used}
+        logger.warning("process_task_page failed: task_id=%s page_no=%s error=%s", task_id, page_no, error)
+        res = {"task_id": task_id, "page_no": page_no, "error": error,
+               "vlm": {key: value for key, value in vlm_used.items() if key != "base_url"}}
+        if error_code:
+            res["error_code"] = error_code
     return json.dumps(res, ensure_ascii=False)
 
 
 @mcp.tool("extract_page_tables")
+@_model_error_response
 async def extract_page_tables(
     file_path: Optional[str] = None,
     file_data: Optional[str] = None,
@@ -337,6 +388,7 @@ async def enhance_object_semantics(
 
 
 @mcp.tool("enhance_page_object_semantics")
+@_model_error_response
 async def enhance_page_object_semantics(
     object_type: str,
     targets: List[Dict[str, Any]],
@@ -361,6 +413,7 @@ async def enhance_page_object_semantics(
 
 
 @mcp.tool("analyze_page_layout")
+@_model_error_response
 async def analyze_page_layout(
     file_path: Optional[str] = None,
     file_data: Optional[str] = None,
@@ -392,6 +445,7 @@ async def analyze_page_layout(
 
 
 @mcp.tool("extract_page_formulas")
+@_model_error_response
 async def extract_page_formulas(
     file_path: Optional[str] = None,
     file_data: Optional[str] = None,
@@ -425,6 +479,7 @@ async def extract_page_formulas(
 
 
 @mcp.tool("extract_page_layout_enhanced")
+@_model_error_response
 async def extract_page_layout_enhanced(
     file_path: Optional[str] = None,
     file_data: Optional[str] = None,
@@ -456,6 +511,7 @@ async def extract_page_layout_enhanced(
 
 
 @mcp.tool("extract_page_figures")
+@_model_error_response
 async def extract_page_figures(
     file_path: Optional[str] = None,
     file_data: Optional[str] = None,
@@ -491,6 +547,7 @@ async def extract_page_figures(
 
 
 @mcp.tool("extract_page_structured")
+@_model_error_response
 async def extract_page_structured(
     file_path: Optional[str] = None,
     file_data: Optional[str] = None,
@@ -524,6 +581,7 @@ async def extract_page_structured(
 
 
 @mcp.tool("revise_page_markdown")
+@_model_error_response
 async def revise_page_markdown(
     file_data: Optional[str] = None,
     file_path: Optional[str] = None,

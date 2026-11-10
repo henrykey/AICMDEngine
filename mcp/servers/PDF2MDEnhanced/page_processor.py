@@ -162,11 +162,10 @@ def process_page(
         vlm = DynamicVLMClient(effective_vlm_config)
         vlm.conversion_only = True
         logger.info(
-            "process_page vlm_client: enabled=%s provider=%s model=%s base_url=%s timeout=%s max_retries=%s",
+            "process_page vlm_client: enabled=%s provider=%s model=%s timeout=%s max_retries=%s",
             vlm.enabled,
             vlm.provider,
             vlm.model,
-            vlm.base_url,
             vlm.timeout_sec,
             vlm.max_retries,
         )
@@ -314,8 +313,8 @@ def process_page(
                 glm_result = glm_ocr.extract_page(str(image_path))
                 structured = _structured_from_ocr_result(glm_result, include_figures=False)
                 markdown = _merge_region_vlm_markdown(markdown, structured)
-            except Exception:
-                raise ValueError("ocr_conversion_failed") from None
+            except Exception as exc:
+                raise ValueError("ocr_conversion_failed") from exc
         elif route_selected == "full_glm_ocr":
             try:
                 glm_calls += 1
@@ -325,8 +324,8 @@ def process_page(
                 structured = _structured_from_ocr_result(glm_result, include_figures=False)
                 if _glm_ocr_markdown_bad(markdown):
                     raise ValueError("invalid_ocr_source")
-            except Exception:
-                raise ValueError("ocr_conversion_failed") from None
+            except Exception as exc:
+                raise ValueError("ocr_conversion_failed") from exc
         elif route_selected == "hybrid_vlm_ocr" and (not rc.get("vlm_ocr_enabled") or not vlm.enabled):
             markdown = _build_direct_markdown(page)
             structured = {"formulas": [], "tables": [], "figures": []}
@@ -341,8 +340,8 @@ def process_page(
                 structured = _normalize_structured(rag_obj.get("elements"))
                 if not markdown.strip():
                     raise ValueError("empty_source")
-            except Exception:
-                raise ValueError("ocr_conversion_failed") from None
+            except Exception as exc:
+                raise ValueError("ocr_conversion_failed") from exc
         else:  # REGION_VLM
             markdown = _build_direct_markdown(page)
             structured = _normalize_structured(vlm.extract_region_structured(str(image_path)))

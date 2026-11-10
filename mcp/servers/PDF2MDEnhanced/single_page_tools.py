@@ -6,6 +6,8 @@ from .calculation_sheet import (
     calculation_transcription_quality,
 )
 
+from .model_errors import raise_model_error
+
 from .semantic_language import detect_description_language, normalize_language, validate_descriptions, figure_description_instruction
 
 import base64
@@ -143,6 +145,7 @@ def _process_calculation_request(context, hint, mode, describe, vlm_config, lang
                                     table_analysis_max_physical_requests=1)
         vlm = DynamicVLMClient(operation_config)
     except Exception as exc:
+        raise_model_error(exc)
         return result_for(item, reason='invalid_physical_model_budget' if isinstance(exc, ValueError)
                           and str(exc) == 'invalid_physical_model_budget' else "calculation_provider_unavailable")
     engine = context.get('transcription_engine', 'ocr')
@@ -253,7 +256,8 @@ def _process_calculation_request(context, hint, mode, describe, vlm_config, lang
                     render_dpi=ctx.render_dpi if ctx.input_type == 'pdf' else request.get('render_dpi'),
                     render_rotate_deg=int(_routing_defaults(routing_config).get('render_rotate_deg', 0)) if ctx.input_type == 'pdf' else request.get('render_rotate_deg'),
                     render_origin='mcp_pdf' if ctx.input_type == 'pdf' else 'caller_image')
-            except Exception:
+            except Exception as exc:
+                raise_model_error(exc)
                 return result_for(item, reason="source_image_unavailable")
     table = result['items'][0]
     if source_quality:
@@ -475,6 +479,7 @@ def revise_page_markdown_direct(
                 raw = vlm._call_image_prompt(ctx.image_path, final_prompt, max_tokens=vlm.max_tokens)
                 page_text = _normalize_page_markdown(raw)
             except Exception as exc:
+                raise_model_error(exc)
                 warnings.append(f"vlm_ocr_failed: {exc}")
                 page_text = ""
 
@@ -538,7 +543,8 @@ def _recover_review_title(tool, target, ctx, context, vlm_config, ocr_config):
             if caption and len(caption) <= 240:
                 item["title" if kind == "table" else "caption"] = caption
                 item["title_source"] = "candidate_text" if candidates else "image_caption"
-        except Exception:
+        except Exception as exc:
+            raise_model_error(exc)
             warnings.append("title_recovery_failed")
     else:
         warnings.append("title_recovery_unavailable")
@@ -689,6 +695,7 @@ def _analyze_single_page_layout(
                 markdown = str(raw.get("md_results") or raw.get("markdown") or "").strip()
                 blocks = _layout_blocks_from_raw(raw)
             except Exception as exc:
+                raise_model_error(exc)
                 warnings.append("glm_ocr_layout_failed")
 
         candidates = []
@@ -757,6 +764,7 @@ def _extract_layout_enhanced(
                 markdown = str(raw.get("md_results") or raw.get("markdown") or "").strip()
                 blocks = _layout_blocks_from_raw(raw)
             except Exception as exc:
+                raise_model_error(exc)
                 warnings.append(f"glm_ocr_failed: {exc}")
 
         figures = _figures_from_layout_blocks(blocks)
@@ -879,6 +887,7 @@ def _extract_tables(
                 return items
             warnings.append("glm_ocr_returned_no_tables")
         except Exception as exc:
+            raise_model_error(exc)
             warnings.append(f"glm_ocr_failed: {exc}")
 
     if vlm.enabled:
@@ -958,6 +967,7 @@ def _extract_tables(
                     )
             warnings.append("vlm_ocr_returned_no_tables")
         except Exception as exc:
+            raise_model_error(exc)
             warnings.append(f"vlm_ocr_failed: {exc}")
     else:
         warnings.append("vlm_ocr_unavailable")
@@ -1151,6 +1161,7 @@ def _enrich_table_metadata_with_vlm(
             for item in items:
                 item.update(manualReviewRequired=True, metadata_status='invalid')
     except Exception as exc:
+        raise_model_error(exc)
         warnings.append("vlm_ocr_table_metadata_failed")
         for item in items:
             item.update(manualReviewRequired=True, metadata_status='failed')
@@ -1199,6 +1210,7 @@ def _extract_formulas(
                 return items
             warnings.append("glm_ocr_returned_no_formulas")
         except Exception as exc:
+            raise_model_error(exc)
             warnings.append(f"glm_ocr_failed: {exc}")
 
     if vlm.enabled:
@@ -1212,6 +1224,7 @@ def _extract_formulas(
                 return items
             warnings.append("vlm_ocr_returned_no_formulas")
         except Exception as exc:
+            raise_model_error(exc)
             warnings.append(f"vlm_ocr_failed: {exc}")
     else:
         warnings.append("vlm_ocr_unavailable")
@@ -1247,6 +1260,7 @@ def _extract_formula_page_result(
                 return _formula_page_result(ctx, model_calls, warnings, page_markdown, items)
             warnings.append("glm_ocr_returned_no_formula_markdown")
         except Exception as exc:
+            raise_model_error(exc)
             warnings.append(f"glm_ocr_failed: {exc}")
 
     if vlm.enabled:
@@ -1265,6 +1279,7 @@ def _extract_formula_page_result(
                 return _formula_page_result(ctx, model_calls, warnings, page_markdown, items)
             warnings.append("vlm_ocr_returned_no_formula_markdown")
         except Exception as exc:
+            raise_model_error(exc)
             warnings.append(f"vlm_ocr_failed: {exc}")
     else:
         warnings.append("vlm_ocr_unavailable")
@@ -1340,6 +1355,7 @@ def _enrich_formula_metadata_with_vlm(
         elif not metadata:
             warnings.append("vlm_ocr_returned_no_formula_metadata")
     except Exception as exc:
+        raise_model_error(exc)
         warnings.append(f"vlm_ocr_formula_metadata_failed: {exc}")
 
 
@@ -1362,6 +1378,7 @@ def _extract_figures(
                 return items
             warnings.append("glm_ocr_returned_no_figures")
         except Exception as exc:
+            raise_model_error(exc)
             warnings.append(f"glm_ocr_failed: {exc}")
 
     if not vlm.enabled:
@@ -1377,6 +1394,7 @@ def _extract_figures(
             return items
         warnings.append("vlm_ocr_returned_no_figures")
     except Exception as exc:
+        raise_model_error(exc)
         warnings.append(f"vlm_ocr_failed: {exc}")
     return []
 
@@ -1405,6 +1423,7 @@ def _extract_figure_page_result(
                 return _figure_page_result(ctx, model_calls, warnings, page_markdown, items)
             warnings.append("glm_ocr_returned_no_figure_markdown")
         except Exception as exc:
+            raise_model_error(exc)
             warnings.append(f"glm_ocr_failed: {exc}")
 
     if not vlm.enabled:
@@ -1423,6 +1442,7 @@ def _extract_figure_page_result(
             return _figure_page_result(ctx, model_calls, warnings, page_markdown, items)
         warnings.append("vlm_ocr_returned_no_figure_markdown")
     except Exception as exc:
+        raise_model_error(exc)
         warnings.append(f"vlm_ocr_failed: {exc}")
     return _figure_page_result(ctx, model_calls, warnings, page_markdown, items)
 
@@ -1491,7 +1511,8 @@ def _native_table_markdowns(page: fitz.Page) -> List[str]:
     try:
         finder = page.find_tables()
         tables = list(finder.tables) if finder else []
-    except Exception:
+    except Exception as exc:
+        raise_model_error(exc)
         tables = []
     out = []
     for table in tables:
@@ -1939,6 +1960,7 @@ def _enhance_layout_figures_with_vlm(
         model_calls["vlm_ocr"] += 1
         result = _call_vlm_structured(vlm, ctx.image_path, _prompt_layout_figures(blocks, ctx.page_text, ctx.description_language))
     except Exception as exc:
+        raise_model_error(exc)
         warnings.append(f"vlm_ocr_failed: {exc}")
         return figures
 
@@ -2802,14 +2824,16 @@ def _extract_json_payload(text: str) -> Any:
     raw = re.sub(r"(?m)^\s*```\s*$", "", raw).strip()
     try:
         return json.loads(raw)
-    except Exception:
+    except Exception as exc:
+        raise_model_error(exc)
         pass
     match = re.search(r"\{[\s\S]*\}", raw)
     if not match:
         return None
     try:
         return json.loads(match.group(0))
-    except Exception:
+    except Exception as exc:
+        raise_model_error(exc)
         return None
 
 
@@ -2842,7 +2866,8 @@ def _metadata_index(entry: Dict[str, Any]) -> Optional[int]:
         value = entry.get("table_index")
     try:
         return int(value)
-    except Exception:
+    except Exception as exc:
+        raise_model_error(exc)
         return None
 
 
@@ -3371,7 +3396,8 @@ def _parse_float(value: str) -> Optional[float]:
     cleaned = re.sub(r"^[<>≤≥=]+", "", str(value or "").strip()).replace(",", ".")
     try:
         return float(cleaned)
-    except Exception:
+    except Exception as exc:
+        raise_model_error(exc)
         return None
 
 
@@ -3902,7 +3928,8 @@ def _recover_structure_target(tool, kind, ctx, target, language, vlm_config, ocr
         vlm = DynamicVLMClient({**(vlm_config or _vlm_ocr_config(ocr_config) or {}),
                                "description_language": _effective_description_language(ctx), "max_retries": 0})
         glm = OpenAICompatibleOcrClient(_routing_defaults(_merge_routing_ocr_config({}, ocr_config)).get("glm_ocr") or {}, source="glm_ocr")
-    except Exception:
+    except Exception as exc:
+        raise_model_error(exc)
         return failed("model_initialization_failed")
     entry = {"layout_id": target["layout_id"], "type": "table", "reading_order": 1,
              "bbox": target["bbox"], "bbox_space": "normalized_page", "status": "FAILED", "content": "",

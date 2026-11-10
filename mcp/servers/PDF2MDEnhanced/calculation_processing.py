@@ -1,3 +1,5 @@
+
+from .model_errors import raise_model_error
 """Bounded, identity-scoped processing behind the existing table extraction tool."""
 from .calculation_input import math_spans
 from copy import deepcopy
@@ -206,6 +208,7 @@ def complete_optional_formula_semantics(vlm, sheet):
         except PhysicalRequestBudgetExceeded:
             entry['semantic_status'] = 'optional_budget_exhausted'
         except Exception as exc:
+            raise_model_error(exc)
             entry['semantic_status'] = ('optional_timeout' if type(exc).__name__ == 'APITimeoutError'
                                         else 'optional_failed')
     return calls
@@ -393,6 +396,7 @@ def structure_calculation_source(vlm, item, content, target, available_calls, re
             errors.append('calculation_provider_timeout')
             checkpoint.update(status='failed', reason=errors[-1])
         except Exception as exc:
+            raise_model_error(exc)
             errors.append(str(exc) if isinstance(exc, ValueError) and str(exc) in RESPONSE_CODES
                           else 'calculation_provider_failed')
             checkpoint.update(status='failed', reason=errors[-1])
@@ -747,5 +751,6 @@ def process_request(request, hint, mode, vlm, image_path=None, adjacent_images=N
         # Only our own bounded validation codes may be returned; never provider text.
         reason = str(exc)
         return finish(reason if calls == 0 or reason in RESPONSE_CODES else 'calculation_provider_failed')
-    except Exception:
+    except Exception as exc:
+        raise_model_error(exc)
         return finish('calculation_provider_failed')

@@ -1,6 +1,8 @@
 """Opt-in, source-bound query projections. Never mutate the supplied table."""
 from __future__ import annotations
 
+from .model_errors import raise_model_error
+
 from copy import deepcopy
 from decimal import Decimal
 import base64
@@ -140,13 +142,15 @@ def _object_image_args(request):
             raise ValueError("input_budget_exceeded")
     except ValueError:
         raise
-    except Exception:
+    except Exception as exc:
+        raise_model_error(exc)
         raise ValueError("invalid_source_reference")
     handle = tempfile.NamedTemporaryFile(prefix="pdf2md_table_crop_", suffix=".png" if actual_mime == "image/png" else ".jpg", delete=False)
     try:
         handle.write(data)
         handle.close()
-    except Exception:
+    except Exception as exc:
+        raise_model_error(exc)
         handle.close()
         Path(handle.name).unlink(missing_ok=True)
         raise
@@ -453,7 +457,8 @@ def enhance_table(request, parse_grid, vlm_factory, vlm_config=None, description
             try:
                 try:
                     client = vlm_factory(config)
-                except Exception:
+                except Exception as exc:
+                    raise_model_error(exc)
                     raise ValueError("model_initialization_failed") from None
                 for attempt in range(budget):
                     out["model_calls"] += 1
@@ -473,7 +478,8 @@ def enhance_table(request, parse_grid, vlm_factory, vlm_config=None, description
                         code = str(exc) if isinstance(exc, ValueError) and str(exc) in REASONS else "invalid_model_response"
                         issues = issues + [_issue(code)]
                         out["diagnostics"].append({"stage": "model_projection", "attempt": attempt + 1, "reasons": [code]})
-                    except Exception:
+                    except Exception as exc:
+                        raise_model_error(exc)
                         # Never echo provider errors, prompts, or table content into diagnostics.
                         issues = issues + [_issue("model_call_failed")]
                         out["diagnostics"].append({"stage": "model_projection", "attempt": attempt + 1,

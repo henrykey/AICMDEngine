@@ -210,6 +210,7 @@ class OpenAICompatibleOcrClient:
         }
         body = json.dumps(payload).encode("utf-8")
         last_err = None
+        last_cause = None
         for attempt in range(self.max_retries + 1):
             retry_delay = 0.4 * (attempt + 1)
             try:
@@ -227,8 +228,13 @@ class OpenAICompatibleOcrClient:
                 )
                 return json.loads(raw)
             except urllib.error.HTTPError as exc:
+                last_cause = exc
                 error_body = exc.read().decode("utf-8", errors="replace")
-                last_err = f"HTTP {exc.code}: {self._layout_error_detail(error_body)}"
+                try:
+                    exc.body = json.loads(error_body)
+                except (TypeError, ValueError):
+                    exc.body = None
+                last_err = f"HTTP {exc.code}"
                 retryable_overload = self._is_retryable_layout_overload(exc.code, error_body)
                 logger.warning(
                     "%s layout_parsing call failed: model=%s attempt=%s/%s error=%s",
@@ -250,7 +256,8 @@ class OpenAICompatibleOcrClient:
                         self.max_retries,
                     )
             except Exception as exc:
-                last_err = f"{type(exc).__name__}: {str(exc)[:240]}"
+                last_cause = exc
+                last_err = type(exc).__name__
                 logger.warning(
                     "%s layout_parsing call failed: model=%s attempt=%s/%s error=%s",
                     self.source,
@@ -262,7 +269,7 @@ class OpenAICompatibleOcrClient:
                 if attempt >= self.max_retries:
                     break
             time.sleep(retry_delay)
-        raise RuntimeError(f"{self.source} layout_parsing call failed: {last_err}")
+        raise RuntimeError(f"{self.source} layout_parsing call failed: {last_err}") from last_cause
 
     @staticmethod
     def _layout_error_detail(error_body: str) -> str:
@@ -399,12 +406,12 @@ class OpenAICompatibleOcrClient:
                     self.model,
                     attempt + 1,
                     self.max_retries + 1,
-                    repr(exc),
+                    type(exc).__name__,
                 )
                 if attempt >= self.max_retries:
                     break
                 time.sleep(0.4 * (attempt + 1))
-        raise RuntimeError(f"{self.source} call failed: {last_err}")
+        raise RuntimeError(f"{self.source} call failed") from last_err
 
     def _default_prompt(self) -> str:
         return (

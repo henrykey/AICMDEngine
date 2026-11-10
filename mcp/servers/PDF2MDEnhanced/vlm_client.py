@@ -1249,7 +1249,7 @@ class DynamicVLMClient:
                     self.model,
                     attempt + 1,
                     self.max_retries + 1,
-                    type(exc).__name__ if safe_errors else repr(exc),
+                    type(exc).__name__,
                 )
                 if attempt >= self.max_retries:
                     break
@@ -1257,7 +1257,7 @@ class DynamicVLMClient:
 
         if safe_errors and (isinstance(last_err, TimeoutError) or type(last_err).__name__ == "APITimeoutError"):
             raise TimeoutError("model_call_timeout") from None
-        raise RuntimeError("model_call_failed" if safe_errors else f"VLM call failed: {last_err}")
+        raise RuntimeError("model_call_failed") from last_err
 
     @timed_stage("vlm_client._call_text_prompt")
     def _call_text_prompt(self, prompt: str, max_tokens: int, safe_errors: bool = False, json_object: bool = False, semantic_reasoning: bool = False, system_prompt: Optional[str] = None) -> str:
@@ -1306,7 +1306,7 @@ class DynamicVLMClient:
                     self.model,
                     attempt + 1,
                     self.max_retries + 1,
-                    type(exc).__name__ if safe_errors else repr(exc),
+                    type(exc).__name__,
                 )
                 if attempt >= self.max_retries:
                     break
@@ -1314,7 +1314,7 @@ class DynamicVLMClient:
 
         if safe_errors and (isinstance(last_err, TimeoutError) or type(last_err).__name__ == "APITimeoutError"):
             raise TimeoutError("model_call_timeout") from None
-        raise RuntimeError("model_call_failed" if safe_errors else f"VLM text call failed: {last_err}")
+        raise RuntimeError("model_call_failed") from last_err
 
     def _chat_completion_with_stream_fallback(self, safe_errors: bool = False, **kwargs: Any) -> tuple[str, str, str]:
         """
@@ -1343,6 +1343,8 @@ class DynamicVLMClient:
         except Exception as exc:
             self._raise_physical_budget_error(exc)
             stream_err = exc
+            if getattr(exc, "status_code", None) in (401, 403, 429):
+                raise
             if self._adjust_max_tokens_from_error(exc, kwargs):
                 logger.warning(
                     "VLM stream call failed due to max_tokens range, retry stream with adjusted max_tokens=%s",
@@ -1365,9 +1367,9 @@ class DynamicVLMClient:
                 except Exception as retry_exc:
                     self._raise_physical_budget_error(retry_exc)
                     stream_err = retry_exc
-                    logger.warning("VLM stream retry failed, fallback to non-stream mode: error=%s", type(retry_exc).__name__ if safe_errors else repr(retry_exc))
+                    logger.warning("VLM stream retry failed, fallback to non-stream mode: error=%s", type(retry_exc).__name__)
             else:
-                logger.warning("VLM stream call failed, fallback to non-stream mode: error=%s", type(exc).__name__ if safe_errors else repr(exc))
+                logger.warning("VLM stream call failed, fallback to non-stream mode: error=%s", type(exc).__name__)
 
         try:
             resp = self._client.chat.completions.create(stream=False, **kwargs)

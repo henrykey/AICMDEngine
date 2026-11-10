@@ -1,3 +1,5 @@
+
+from .model_errors import raise_model_error
 """Image-layout calculation crops; never depend on PDF text or vector rules."""
 from pathlib import Path
 import math
@@ -298,7 +300,8 @@ def transcribe_calculation_blocks(image_path, bbox, ocr, directory, dpi=300, *, 
     try:
         with Image.open(image_path) as source:
             image = source.convert('L')
-    except Exception:
+    except Exception as exc:
+        raise_model_error(exc)
         manifest['reason'] = 'object_crop_failed'
         return None, manifest
     manifest['original_bbox'] = list(bbox)
@@ -319,7 +322,8 @@ def transcribe_calculation_blocks(image_path, bbox, ocr, directory, dpi=300, *, 
         try:
             context_crop, _ = _crop_layout_block_image(Path(image_path), {'bbox': effective}, directory,
                                                        padding_ratio=0, source_dpi=dpi, max_dpi=None)
-        except Exception:
+        except Exception as exc:
+            raise_model_error(exc)
             manifest['reason'] = 'object_crop_failed'
             return None, manifest
     chunks = []
@@ -346,6 +350,7 @@ def transcribe_calculation_blocks(image_path, bbox, ocr, directory, dpi=300, *, 
             block.update(status='complete', text=text)
             chunks.append(text)
         except Exception as exc:
+            raise_model_error(exc)
             block.update(status='failed', error_type=type(exc).__name__)
             manifest.update(status='failed', reason='block_transcription_failed')
             return None, manifest
