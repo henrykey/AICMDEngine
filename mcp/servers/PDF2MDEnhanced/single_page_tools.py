@@ -974,8 +974,15 @@ def _extract_tables(
     return []
 
 
-def _map_semantic_table_targets(targets, source_tables):
-    """Match requested table IDs to unique original layout IDs, without order guessing."""
+class FormulaMappingError(ValueError):
+    def __init__(self, reason, target_index):
+        super().__init__("ambiguous_table_mapping")
+        self.reason = reason
+        self.target_index = target_index
+
+
+def _map_semantic_table_targets(targets, source_tables, *, formula=False):
+    """Match requested IDs to unique original layout IDs, without order guessing."""
     if not isinstance(targets, list) or not isinstance(source_tables, list):
         raise ValueError("invalid_table_mapping")
     source_by_layout = {}
@@ -987,14 +994,26 @@ def _map_semantic_table_targets(targets, source_tables):
             source_by_layout.setdefault(layout_id, []).append(source)
     mapped = {}
     used_layouts = set()
-    for target in targets:
+    for index, target in enumerate(targets):
         if not isinstance(target, dict):
             raise ValueError("invalid_table_mapping")
         table_id, layout_id = target.get("table_id"), target.get("layout_id")
-        if (not isinstance(table_id, str) or not table_id.strip()
-                or not isinstance(layout_id, str) or not layout_id.strip()
-                or table_id in mapped or layout_id in used_layouts
-                or len(source_by_layout.get(layout_id, [])) != 1):
+        reason = None
+        if not isinstance(table_id, str) or not table_id.strip():
+            reason = "missing_target_formula_id"
+        elif not isinstance(layout_id, str) or not layout_id.strip():
+            reason = "missing_target_layout_id"
+        elif table_id in mapped:
+            reason = "duplicate_target_formula_id"
+        elif layout_id in used_layouts:
+            reason = "duplicate_target_layout_id"
+        elif not source_by_layout.get(layout_id):
+            reason = "source_layout_not_found"
+        elif len(source_by_layout[layout_id]) != 1:
+            reason = "duplicate_source_layout_id"
+        if reason:
+            if formula:
+                raise FormulaMappingError(reason, index)
             raise ValueError("ambiguous_table_mapping")
         mapped[table_id] = source_by_layout[layout_id][0]
         used_layouts.add(layout_id)
@@ -1076,7 +1095,7 @@ def enhance_saved_page_formula_semantics(manager, identity, targets, vlm_config,
     source = elements.get("formulas")
     # Reuse the exact-layout matching contract used by page tables.
     mapped = _map_semantic_table_targets(
-        [{"table_id": target.get("formula_id"), "layout_id": target.get("layout_id")} for target in targets], source)
+        [{"table_id": target.get("formula_id"), "layout_id": target.get("layout_id")} for target in targets], source, formula=True)
     items = [deepcopy(mapped[target["formula_id"]]) for target in targets]
     rag = page.get("rag") if isinstance(page.get("rag"), dict) else {}
     page_text = str(rag.get("page_text") or rag.get("content") or "")

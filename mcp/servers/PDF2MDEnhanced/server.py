@@ -400,15 +400,20 @@ async def enhance_page_object_semantics(
     """Enhance the requested objects on one persisted original page."""
     if object_type not in ("table", "formula"):
         raise ValueError("unsupported_page_object_type")
-    from .single_page_tools import enhance_saved_page_table_semantics, enhance_saved_page_formula_semantics
+    from .single_page_tools import (FormulaMappingError, enhance_saved_page_table_semantics,
+                                    enhance_saved_page_formula_semantics)
     complete = enhance_saved_page_table_semantics if object_type == "table" else enhance_saved_page_formula_semantics
     loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(
-        None,
-        lambda: complete(
-            manager, source_identity, targets, _normalize_vlm_config(vlm_config), description_language, fallback_page
-        ),
-    )
+    try:
+        result = await loop.run_in_executor(
+            None,
+            lambda: complete(
+                manager, source_identity, targets, _normalize_vlm_config(vlm_config), description_language, fallback_page
+            ),
+        )
+    except FormulaMappingError as exc:
+        result = {"status": "failed", "error_code": "FORMULA_MAPPING_FAILED", "reason": exc.reason,
+                  "target_index": exc.target_index, "object_type": "formula", "model_calls": 0}
     return json.dumps(result, ensure_ascii=False)
 
 

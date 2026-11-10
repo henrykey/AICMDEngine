@@ -493,3 +493,40 @@ def test_page_formula_fractional_or_boolean_index_never_maps_to_target(monkeypat
     result = single_page_tools.enhance_saved_page_formula_semantics(None, None,
         [{'formula_id': 'f1', 'layout_id': 'a'}, {'formula_id': 'f2', 'layout_id': 'b'}], {}, 'en', fallback)
     assert result == {'formulas': [], 'model_calls': 1}
+
+
+@pytest.mark.parametrize('targets,sources,reason,index', [
+    ([{'formula_id': 'f'}], [{'layout_id': 'l'}], 'missing_target_layout_id', 0),
+    ([{'formula_id': '' , 'layout_id': 'l'}], [{'layout_id': 'l'}], 'missing_target_formula_id', 0),
+    ([{'formula_id': 'f', 'layout_id': 'l'}, {'formula_id': 'f', 'layout_id': 'm'}], [{'layout_id': 'l'}, {'layout_id': 'm'}], 'duplicate_target_formula_id', 1),
+    ([{'formula_id': 'f', 'layout_id': 'l'}, {'formula_id': 'g', 'layout_id': 'l'}], [{'layout_id': 'l'}], 'duplicate_target_layout_id', 1),
+    ([{'formula_id': 'f', 'layout_id': 'absent'}], [{'layout_id': 'l'}], 'source_layout_not_found', 0),
+    ([{'formula_id': 'f', 'layout_id': 'l'}], [{'layout_id': 'l'}, {'layout_id': 'l'}], 'duplicate_source_layout_id', 0),
+])
+def test_formula_mapping_failure_is_structured_and_never_calls_model(monkeypatch, targets, sources, reason, index):
+    import asyncio
+    import json
+    from tests.test_pdf2md_enhanced_single_page_tools import server
+    class ForbiddenModel:
+        def __init__(self, *args): pytest.fail('mapping failure must not call model')
+    monkeypatch.setattr(single_page_tools, 'DynamicVLMClient', ForbiddenModel)
+    fn = getattr(server.enhance_page_object_semantics, 'fn', server.enhance_page_object_semantics)
+    result = json.loads(asyncio.run(fn('formula', targets, fallback_page={
+        'page_no': 2, 'page_text': 'private document', 'formulas': sources})))
+    assert result == {'status': 'failed', 'error_code': 'FORMULA_MAPPING_FAILED',
+                      'reason': reason, 'target_index': index, 'object_type': 'formula',
+                      'model_calls': 0}
+    assert 'private document' not in json.dumps(result)
+
+
+def test_registered_page_formula_tool_returns_mapping_diagnostic():
+    import asyncio
+    server = importlib.import_module(single_page_tools.__package__ + '.server')
+    async def check():
+        tool = next(tool for tool in await server.mcp.list_tools() if tool.name == 'enhance_page_object_semantics')
+        result = await tool.run({'object_type': 'formula',
+            'targets': [{'formula_id': 'f', 'layout_id': 'unknown'}],
+            'fallback_page': {'page_no': 1, 'formulas': [{'layout_id': 'actual'}]}})
+        assert 'FORMULA_MAPPING_FAILED' in str(result)
+        assert 'source_layout_not_found' in str(result)
+    asyncio.run(check())
