@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 _UNSET = object()
 
 
+class DirectoryIncomplete(Exception):
+    """The directory could not be read completely, so no answer about it (a unique match, no match) may be given."""
+
+
 class MembershipMCPServer(BaseMCPServer):
     """
     MCP server for Membership API commands.
@@ -443,6 +447,18 @@ class MembershipMCPServer(BaseMCPServer):
                         "items": {"type": "string"},
                         "description": "Optional fields to match against. Defaults to name/code/description"
                     },
+                    "response_format": {
+                        "type": "string",
+                        "enum": ["text", "json"],
+                        "default": "text",
+                        "description": "text (default): one readable sentence. json: one JSON object (contract membership.directory_lookup.v1) with status unique|none|multiple|error, id, match, candidates and a readable message"
+                    },
+                    "language": {
+                        "type": "string",
+                        "enum": ["en", "zh"],
+                        "default": "en",
+                        "description": "Language of the readable message in the json format (default en)"
+                    },
                     "auth_token": {
                         "type": "string",
                         "description": "Authentication token (optional, will use default if not provided)"
@@ -637,6 +653,18 @@ class MembershipMCPServer(BaseMCPServer):
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Optional fields to match against. Defaults to name/code/type"
+                    },
+                    "response_format": {
+                        "type": "string",
+                        "enum": ["text", "json"],
+                        "default": "text",
+                        "description": "text (default): one readable sentence. json: one JSON object (contract membership.directory_lookup.v1) with status unique|none|multiple|error, id, match, candidates and a readable message"
+                    },
+                    "language": {
+                        "type": "string",
+                        "enum": ["en", "zh"],
+                        "default": "en",
+                        "description": "Language of the readable message in the json format (default en)"
                     },
                     "auth_token": {
                         "type": "string",
@@ -2258,7 +2286,188 @@ class MembershipMCPServer(BaseMCPServer):
                 error_code="GET_MEMBER_FAILED"
             )
 
+    # ------------------------------------------------------------------
+    # Directory lookup (lookup_org / lookup_role) with a machine-readable result.
+    #
+    # The MCP Router hands the caller only ToolResult.content (text); ToolResult.data does not reach it. The default result stays the
+    # readable English sentence every existing consumer sees. A caller that must tell a unique match from no match, several matches and an
+    # error sets response_format="json": content is then one JSON object (contract below) whose "message" is the readable sentence, in
+    # the caller's language (language="zh", otherwise English). ToolResult.is_error and error_code keep their meaning, and "data" is
+    # the same object, so in-process consumers are unaffected.
+    # ------------------------------------------------------------------
+
+    DIRECTORY_LOOKUP_CONTRACT = "membership.directory_lookup.v1"
+
+    _DIRECTORY_KINDS = {
+        "org": {"noun": "organization", "plural": "organizations", "zh": "组织", "command": "GET /v2/orgs", "key": "orgs",
+                "fields": ["name", "code", "type"], "code": "ORG"},
+        "role": {"noun": "role", "plural": "roles", "zh": "岗位/角色", "command": "GET /v2/roles", "key": "roles",
+                 "fields": ["name", "code", "description"], "code": "ROLE"},
+    }
+
+    def _directory_message(self, kind: str, status: str, language: str, query: str, item_id: Any = None) -> str:
+        cfg = self._DIRECTORY_KINDS[kind]
+        if language == "zh":
+            return {
+                "unique": f"已将{cfg['zh']}“{query}”解析为 ID {item_id}",
+                "none": f"没有{cfg['zh']}匹配“{query}”",
+                "multiple": f"有多个{cfg['zh']}匹配“{query}”",
+                "empty": f"{cfg['zh']}查询内容不能为空",
+                "forbidden": f"没有权限查看{cfg['zh']}",
+                "unauthenticated": "缺少调用人的身份，无法查询",
+                "failed": f"解析{cfg['zh']} ID 失败",
+                "incomplete": f"无法完整读取{cfg['zh']}列表（数量过多或接口未返回全部），因此不给出结论",
+            }[status]
+        return {
+            "unique": f"Resolved {cfg['noun']} '{query}' to ID {item_id}",
+            "none": f"No {cfg['noun']} matched query '{query}'",
+            "multiple": f"Multiple {cfg['plural']} matched query '{query}'",
+            "empty": f"{cfg['noun'].capitalize()} query cannot be empty",
+            "forbidden": f"Not allowed to read {cfg['plural']}",
+            "unauthenticated": "Caller identity is required for the lookup",
+            "failed": f"Failed to resolve {cfg['noun']} ID",
+            "incomplete": f"The list of {cfg['plural']} could not be read completely (too many, or the endpoint did not return all of them), so no answer is given",
+        }[status]
+
+    # The list endpoints answer {"data": [...], "meta": {"page", "page_size", "total", "total_pages"}}. Organizations honour page and
+    # page_size; roles ignore both and always return page 1 of at most 200. Neither filters on "search". The directory is therefore read
+    # page by page under a fixed bound, and an answer is given only when what was read is known to be everything: the count read reaches
+    # meta.total. A missing or inconsistent total, a page that adds nothing while the total is not reached, the page bound, or an error
+    # on any page is "incomplete" or a failure, never a unique match or "no match" from part of the data.
+    _DIRECTORY_PAGE_SIZE = 100
+    _DIRECTORY_MAX_PAGES = 20
+
+    async def _read_directory(self, kind: str, search: str, auth_token: Any, tenant_id: Any) -> List[Dict[str, Any]]:
+        cfg = self._DIRECTORY_KINDS[kind]
+        token = self._execution_token(auth_token)
+        tenant = self._execution_tenant(tenant_id)
+        seen: Dict[Any, Dict[str, Any]] = {}
+        total: Optional[int] = None
+        for page in range(1, self._DIRECTORY_MAX_PAGES + 1):
+            response = await self.http_client.execute(
+                command=cfg["command"],
+                params={"query": {"page": page, "page_size": self._DIRECTORY_PAGE_SIZE, "limit": self._DIRECTORY_PAGE_SIZE,
+                                  "search": search}},
+                auth_token=token,
+                tenant_id=tenant,
+            )
+            raw = response.get("data", response.get(cfg["key"])) if isinstance(response, dict) else None
+            meta = response.get("meta") if isinstance(response, dict) else None
+            reported = meta.get("total") if isinstance(meta, dict) else None
+            if not isinstance(raw, list) or isinstance(reported, bool) or not isinstance(reported, int) or reported < 0:
+                raise DirectoryIncomplete("the list has no readable total")
+            if total is not None and reported != total:
+                raise DirectoryIncomplete("the total changed while the list was read")
+            total = reported
+            fresh = [i for i in raw if isinstance(i, dict) and i.get("id") not in seen]
+            for item in fresh:
+                seen[item.get("id")] = item
+            if len(seen) >= total:
+                return list(seen.values())
+            if not fresh:
+                raise DirectoryIncomplete("the endpoint returned nothing new before the total was reached")
+        raise DirectoryIncomplete("the page bound was reached before the total")
+
+    @staticmethod
+    def _directory_item_view(kind: str, item: Dict[str, Any]) -> Dict[str, Any]:
+        view = {"id": item.get("id"), "name": item.get("name")}
+        if kind == "role":
+            view["orgId"] = item.get("org_id", item.get("orgId"))
+        return view
+
+    async def _directory_lookup_json(
+        self,
+        kind: str,
+        query: Any,
+        items: Optional[List[Dict[str, Any]]],
+        match_fields: Optional[List[str]],
+        language: Any,
+        auth_token: Any,
+        tenant_id: Any,
+    ) -> ToolResult:
+        cfg = self._DIRECTORY_KINDS[kind]
+        lang = "zh" if str(language or "").lower().startswith("zh") else "en"
+        text = str(query).strip() if query is not None else ""
+
+        def build(status: str, error_code: Optional[str], match=None, candidates=None, error=None) -> ToolResult:
+            payload: Dict[str, Any] = {
+                "contract": self.DIRECTORY_LOOKUP_CONTRACT,
+                "kind": kind,
+                "query": text,
+                "status": status,
+                "message": self._directory_message(
+                    kind, {"unique": "unique", "none": "none", "multiple": "multiple"}.get(status, error or "failed"),
+                    lang, text, match.get("id") if match else None),
+            }
+            if match is not None:
+                payload["id"] = match.get("id")
+                payload["match"] = self._directory_item_view(kind, match)
+            if candidates is not None:
+                payload["candidates"] = [self._directory_item_view(kind, c) for c in candidates[:10]]
+            if error:
+                payload["error"] = {"code": error}
+            content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+            if error_code is None:
+                return ToolResult.success(content=content, data=payload)
+            return ToolResult.error(content=content, error_code=error_code, data=payload)
+
+        if not text:
+            return build("error", f"INVALID_{cfg['code']}_QUERY", error="empty")
+        try:
+            candidates = items
+            if not candidates:
+                candidates = await self._read_directory(kind, text, auth_token, tenant_id)
+        except DirectoryIncomplete as e:
+            logger.warning(f"Directory lookup for {kind} is incomplete: {e}")
+            return build("error", f"LOOKUP_{cfg['code']}_INCOMPLETE", error="incomplete")
+        except ValueError:
+            return build("error", f"LOOKUP_{cfg['code']}_FAILED", error="unauthenticated")
+        except Exception as e:
+            status_code = getattr(getattr(e, "response", None), "status_code", None)
+            logger.error(f"Error resolving {kind} for a directory lookup: {type(e).__name__}")
+            return build("error", f"LOOKUP_{cfg['code']}_FAILED", error="forbidden" if status_code in (401, 403) else "failed")
+
+        candidates = [item for item in (candidates or []) if isinstance(item, dict)]
+        matches = self._resolve_generic_matches(candidates, text, match_fields or cfg["fields"])
+        if len(matches) == 1:
+            return build("unique", None, match=matches[0])
+        if not matches:
+            return build("none", f"{cfg['code']}_NOT_FOUND", candidates=[])
+        return build("multiple", f"MULTIPLE_{cfg['code']}_MATCHES", candidates=matches)
+
+    async def lookup_org(
+        self,
+        query: str,
+        orgs: Optional[List[Dict[str, Any]]] = None,
+        match_fields: Optional[List[str]] = None,
+        response_format: str = "text",
+        language: str = "en",
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET,
+    ) -> ToolResult:
+        """Resolve an organization ID; response_format="json" returns the machine-readable contract (see above)."""
+        if response_format == "json":
+            return await self._directory_lookup_json("org", query, orgs, match_fields, language, auth_token, tenant_id)
+        return await self._lookup_org_text(query=query, orgs=orgs, match_fields=match_fields,
+                                           auth_token=auth_token, tenant_id=tenant_id)
+
     async def lookup_role(
+        self,
+        query: str,
+        roles: Optional[List[Dict[str, Any]]] = None,
+        match_fields: Optional[List[str]] = None,
+        response_format: str = "text",
+        language: str = "en",
+        auth_token: Optional[str] = _UNSET,
+        tenant_id: Optional[int] = _UNSET,
+    ) -> ToolResult:
+        """Resolve a role ID; response_format="json" returns the machine-readable contract (see above)."""
+        if response_format == "json":
+            return await self._directory_lookup_json("role", query, roles, match_fields, language, auth_token, tenant_id)
+        return await self._lookup_role_text(query=query, roles=roles, match_fields=match_fields,
+                                            auth_token=auth_token, tenant_id=tenant_id)
+
+    async def _lookup_role_text(
         self,
         query: str,
         roles: Optional[List[Dict[str, Any]]] = None,
@@ -2285,13 +2494,15 @@ class MembershipMCPServer(BaseMCPServer):
                         content="Authentication required to fetch roles for role ID resolution.",
                         error_code="AUTH_REQUIRED",
                     )
-                response = await self.http_client.execute(
-                    command="GET /v2/roles",
-                    params={"query": {"page": 1, "limit": 100, "search": query}},
-                    auth_token=effective_token,
-                    tenant_id=effective_tenant,
-                )
-                candidate_roles = response.get("data", response.get("roles", []))
+                try:
+                    candidate_roles = await self._read_directory("role", query, effective_token, effective_tenant)
+                except DirectoryIncomplete as incomplete:
+                    logger.warning(f"Role lookup is incomplete: {incomplete}")
+                    return ToolResult.error(
+                        content="The list of roles could not be read completely, so no answer is given",
+                        error_code="LOOKUP_ROLE_INCOMPLETE",
+                        data={"status": "incomplete", "query": query},
+                    )
 
             candidate_roles = [item for item in (candidate_roles or []) if isinstance(item, dict)]
             matches = self._resolve_generic_matches(candidate_roles, query, fields)
@@ -2817,7 +3028,7 @@ class MembershipMCPServer(BaseMCPServer):
                 error_code="LIST_ORGS_FAILED"
             )
 
-    async def lookup_org(
+    async def _lookup_org_text(
         self,
         query: str,
         orgs: Optional[List[Dict[str, Any]]] = None,
@@ -2844,13 +3055,15 @@ class MembershipMCPServer(BaseMCPServer):
                         content="Authentication required to fetch organizations for org ID resolution.",
                         error_code="AUTH_REQUIRED",
                     )
-                response = await self.http_client.execute(
-                    command="GET /v2/orgs",
-                    params={"query": {"page": 1, "limit": 100, "search": query}},
-                    auth_token=effective_token,
-                    tenant_id=effective_tenant,
-                )
-                candidate_orgs = response.get("data", response.get("orgs", []))
+                try:
+                    candidate_orgs = await self._read_directory("org", query, effective_token, effective_tenant)
+                except DirectoryIncomplete as incomplete:
+                    logger.warning(f"Organization lookup is incomplete: {incomplete}")
+                    return ToolResult.error(
+                        content="The list of organizations could not be read completely, so no answer is given",
+                        error_code="LOOKUP_ORG_INCOMPLETE",
+                        data={"status": "incomplete", "query": query},
+                    )
 
             candidate_orgs = [item for item in (candidate_orgs or []) if isinstance(item, dict)]
             matches = self._resolve_generic_matches(candidate_orgs, query, fields)
