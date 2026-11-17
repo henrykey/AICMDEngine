@@ -80,7 +80,7 @@ def test_the_tool_is_discoverable_through_the_registry(mcp):
     assert info is not None
     props = info["input_schema"]["properties"]
     assert {"query", "auth_token", "tenant_id"} <= set(props)
-    assert [t["name"] for t in registry.get_mcp_info("form_mcp")["tools"]] == ["find_forms"]
+    assert "find_forms" in [t["name"] for t in registry.get_mcp_info("form_mcp")["tools"]]
 
 
 # ---------------------------------------------------------------- valid calls

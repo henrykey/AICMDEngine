@@ -474,7 +474,7 @@ class FORM_MCP(BaseMCPServer):
     MAX_RESULTS = 20
 
     def __init__(self, membership_base_url: Optional[str] = None):
-        super().__init__(name="form_mcp", version="2.0.0")
+        super().__init__(name="form_mcp", version="2.3.0")
         from src.services.http_client import HTTPClient
         self.membership_base_url = membership_base_url or settings.membership_service_url
         self.http_client = HTTPClient(base_url=self.membership_base_url, membership_url=self.membership_base_url)
@@ -502,6 +502,42 @@ class FORM_MCP(BaseMCPServer):
                 },
             },
             handler=self.find_forms,
+        ))
+        self.register_tool(Tool(
+            name="suggest_form",
+            description="Turn a suggested list of fields into a form in Membership's own format (formSchema and uiSchema) and have Membership's own validation check it. Uses no model; nothing is saved or published",
+            semantic_description="接收字段建议（key、kind、label、required、options），返回 Membership 现有格式的 formSchema 与 uiSchema，并由 Membership 现有校验判断是否有效。不调用模型，只供查看，不保存、不发布。",
+            use_cases=["把助手形成的请假表单字段建议转成可检查的表单结构", "在保存前确认字段建议符合 Membership 表单格式"],
+            natural_language_examples=["检查这个请假表单字段建议是否有效", "convert these fields into a Membership form for review"],
+            output_description="JSON：valid、saved（恒为 false）、form（formKey、formName、formSchema、uiSchema）、issues（来自 Membership 校验或字段核对的问题）。无效时返回错误 FORM_SUGGESTION_INVALID，内容同样带 issues。",
+            tags=["form", "suggestion", "no_side_effect"],
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "form_key": {"type": "string", "description": "Key of the form (the caller's own naming, for example leave_request)"},
+                    "form_name": {"type": "string", "description": "Readable name of the form"},
+                    "fields": {
+                        "type": "array",
+                        "description": "The suggested fields, in order (1 to 50)",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "key": {"type": "string"},
+                                "kind": {"type": "string", "enum": ["text", "textarea", "number", "date", "boolean", "choice"]},
+                                "label": {"type": "string"},
+                                "required": {"type": "boolean"},
+                                "options": {"type": "array", "items": {"type": "string"}, "description": "Only for kind choice"},
+                            },
+                            "required": ["key", "kind"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "auth_token": {"type": "string", "description": "Bound by the MCP Router from the authenticated caller"},
+                    "tenant_id": {"type": "integer", "description": "Bound by the MCP Router from the authenticated caller"},
+                },
+                "required": ["form_key", "fields"],
+            },
+            handler=self.suggest_form,
         ))
 
     @staticmethod
@@ -590,3 +626,134 @@ class FORM_MCP(BaseMCPServer):
             ],
         }
         return ToolResult.success(content=json.dumps(payload, ensure_ascii=False, separators=(",", ":")), data=payload)
+
+
+    # ------------------------------------------------------------------ suggest_form
+    #
+    # No model here. The caller (the Workflow AI assistant) supplies the suggested fields in the small vocabulary Membership's own
+    # assistant uses (field key, kind, label, required, options). Membership compiles that into formSchema and uiSchema and validates it
+    # with its own validators through the existing POST /v2/workflows/assistant/proposals/check, which writes nothing. This tool holds no
+    # form rules of its own: what is valid is whatever Membership says. The check wraps the form in a one-step scaffold (the starter)
+    # because that endpoint checks a whole proposal; only the issues about the form itself are reported.
+
+    CHECK_COMMAND = "POST /v2/workflows/assistant/proposals/check"
+    MAX_FIELDS = 50
+
+    SUPPORTED_FIELD_PROPERTIES = ("key", "kind", "label", "required", "options")
+
+    @staticmethod
+    def _clean_fields(fields: Any) -> Optional[List[Dict[str, Any]]]:
+        """The fields as given, if their shape is right; None if not. Which properties are supported is checked by the caller first."""
+        if not isinstance(fields, list) or not 0 < len(fields) <= FORM_MCP.MAX_FIELDS:
+            return None
+        cleaned = []
+        for item in fields:
+            if not isinstance(item, dict):
+                return None
+            field = dict(item)
+            if "options" in field and (not isinstance(field["options"], list) or not all(isinstance(o, str) for o in field["options"])):
+                return None
+            if any(k in field and not isinstance(field[k], str) for k in ("key", "kind", "label")) or \
+                    ("required" in field and not isinstance(field["required"], bool)):
+                return None
+            cleaned.append(field)
+        return cleaned
+
+    @classmethod
+    def _unsupported_properties(cls, fields: List[Dict[str, Any]]) -> List[str]:
+        """Field properties this tool does not carry. They are refused, never dropped: dropping them would report a form without
+        what the caller asked for as if it were complete."""
+        found = []
+        for index, field in enumerate(fields, start=1):
+            for name in field:
+                if name not in cls.SUPPORTED_FIELD_PROPERTIES:
+                    label = field.get("key") if isinstance(field.get("key"), str) else f"#{index}"
+                    found.append(f"'{name}' on field '{label}'")
+        return found
+
+    async def _check_proposal(self, proposal: Dict[str, Any], token: str, tenant: int):
+        """Membership's proposals/check with the caller's own token and tenant. Returns (response, None) or (None, ToolResult error)."""
+        try:
+            response = await self.http_client.execute(
+                command=self.CHECK_COMMAND, params={"body": {"proposal": proposal}}, auth_token=token, tenant_id=tenant)
+        except ValueError:
+            return None, ToolResult.error("Caller identity is required", error_code="IDENTITY_REQUIRED")
+        except Exception as e:
+            status_code = getattr(getattr(e, "response", None), "status_code", None)
+            logger.error("Checking the form suggestion failed: %s", type(e).__name__)
+            if status_code in (401, 403):
+                return None, ToolResult.error("Not allowed to check form suggestions", error_code="FORBIDDEN")
+            return None, ToolResult.error("The form suggestion could not be checked", error_code="CHECK_FAILED")
+        return response, None
+
+    async def suggest_form(self, form_key: Any = None, fields: Any = None, form_name: Any = None,
+                           auth_token: Any = None, tenant_id: Any = None) -> ToolResult:
+        if not isinstance(form_key, str) or not form_key.strip() or len(form_key) > 200 \
+                or (form_name is not None and (not isinstance(form_name, str) or len(form_name) > 200)):
+            return ToolResult.error("form_key must be a text of 1 to 200 characters and form_name a text of at most 200", error_code="INVALID_PARAMS")
+        described = self._clean_fields(fields)
+        if described is None:
+            return ToolResult.error(f"fields must be a list of 1 to {self.MAX_FIELDS} field objects with text key, kind and label", error_code="INVALID_PARAMS")
+        unsupported = self._unsupported_properties(described)
+        if unsupported:
+            return ToolResult.error(
+                "These field properties are not supported and nothing was checked: " + ", ".join(unsupported)
+                + ". Supported: " + ", ".join(self.SUPPORTED_FIELD_PROPERTIES) + ".",
+                error_code="UNSUPPORTED_FIELD_PROPERTY")
+        try:
+            token, tenant = self._identity(auth_token, tenant_id)
+        except ValueError as e:
+            return ToolResult.error(f"Caller identity is required: {e}", error_code="IDENTITY_REQUIRED")
+
+        # Authority first, before anything is built: Membership's own check decides, with the caller's own token. An empty proposal is
+        # the cheapest valid one; it writes nothing.
+        _, refused = await self._check_proposal({"processKey": "form_suggestion_probe", "name": "probe", "forms": [], "steps": []}, token, tenant)
+        if refused is not None:
+            return refused
+
+        form = {"formKey": form_key.strip(), "formName": form_name, "fields": described}
+        key = form.get("formKey") if isinstance(form.get("formKey"), str) else ""
+        proposal = {
+            "processKey": "form_suggestion", "name": "Form suggestion", "forms": [form],
+            "steps": [{"name": "Starter", "formKey": key, "assignments": [{"kind": "INITIATOR"}]}],
+        }
+        response, failed = await self._check_proposal(proposal, token, tenant)
+        if failed is not None:
+            return failed
+
+        previews = response.get("forms") if isinstance(response, dict) else None
+        issues = response.get("issues") if isinstance(response, dict) else None
+        if not isinstance(previews, list) or not previews or not isinstance(issues, list):
+            return ToolResult.error("The check returned an unexpected answer", error_code="CHECK_FAILED")
+        errors = [i for i in issues if isinstance(i, dict) and str(i.get("severity", "")).upper() == "ERROR"]
+        about_form = [i for i in errors if str(i.get("path", "")).startswith("/forms")]
+        shown = [{"code": i.get("code"), "path": i.get("path"), "message": i.get("message")} for i in (about_form or errors)]
+        preview = previews[0] if isinstance(previews[0], dict) else {}
+
+        # Nothing the caller suggested may disappear on the way: Membership folds fields that share a key into one and does not say so.
+        # Compare what was sent with what came back, so a suggestion that lost fields is never reported as valid.
+        sent = [f.get("key") for f in form["fields"]]
+        schema = preview.get("formSchema")
+        returned = set(schema.get("properties") or {}) if isinstance(schema, dict) and isinstance(schema.get("properties"), dict) else set()
+        duplicated = sorted({k for k in sent if isinstance(k, str) and sent.count(k) > 1})
+        lost = [k for k in sent if isinstance(k, str) and k not in returned]
+        if duplicated or (lost and not errors):
+            for k in duplicated:
+                shown.append({"code": "FORM_FIELD_DUPLICATE", "path": f"/forms/{key}/{k}",
+                              "message": f"More than one field has the key '{k}'; each field needs its own key"})
+            for k in lost:
+                if k not in duplicated:
+                    shown.append({"code": "FORM_FIELD_LOST", "path": f"/forms/{key}/{k}", "message": f"The field '{k}' did not appear in the checked form"})
+            errors = errors + [{"code": "FORM_FIELD_DUPLICATE"}]
+
+        payload = {
+            "valid": not errors,
+            "saved": False,
+            "form": {"formKey": preview.get("formKey"), "formName": preview.get("formName"),
+                     "formSchema": preview.get("formSchema"), "uiSchema": preview.get("uiSchema")},
+            "issues": shown,
+        }
+        content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        if errors:
+            return ToolResult.error(content, error_code="FORM_SUGGESTION_INVALID", data=payload)
+        return ToolResult.success(content=content, data=payload)
