@@ -23,6 +23,8 @@ from datetime import datetime
 
 from src.core.config import settings
 from src.mcp.base_server import BaseMCPServer
+from src.mcp.result import ToolResult
+from src.mcp.tool import Tool
 from src.services.llm_client import llm_client
 from src.mcp_servers.llm_integration import (
     get_llm_client,
@@ -448,490 +450,143 @@ Requirements:
     }
 
 
+class FormsIncomplete(Exception):
+    """The Membership form list could not be read completely."""
+
+
 class FORM_MCP(BaseMCPServer):
     """
-    MCP Server for dynamic form generation and validation.
+    Read-only form tool for Membership, reached only through the MCP Router.
 
-    Provides tools for:
-    - Generating forms from natural language
-    - Validating form definitions and permissions
-    - Binding forms to BPMN processes
-    - Suggesting form fields based on context
+    ``find_forms`` lists the forms that already exist in the caller's own tenant (optionally narrowed by a name or key) with a plain
+    summary of each form's fields. A caller drafting a leave-request form uses it to see whether the tenant already has a suitable
+    form before proposing a new one.
+
+    It reads Membership's ``GET /v2/forms`` with the caller's own token and tenant, which the Router binds into every call. It has
+    no default identity and no fallback: without both, it fails. Membership decides what the caller may read (``workflow.read``);
+    this tool neither widens nor re-implements that, and it validates and generates nothing.
     """
 
-    def __init__(
-        self,
-        membership_base_url: str = None,
-        use_real_llm: bool = False,
-        kb_base_url: str = None
-    ):
-        """Initialize FORM-MCP server."""
-        super().__init__(name="form_mcp", version="1.0.0")
+    FORMS_COMMAND = "GET /v2/forms"
+    PAGE_SIZE = 100
+    MAX_PAGES = 20
+    MAX_QUERY = 200
+    MAX_RESULTS = 20
 
+    def __init__(self, membership_base_url: Optional[str] = None):
+        super().__init__(name="form_mcp", version="2.0.0")
+        from src.services.http_client import HTTPClient
         self.membership_base_url = membership_base_url or settings.membership_service_url
-        self.kb_base_url = kb_base_url or settings.kb_base_url
-        self.use_real_llm = use_real_llm
+        self.http_client = HTTPClient(base_url=self.membership_base_url, membership_url=self.membership_base_url)
+        self.description = "Read-only access to the caller's tenant forms in Membership"
+        self._register_tools()
 
-        # Initialize components
-        self.validator = FormValidator()
-        self.membership_client = None
-
-        logger.info(f"FORM-MCP initialized: membership_url={self.membership_base_url}, use_real_llm={use_real_llm}")
-
-    async def list_tools(self, tenant_id: str) -> List[Dict[str, Any]]:
-        """List available FORM tools."""
-        return [
-            {
-                "name": "generate_form",
-                "description": "Generate form definition from natural language requirement",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "form_name": {
-                            "type": "string",
-                            "description": "Name of the form (e.g., 'Drug Approval Application')"
-                        },
-                        "form_type": {
-                            "type": "string",
-                            "enum": ["startup", "task_specific", "standalone"],
-                            "description": "Type of form"
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": "Natural language form description"
-                        },
-                        "context": {
-                            "type": "object",
-                            "description": "Optional context including BPMN binding"
-                        }
+    def _register_tools(self) -> None:
+        self.register_tool(Tool(
+            name="find_forms",
+            description="List the forms that already exist in the caller's tenant, optionally narrowed by a name or key, with a summary of each form's fields",
+            semantic_description="查找当前租户已有的表单（例如请假表单），返回表单标识、名称、状态和字段概要，便于在设计新表单前复用已有表单。只读。",
+            use_cases=["设计请假流程前查看租户是否已有请假表单", "按名称或标识查找已有表单"],
+            natural_language_examples=["有没有请假表单？", "list the leave request forms"],
+            output_description="JSON：total（租户表单总数）、matched（匹配数）、forms（最多 20 个，含 formKey、formName、status、version、fields）。字段概要只来自表单本身的 schema，不是校验结果。",
+            tags=["form", "lookup", "read_only"],
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Optional text to match against the form key or form name (case-insensitive). Omit to list the tenant's forms."
                     },
-                    "required": ["form_name", "form_type", "description"]
-                }
+                    "auth_token": {"type": "string", "description": "Bound by the MCP Router from the authenticated caller"},
+                    "tenant_id": {"type": "integer", "description": "Bound by the MCP Router from the authenticated caller"},
+                },
             },
-            {
-                "name": "validate_form",
-                "description": "Validate form definition and permission rules",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "form_definition": {
-                            "type": "object",
-                            "description": "Complete form definition to validate"
-                        },
-                        "strict_mode": {
-                            "type": "boolean",
-                            "description": "Apply strict validation"
-                        }
-                    },
-                    "required": ["form_definition"]
-                }
-            },
-            {
-                "name": "bind_form_to_process",
-                "description": "Bind form fields to BPMN process variables",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "form_definition": {
-                            "type": "object",
-                            "description": "Form definition"
-                        },
-                        "process_variables": {
-                            "type": "array",
-                            "description": "List of BPMN process variables"
-                        }
-                    },
-                    "required": ["form_definition", "process_variables"]
-                }
-            },
-            {
-                "name": "suggest_form_fields",
-                "description": "Suggest form fields based on context",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "form_description": {
-                            "type": "string",
-                            "description": "Description of form requirements"
-                        },
-                        "context": {
-                            "type": "object",
-                            "description": "Optional context"
-                        }
-                    },
-                    "required": ["form_description"]
-                }
-            }
-        ]
+            handler=self.find_forms,
+        ))
 
-    async def execute_tool(
-        self,
-        tool_name: str,
-        params: Dict[str, Any],
-        tenant_id: str
-    ) -> Dict[str, Any]:
-        """Execute a FORM tool."""
-        try:
-            if tool_name == "generate_form":
-                return await self._handle_generate_form(params, tenant_id)
-            elif tool_name == "validate_form":
-                return await self._handle_validate_form(params, tenant_id)
-            elif tool_name == "bind_form_to_process":
-                return await self._handle_bind_form_to_process(params, tenant_id)
-            elif tool_name == "suggest_form_fields":
-                return await self._handle_suggest_form_fields(params, tenant_id)
-            else:
-                return {"success": False, "error": f"Unknown tool: {tool_name}"}
-        except Exception as e:
-            logger.error(f"Error executing tool '{tool_name}': {e}", exc_info=True)
-            return {"success": False, "error": str(e)}
+    @staticmethod
+    def _identity(auth_token: Any, tenant_id: Any):
+        if not isinstance(auth_token, str) or not auth_token.strip():
+            raise ValueError("authentication token required")
+        if isinstance(tenant_id, bool) or tenant_id is None or not str(tenant_id).isdigit() or int(tenant_id) <= 0:
+            raise ValueError("tenant required")
+        return auth_token, int(tenant_id)
 
-    def _get_form_generation_prompt(self, org_context: Dict, form_requirements: Dict) -> str:
-        """Generate LLM prompt for BPM-aligned form schema"""
-
-        return """You are a form design expert that generates form definitions aligned with BPM FormSchema specification.
-
-## CRITICAL REQUIREMENTS
-
-1. **Form Structure (BPM Aligned)**:
-   - Return ONLY valid JSON FormSchema
-   - Use 'controls' array (not 'fields')
-   - Each control must have: id, type, label, props
-   - Support 37 control types (see list below)
-   - Support nested controls with 'children' array for layout types
-
-2. **37 Control Types**:
-
-   Basic Input (8):
-   - text, textarea, number, date, time, datetime, password, email
-
-   Select Controls (6):
-   - radio, checkbox, select, cascader, tree-select, switch
-
-   Advanced Input (7):
-   - richtext, file-upload, image-upload, signature, rating, color, slider
-
-   Layout Containers (4):
-   - grid, tabs, collapse, flex-container
-
-   Special Controls (5):
-   - subform, address, relation, data-table, computed-field
-
-   Business Controls (4):
-   - member-selector, role-selector, org-selector, process-selector
-
-   Display Controls (4):
-   - title, description, divider, html
-
-3. **Validation Rules (Complete Format)**:
-   - Use 'validation' field with array of ValidationRule objects
-   - Each rule: { "type": "required|email|pattern|min|max|minLength|maxLength|custom", "message": "..." }
-   - Example:
-     ```json
-     "validation": [
-       { "type": "required", "message": "This field is required" },
-       { "type": "email", "message": "Invalid email format" },
-       { "type": "minLength", "value": 6, "message": "At least 6 characters" }
-     ]
-     ```
-
-4. **Width and Layout**:
-   - width: "100%" | "50%" | "33%" | "25%" | "auto"
-   - For grid containers: use children with cellIndex
-   - Support flexProps for flex-container layouts
-
-5. **Field-Level Permissions (FORM-MCP Enhancement)**:
-   - Include permissions object for each control
-   - Structure:
-     ```json
-     "permissions": {
-       "view": { "condition": "role:approver", "applies_to": ["role:approver"] },
-       "edit": { "condition": "role:approver", "applies_to": ["role:approver"] },
-       "required": { "condition": "role:approver", "applies_to": ["role:approver"] }
-     }
-     ```
-
-6. **BPMN Binding (FORM-MCP Enhancement)**:
-   - Map form controls to BPMN process variables
-   - Include data_binding for applicable controls:
-     ```json
-     "data_binding": {
-       "bpmn_variable": "applicant_name",
-       "source_type": "user_input|calculated|from_membership|from_kb"
-     }
-     ```
-
-## OUTPUT FORMAT
-
-Return ONLY valid JSON with this structure:
-```json
-{
-  "formId": "form-001",
-  "version": "1.0.0",
-  "title": "Form Title",
-  "description": "Form description",
-  "controls": [
-    {
-      "id": "field-1",
-      "type": "text",
-      "label": "Name",
-      "props": { "required": true, "maxLength": 50 },
-      "width": "100%",
-      "permissions": { ... },
-      "data_binding": { ... }
-    }
-  ],
-  "validation": {
-    "rules": {
-      "field-1": [
-        { "type": "required", "message": "Name is required" }
-      ]
-    }
-  },
-  "form_type": "startup|task_specific|standalone",
-  "confidence_score": 0.95
-}
-```
-
-Do NOT include markdown, explanations, or comments.
-
-## ORGANIZATION CONTEXT
-""" + json.dumps(org_context, indent=2) + """
-
-## FORM REQUIREMENTS
-""" + json.dumps(form_requirements, indent=2)
-
-    async def _handle_generate_form(
-        self,
-        params: Dict[str, Any],
-        tenant_id: str
-    ) -> Dict[str, Any]:
-        """Generate form returning BPM-aligned FormSchema"""
-        form_name = params.get("form_name", "")
-        form_type = params.get("form_type", "standalone")
-        description = params.get("description", "")
-
-        # Validate parameters
-        if not form_name:
-            return {"success": False, "error": "form_name is required"}
-
-        try:
-            # Get organizational context
-            if not self.membership_client:
-                self.membership_client = FormMCPClient(
-                    self.membership_base_url,
-                    tenant_id
-                )
-
-            org_context = await self.membership_client.get_org_context()
-
-            # Prepare form requirements
-            form_requirements = {
-                "form_name": form_name,
-                "form_type": form_type,
-                "description": description,
-                "organization": org_context
-            }
-
-            # Generate prompt
-            prompt = self._get_form_generation_prompt(org_context, form_requirements)
-
-            # Call LLM using unified module
-            form_llm_client = get_llm_client(use_real_llm=self.use_real_llm)
-            llm_response = await form_llm_client.send_prompt(
-                system_prompt="You are a form generation expert. Generate form definitions in BPM FormSchema JSON format.",
-                user_prompt=prompt
+    async def _read_forms(self, token: str, tenant: int) -> List[Dict[str, Any]]:
+        """Every form of the tenant, page by page. Anything short of the reported total is an error, never a partial answer."""
+        seen: Dict[Any, Dict[str, Any]] = {}
+        total: Optional[int] = None
+        for page in range(1, self.MAX_PAGES + 1):
+            response = await self.http_client.execute(
+                command=self.FORMS_COMMAND,
+                params={"query": {"page": page, "page_size": self.PAGE_SIZE}},
+                auth_token=token,
+                tenant_id=tenant,
             )
+            raw = response.get("data") if isinstance(response, dict) else None
+            meta = response.get("meta") if isinstance(response, dict) else None
+            reported = meta.get("total") if isinstance(meta, dict) else None
+            if not isinstance(raw, list) or isinstance(reported, bool) or not isinstance(reported, int) or reported < 0:
+                raise FormsIncomplete("the list has no readable total")
+            if total is not None and reported != total:
+                raise FormsIncomplete("the total changed while the list was read")
+            total = reported
+            fresh = [f for f in raw if isinstance(f, dict) and f.get("formKey") not in seen]
+            for form in fresh:
+                seen[form.get("formKey")] = form
+            if len(seen) >= total:
+                return list(seen.values())
+            if not fresh:
+                raise FormsIncomplete("the endpoint returned nothing new before the total was reached")
+        raise FormsIncomplete("the page bound was reached before the total")
 
-            # Parse JSON response using unified extraction utility
-            form_schema = extract_json_from_response(llm_response)
+    @staticmethod
+    def _fields(form: Dict[str, Any]) -> List[Dict[str, Any]]:
+        schema = form.get("formSchema")
+        properties = schema.get("properties") if isinstance(schema, dict) else None
+        required = set(schema.get("required") or []) if isinstance(schema, dict) and isinstance(schema.get("required"), list) else set()
+        out: List[Dict[str, Any]] = []
+        if isinstance(properties, dict):
+            for key, spec in properties.items():
+                spec = spec if isinstance(spec, dict) else {}
+                item = {"key": key, "title": spec.get("title"), "type": spec.get("type"), "required": key in required}
+                if spec.get("format"):
+                    item["format"] = spec.get("format")
+                out.append(item)
+        return out
 
-            if form_schema is None:
-                return {
-                    "success": False,
-                    "error": "Failed to parse LLM response as JSON",
-                    "raw_response": llm_response[:200] if llm_response else "Empty response"
-                }
-
-            # Validate generated form
-            validator = FormValidator()
-            validation_result = await validator.validate_form(tenant_id, form_schema)
-
-            if not validation_result["valid"] and validation_result.get("errors"):
-                return {
-                    "success": False,
-                    "error": "Generated form failed validation",
-                    "validation_errors": validation_result["errors"]
-                }
-
-            # Return success result
-            return {
-                "success": True,
-                "form_definition": form_schema,
-                "validation_warnings": validation_result.get("warnings", []),
-                "confidence_score": form_schema.get("confidence_score", 0.85)
-            }
-
-        except Exception as e:
-            logger.error(f"Error generating form: {str(e)}")
-            return {
-                "success": False,
-                "error": f"Form generation failed: {str(e)}"
-            }
-
-    async def _handle_validate_form(
-        self,
-        params: Dict[str, Any],
-        tenant_id: str
-    ) -> Dict[str, Any]:
-        """Validate form in BPM FormSchema format"""
-        form_definition = params.get("form_definition")
-        strict_mode = params.get("strict_mode", False)
-
-        if not form_definition:
-            return {"success": False, "error": "form_definition is required"}
-
+    async def find_forms(self, query: Optional[str] = None, auth_token: Any = None, tenant_id: Any = None) -> ToolResult:
+        if query is not None and (not isinstance(query, str) or len(query.strip()) > self.MAX_QUERY):
+            return ToolResult.error(f"query must be a text of at most {self.MAX_QUERY} characters", error_code="INVALID_PARAMS")
         try:
-            validator = FormValidator()
-
-            # Convert fields -> controls (backward compatibility)
-            if "fields" in form_definition and "controls" not in form_definition:
-                form_definition["controls"] = form_definition.pop("fields")
-
-            # Validate form
-            validation_result = await validator.validate_form(
-                tenant_id,
-                form_definition,
-                strict_mode=strict_mode
-            )
-
-            return {
-                "success": validation_result["valid"],
-                "valid": validation_result["valid"],
-                "errors": validation_result.get("errors", []),
-                "warnings": validation_result.get("warnings", []),
-                "issues": validation_result.get("issues", {}),
-                "confidence_score": validation_result.get("confidence_score", 0.85)
-            }
-
-        except Exception as e:
-            logger.error(f"Error validating form: {str(e)}")
-            return {
-                "success": False,
-                "error": f"Validation failed: {str(e)}"
-            }
-
-    async def _handle_bind_form_to_process(
-        self,
-        params: Dict[str, Any],
-        tenant_id: str
-    ) -> Dict[str, Any]:
-        """Bind form controls to BPMN process variables"""
-        form_definition = params.get("form_definition")
-        process_variables = params.get("process_variables", [])
-
-        if not form_definition:
-            return {"success": False, "error": "form_definition is required"}
-
+            token, tenant = self._identity(auth_token, tenant_id)
+        except ValueError as e:
+            return ToolResult.error(f"Caller identity is required: {e}", error_code="IDENTITY_REQUIRED")
         try:
-            # Get controls (support both old "fields" and new "controls" format)
-            controls = form_definition.get("controls") or form_definition.get("fields", [])
-
-            # Perform binding
-            mapped_variables = []
-            unmapped_variables = list(process_variables)
-
-            for control in controls:
-                if "data_binding" in control:
-                    bpmn_var = control["data_binding"].get("bpmn_variable")
-                    if bpmn_var in unmapped_variables:
-                        mapped_variables.append(bpmn_var)
-                        unmapped_variables.remove(bpmn_var)
-
-            return {
-                "success": True,
-                "process_variables_mapped": mapped_variables,
-                "unmapped_variables": unmapped_variables,
-                "binding_coverage": len(mapped_variables) / len(process_variables) if process_variables else 0
-            }
-
+            forms = await self._read_forms(token, tenant)
+        except FormsIncomplete as e:
+            logger.warning("Form list is incomplete: %s", e)
+            return ToolResult.error("The tenant's form list could not be read completely, so no answer is given", error_code="FORMS_INCOMPLETE")
+        except ValueError:
+            return ToolResult.error("Caller identity is required", error_code="IDENTITY_REQUIRED")
         except Exception as e:
-            logger.error(f"Error binding form: {str(e)}")
-            return {"success": False, "error": str(e)}
+            status_code = getattr(getattr(e, "response", None), "status_code", None)
+            logger.error("Reading the forms failed: %s", type(e).__name__)
+            if status_code in (401, 403):
+                return ToolResult.error("Not allowed to read forms", error_code="FORBIDDEN")
+            return ToolResult.error("Failed to read forms", error_code="FORMS_FAILED")
 
-    async def _handle_suggest_form_fields(
-        self,
-        params: Dict[str, Any],
-        tenant_id: str
-    ) -> Dict[str, Any]:
-        """Suggest form fields based on description"""
-        form_description = params.get("form_description", "")
-
-        if not form_description:
-            return {"success": False, "error": "form_description is required"}
-
-        try:
-            # Analyze description and suggest fields
-            suggestions = self._analyze_form_description(form_description)
-
-            return {
-                "success": True,
-                "suggestions": suggestions,
-                "recommended_control_types": self._recommend_control_types(form_description)
-            }
-
-        except Exception as e:
-            logger.error(f"Error suggesting fields: {str(e)}")
-            return {"success": False, "error": str(e)}
-
-    def _analyze_form_description(self, description: str) -> List[Dict]:
-        """Analyze form description and suggest field configurations"""
-        suggestions = []
-
-        keywords = {
-            "name": ("text", "姓名"),
-            "email": ("email", "邮箱"),
-            "phone": ("text", "电话"),
-            "date": ("date", "日期"),
-            "amount": ("number", "金额"),
-            "select": ("select", "选择"),
-            "approve": ("radio", "批准"),
-            "upload": ("file-upload", "上传"),
-            "signature": ("signature", "签名"),
+        wanted = (query or "").strip().lower()
+        matched = [f for f in forms
+                   if not wanted or wanted in str(f.get("formKey", "")).lower() or wanted in str(f.get("formName", "")).lower()]
+        matched.sort(key=lambda f: str(f.get("formKey", "")))
+        payload = {
+            "total": len(forms),
+            "matched": len(matched),
+            "forms": [
+                {"formKey": f.get("formKey"), "formName": f.get("formName"), "status": f.get("status"),
+                 "version": f.get("version"), "fields": self._fields(f)}
+                for f in matched[:self.MAX_RESULTS]
+            ],
         }
-
-        for keyword, (field_type, label) in keywords.items():
-            if keyword.lower() in description.lower():
-                suggestions.append({
-                    "field_type": field_type,
-                    "suggested_label": label,
-                    "recommended_width": "50%" if field_type in ["text", "email"] else "100%"
-                })
-
-        return suggestions
-
-    def _recommend_control_types(self, description: str) -> List[str]:
-        """Recommend control types based on form description"""
-        recommendations = []
-
-        # Check if containers are needed
-        if any(word in description.lower() for word in ["section", "group", "layout", "grid"]):
-            recommendations.extend(["grid", "tabs", "collapse"])
-
-        # Check if business controls are needed
-        if any(word in description.lower() for word in ["member", "user", "department", "role"]):
-            recommendations.extend(["member-selector", "org-selector"])
-
-        # Check if advanced controls are needed
-        if any(word in description.lower() for word in ["rich", "editor", "signature", "upload"]):
-            recommendations.extend(["richtext", "signature", "file-upload"])
-
-        return recommendations
-
-    async def _handle_suggest_fields(
-        self,
-        params: Dict[str, Any],
-        tenant_id: str
-    ) -> Dict[str, Any]:
-        """Handle suggest_form_fields tool execution (legacy name)."""
-        return await self._handle_suggest_form_fields(params, tenant_id)
+        return ToolResult.success(content=json.dumps(payload, ensure_ascii=False, separators=(",", ":")), data=payload)
