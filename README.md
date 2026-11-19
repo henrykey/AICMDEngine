@@ -2,9 +2,9 @@
 
 **AICMDEngine** (AI Code Management Development Engine) 是一个智能中间件，将自然语言目标转化为可执行的计划。它通过整合 AI 能力和多租户组织管理，提供端到端的任务规划、命令执行和结果反馈系统。
 
-## 最新版本：v1.2.8
+## 最新版本：v1.2.9
 
-本版为 Workflow 设计接入增加 Membership MCP 组织、角色查询和 Form MCP 的表单查找、建议能力，工具通过现有 MCP Router 调用。变更和验证范围见 [发布说明](RELEASE_NOTES_v1.2.8.md) 与 [Changelog](CHANGELOG.md)。
+本版合并 v1.2.8 的 Workflow 目录查询、表单查找与建议能力，以及本地 PDF2MD 模型限流处理和公式语义映射失败诊断。此次发布仅完成合并与静态核对，未重跑测试、构建或部署。变更和验证范围见 [发布说明](RELEASE_NOTES_v1.2.9.md) 与 [Changelog](CHANGELOG.md)。
 
 ## 📋 项目概述
 

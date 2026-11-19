@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.2.9 - 2026-11-19
+
+### Merged
+
+- Merged v1.2.8 into local main without conflicts, preserving both local PDF2MD commits (`a8e022d`, `01174c9`) and the remote Workflow MCP features.
+- Retained structured organization/role lookup, read-only `find_forms`, and model-free `suggest_form` using Membership validation.
+
+### Fixed
+
+- Added PDF2MD model error classification and propagation for temporary rate limits (`MODEL_RATE_LIMITED`), exhausted quota (`MODEL_QUOTA_EXHAUSTED`), and authentication failures (`MODEL_AUTH_FAILED`).
+- Added structured `FORMULA_MAPPING_FAILED` diagnostics with a reason and target index when formula targets cannot be uniquely mapped to source layouts, before model invocation.
+
+### Verification and limitations
+
+- Reviewed the merge diff; all 16 locally changed files and 11 remotely changed files retained their respective parent content. Git diff whitespace checks passed.
+- No tests, builds, real-model calls, deployment, or service restarts were performed for this merge/release. CodeGraph status could not open its database; no rebuild was performed.
+- End-to-end rate-limit recovery, real-provider behavior, and the merged runtime remain unverified. Earlier release verification does not validate this combined version.
+- See [Release Notes — v1.2.9](RELEASE_NOTES_v1.2.9.md).
+
 ## v1.2.8 - 2026-11-19
 
 ### Added
