@@ -104,11 +104,7 @@ async def startup_db_client():
             use_real_llm=False,
             kb_base_url=settings.kb_base_url
         )
-        form_mcp = FORM_MCP(
-            membership_base_url=settings.membership_service_url,
-            use_real_llm=False,
-            kb_base_url=settings.kb_base_url
-        )
+        form_mcp = FORM_MCP(membership_base_url=settings.membership_service_url)
 
         mcp_registry.register_mcp(membership_mcp)
         mcp_registry.register_mcp(test_mcp)

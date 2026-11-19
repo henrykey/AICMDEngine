@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.2.8 - 2026-11-19
+
+### Added
+
+- Added structured organization and role lookup through Membership MCP, with localized messages and complete directory pagination.
+- Added read-only Form MCP `find_forms` and model-free `suggest_form` through the existing MCP Router; suggestions use Membership form schemas and its existing validation.
+
+### Changed
+
+- Replaced the previous Form MCP tools that could not be discovered or called through the Router. Tool requests use the caller identity and tenant supplied through the existing path.
+
+### Verification and limitations
+
+- The Workflow leave scenario exercised these tools through the Router with a model stand-in, real browser, backend and workflow engine; it does not validate real-model output or production deployment.
+- Existing Workflow reports record focused tests; the directory tests used a nonstandard local test setup. No full suite or new deployment is claimed by this release.
+- See [Release Notes — v1.2.8](RELEASE_NOTES_v1.2.8.md).
+
 ## v1.2.7 - 2026-11-07
 
 ### Added
